@@ -301,7 +301,49 @@ An external auditor should be able to recompute:
 
 ---
 
-## 11) Implementation guidance (Rust-first)
+## 11) Build vs fork decisions (ADR)
+
+This section records architecture decisions so we don’t drift later.
+
+### ADR-0001: Chain strategy — fork Sui vs build on Sui
+
+**Decision (MVP):** build *on top of Sui* (application layer) instead of forking Sui core.
+
+**Meaning in practice:**
+
+- Implement PoCC, jobs, receipts, settlement as **Move packages** (and off-chain services).
+- Treat Sui validator/consensus/storage/RPC as the underlying platform.
+
+**Why:** fastest path to a secure, production-grade base. Avoids long-term maintenance cost of a core fork while the product is still validating assumptions.
+
+**When we revisit:** if we require protocol-level changes that Sui cannot provide (e.g., deep changes to epoch mechanics, fee markets, consensus rules, custom execution semantics).
+
+### ADR-0002: Worker strategy — fork Ollama vs build a Miraset worker
+
+**Decision (MVP):** do **not** fork Ollama. Build a dedicated `miraset-worker` service (Rust) that uses Ollama as an interchangeable inference backend.
+
+**Meaning in practice:**
+
+- `miraset-worker` exposes the Miraset job API and implements signing/receipts.
+- For inference, it calls local Ollama (HTTP API) or other engines (vLLM, etc.).
+
+**Why:**
+
+- Keeps our protocol logic (receipt hashing, signatures, telemetry, retries) in one place.
+- Avoids maintaining a Go fork.
+- Lets us swap inference backends without changing the chain protocol.
+
+### ADR-0003: Transport — HTTP API vs gRPC/RPC
+
+**Decision (MVP):** hybrid transports.
+
+- **Edge (Worker API):** HTTP + streaming (SSE or chunked HTTP). Simple, debuggable, proxy-friendly.
+- **Internal (Coordinator/Indexer/Watchers):** gRPC recommended (strict schemas, efficient streaming).
+- **Chain client access:** chain-native RPC (whatever the platform provides; indexer consumes events).
+
+---
+
+## 12) Implementation guidance (Rust-first)
 
 > The repository currently states “Rust backed app”. Below is a concrete, buildable direction for a Rust workspace.
 
@@ -331,7 +373,7 @@ An external auditor should be able to recompute:
 
 ---
 
-## 12) MVP → Next steps
+## 13) MVP → Next steps
 
 ### MVP deliverables
 
