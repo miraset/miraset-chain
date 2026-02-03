@@ -44,7 +44,7 @@ impl fmt::Display for Address {
 }
 
 /// Keypair for signing
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct KeyPair {
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
