@@ -129,17 +129,6 @@ impl State {
         }
     }
 
-    pub fn add_balance(&self, addr: &Address, amount: u64) {
-        let mut w = self.inner.write();
-        let new_balance = w.balances.entry(*addr).or_insert(0);
-        *new_balance += amount;
-        
-        // Persist to storage
-        if let Some(ref storage) = self.storage {
-            let _ = storage.save_balance(addr, *new_balance);
-        }
-    }
-
     pub fn submit_transaction(&self, tx: Transaction) -> Result<(), String> {
         // Basic validation
         let from = tx.from();
@@ -289,6 +278,18 @@ impl State {
                     timestamp: Utc::now(),
                 };
                 self.emit_event(w, event);
+            }
+
+            Transaction::MoveCall { sender, .. } => {
+                // Move calls are handled by the executor
+                // This is just a placeholder for block inclusion
+                tracing::info!("MoveCall transaction from {:?} included in block {}", sender, height);
+            }
+
+            Transaction::PublishModule { sender, .. } => {
+                // Module publishing is handled by the executor
+                // This is just a placeholder for block inclusion
+                tracing::info!("PublishModule transaction from {:?} included in block {}", sender, height);
             }
 
             Transaction::RegisterWorker {
@@ -645,8 +646,8 @@ impl State {
 
     // ===== Object-centric methods (Sui-like) =====
 
-    /// Create a new object
-    pub fn create_object(&self, owner: Address, data: ObjectData) -> ObjectId {
+    /// Create a new object from data (convenience method)
+    pub fn create_object_from_data(&self, owner: Address, data: ObjectData) -> ObjectId {
         let mut w = self.inner.write();
         let obj = Object::new(owner, data);
         let obj_id = obj.id;
@@ -720,6 +721,58 @@ impl State {
         w.owned_objects.entry(*to).or_insert_with(Vec::new).push(*object_id);
 
         Ok(())
+    }
+
+    /// Create a new object and store it
+    pub fn create_object(&self, object: Object) -> Result<(), String> {
+        let mut w = self.inner.write();
+
+        let object_id = object.id;
+        let owner = object.owner;
+
+        // Store object
+        w.objects.insert(object_id, object);
+        w.object_versions.insert(object_id, 0);
+
+        // Update ownership index
+        w.owned_objects.entry(owner).or_insert_with(Vec::new).push(object_id);
+
+        Ok(())
+    }
+
+    /// Update an existing object (used by executor)
+    pub fn update_object(&self, object: Object) -> Result<(), String> {
+        let mut w = self.inner.write();
+
+        let object_id = object.id;
+
+        if !w.objects.contains_key(&object_id) {
+            return Err("Object not found".into());
+        }
+
+        // Update version
+        w.object_versions.insert(object_id, object.version);
+
+        // Update object
+        w.objects.insert(object_id, object);
+
+        Ok(())
+    }
+
+    /// Add balance (can be negative for deductions)
+    pub fn add_balance(&self, addr: &Address, amount: i64) {
+        let mut w = self.inner.write();
+        let balance = w.balances.entry(*addr).or_insert(0);
+        if amount < 0 {
+            *balance = balance.saturating_sub(amount.unsigned_abs());
+        } else {
+            *balance = balance.saturating_add(amount as u64);
+        }
+
+        // Persist to storage
+        if let Some(ref storage) = self.storage {
+            let _ = storage.save_balance(addr, *balance);
+        }
     }
 
     /// Get all workers

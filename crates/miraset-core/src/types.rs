@@ -310,6 +310,32 @@ pub enum Transaction {
         #[serde(with = "signature_serde")]
         signature: [u8; 64],
     },
+    /// Call a Move function (Sui-like programmable transaction)
+    MoveCall {
+        sender: Address,
+        function: MoveFunction,
+        type_args: Vec<String>,
+        args: Vec<Vec<u8>>,
+        nonce: u64,
+        #[serde(with = "signature_serde")]
+        signature: [u8; 64],
+    },
+    /// Publish Move modules
+    PublishModule {
+        sender: Address,
+        modules: Vec<Vec<u8>>, // Compiled Move bytecode
+        nonce: u64,
+        #[serde(with = "signature_serde")]
+        signature: [u8; 64],
+    },
+}
+
+/// Move function identifier for MoveCall transactions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveFunction {
+    pub package: Vec<u8>,  // Package address (32 bytes)
+    pub module: String,    // Module name
+    pub function: String,  // Function name
 }
 
 impl Transaction {
@@ -327,6 +353,8 @@ impl Transaction {
             Self::AnchorReceipt { submitter, .. } => submitter,
             Self::ChallengeJob { challenger, .. } => challenger,
             Self::ChatSend { from, .. } => from,
+            Self::MoveCall { sender, .. } => sender,
+            Self::PublishModule { sender, .. } => sender,
         }
     }
 
@@ -344,6 +372,8 @@ impl Transaction {
             Self::AnchorReceipt { nonce, .. } => *nonce,
             Self::ChallengeJob { nonce, .. } => *nonce,
             Self::ChatSend { nonce, .. } => *nonce,
+            Self::MoveCall { nonce, .. } => *nonce,
+            Self::PublishModule { nonce, .. } => *nonce,
         }
     }
 
@@ -361,6 +391,8 @@ impl Transaction {
             Self::AnchorReceipt { signature, .. } => signature,
             Self::ChallengeJob { signature, .. } => signature,
             Self::ChatSend { signature, .. } => signature,
+            Self::MoveCall { signature, .. } => signature,
+            Self::PublishModule { signature, .. } => signature,
         }
     }
 

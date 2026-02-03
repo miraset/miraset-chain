@@ -1786,6 +1786,7 @@ dependencies = [
  "anyhow",
  "axum",
  "bincode",
+ "blake3",
  "chrono",
  "miraset-core",
  "once_cell",
