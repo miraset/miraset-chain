@@ -48,7 +48,37 @@ Start a local development node:
 ./target/release/miraset node start
 ```
 
-Data automatically saved to `./data/` directory!
+Data automatically saved to `.data/` directory!
+
+**Configuration Options:**
+
+```bash
+# Custom storage path
+./target/release/miraset node start --storage-path /my/data
+
+# Custom RPC address
+./target/release/miraset node start --rpc-addr 0.0.0.0:9944
+
+# Custom block interval (seconds)
+./target/release/miraset node start --block-interval 10
+```
+
+**Config File** (`miraset.toml` in project root):
+```toml
+[node]
+rpc_addr = "127.0.0.1:9944"
+storage_path = ".data"
+block_interval = 5
+```
+
+**Environment Variables:**
+```bash
+export MIRASET_RPC_ADDR="127.0.0.1:9944"
+export MIRASET_STORAGE_PATH=".data"
+export MIRASET_BLOCK_INTERVAL="5"
+```
+
+Precedence: CLI flags > Env vars > Config file > Defaults
 
 ### Run Multi-Node Setup (Docker)
 
@@ -163,6 +193,7 @@ See `docs/`:
 
 - **[QUICKSTART.md](QUICKSTART.md)** - Quick start guide
 - **[USER_GUIDE.md](USER_GUIDE.md)** - Complete user manual
+- **[CONFIGURATION.md](CONFIGURATION.md)** - Configuration options & precedence ✨ **NEW**
 - **[PERSISTENCE.md](PERSISTENCE.md)** - Storage & multi-node guide ✨ **NEW**
 - **[DOCKER.md](DOCKER.md)** - Docker detailed guide ✨ **NEW**
 - **[TESTING.md](TESTING.md)** - Test documentation

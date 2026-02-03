@@ -1,9 +1,89 @@
 use clap::{Parser, Subcommand};
 use miraset_core::{Address, KeyPair, Transaction};
-use miraset_node::State;
+use miraset_node::{State, Storage};
 use miraset_wallet::Wallet;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
+
+/// Configuration file structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Config {
+    #[serde(default)]
+    node: NodeConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NodeConfig {
+    #[serde(default = "default_rpc_addr")]
+    rpc_addr: String,
+    #[serde(default = "default_storage_path")]
+    storage_path: String,
+    #[serde(default = "default_block_interval")]
+    block_interval: u64,
+}
+
+impl Default for NodeConfig {
+    fn default() -> Self {
+        Self {
+            rpc_addr: default_rpc_addr(),
+            storage_path: default_storage_path(),
+            block_interval: default_block_interval(),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            node: NodeConfig::default(),
+        }
+    }
+}
+
+fn default_rpc_addr() -> String {
+    "127.0.0.1:9944".to_string()
+}
+
+fn default_storage_path() -> String {
+    ".data".to_string()
+}
+
+fn default_block_interval() -> u64 {
+    5
+}
+
+/// Load configuration with precedence: CLI flags > Env vars > Config file > Defaults
+fn load_config() -> Config {
+    // Try to load from miraset.toml in project root (silent if missing)
+    let config_path = PathBuf::from("miraset.toml");
+    if config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(config) = toml::from_str::<Config>(&content) {
+                return config;
+            }
+        }
+    }
+    
+    // Return defaults if config file not found or invalid
+    Config::default()
+}
+
+/// Apply environment variable overrides (MIRASET_* prefix)
+fn apply_env_overrides(mut config: Config) -> Config {
+    if let Ok(val) = std::env::var("MIRASET_RPC_ADDR") {
+        config.node.rpc_addr = val;
+    }
+    if let Ok(val) = std::env::var("MIRASET_STORAGE_PATH") {
+        config.node.storage_path = val;
+    }
+    if let Ok(val) = std::env::var("MIRASET_BLOCK_INTERVAL") {
+        if let Ok(interval) = val.parse::<u64>() {
+            config.node.block_interval = interval;
+        }
+    }
+    config
+}
 
 #[derive(Parser)]
 #[command(name = "miraset")]
@@ -38,6 +118,10 @@ enum NodeCommands {
     Start {
         #[arg(long, default_value = "127.0.0.1:9944")]
         rpc_addr: String,
+        #[arg(long)]
+        storage_path: Option<String>,
+        #[arg(long)]
+        block_interval: Option<u64>,
     },
 }
 
@@ -119,9 +203,27 @@ async fn main() -> anyhow::Result<()> {
 
 async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
     match cmd {
-        NodeCommands::Start { rpc_addr } => {
+        NodeCommands::Start { rpc_addr, storage_path, block_interval } => {
+            // Load config with precedence: CLI > Env > File > Defaults
+            let mut config = load_config();
+            config = apply_env_overrides(config);
+            
+            // CLI flags override everything
+            let final_rpc_addr = rpc_addr;
+            let final_storage_path = storage_path.unwrap_or(config.node.storage_path);
+            let final_block_interval = block_interval.unwrap_or(config.node.block_interval);
+            
             println!("Starting Miraset devnet node...");
-            let state = State::new();
+            println!("RPC address: {}", final_rpc_addr);
+            println!("Storage path: {}", final_storage_path);
+            println!("Block interval: {}s", final_block_interval);
+            
+            // Open persistent storage
+            let storage = Storage::open(&final_storage_path)?;
+            println!("Storage opened at: {}", final_storage_path);
+            
+            // Initialize state with persistent storage
+            let state = State::new_with_storage(Some(storage.clone()));
 
             // Fund genesis account for testing (fixed for devnet)
             // Using a fixed secret for reproducibility in devnet
@@ -134,11 +236,11 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             // Start block producer
             let producer_state = state.clone();
             tokio::spawn(async move {
-                miraset_node::run_block_producer(producer_state, Duration::from_secs(5)).await;
+                miraset_node::run_block_producer(producer_state, Duration::from_secs(final_block_interval)).await;
             });
 
             // Start RPC
-            let addr: std::net::SocketAddr = rpc_addr.parse()?;
+            let addr: std::net::SocketAddr = final_rpc_addr.parse()?;
             println!("RPC listening on http://{}", addr);
             miraset_node::serve_rpc(state, addr).await?;
         }

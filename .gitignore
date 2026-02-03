@@ -36,6 +36,10 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+
+*.data/
+.data/
+# Blockchain data
 # Test coverage
 *.profraw
 *.profdata

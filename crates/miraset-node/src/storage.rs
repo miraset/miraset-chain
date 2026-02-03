@@ -2,17 +2,19 @@ use anyhow::Result;
 use miraset_core::{Address, Block, Event};
 use sled::Db;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Persistent storage using Sled (pure Rust embedded database)
+#[derive(Clone)]
 pub struct Storage {
-    db: Db,
+    db: Arc<Db>,
 }
 
 impl Storage {
     /// Open or create a new storage at the given path
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let db = sled::open(path)?;
-        Ok(Self { db })
+        Ok(Self { db: Arc::new(db) })
     }
 
     /// Save a block

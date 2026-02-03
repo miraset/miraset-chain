@@ -40,14 +40,17 @@
 ### Локально с персистентностью
 
 ```bash
-# Запустить ноду (данные в ./data)
+# Запустить ноду (данные в .data)
 cargo run --bin miraset -- node start
 
 # Данные сохраняются
-ls -lh ./data/
+ls -lh .data/
 
 # Перезапустить - данные остаются!
 cargo run --bin miraset -- node start
+
+# Кастомный путь
+cargo run --bin miraset -- node start --storage-path /my/data
 ```
 
 ### Docker Multi-Node

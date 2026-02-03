@@ -13,7 +13,7 @@ Miraset Chain now supports:
 ### How It Works
 
 - **Engine**: Sled (pure Rust embedded database)
-- **Location**: `./data` directory (or Docker volume)
+- **Location**: `.data` directory (configurable via CLI or config file)
 - **Data Stored**:
   - Blocks (all blockchain history)
   - Account balances
@@ -28,20 +28,52 @@ Miraset Chain now supports:
 ✅ **Pure Rust**: No C dependencies, works on Windows  
 ✅ **Reliable**: ACID guarantees  
 ✅ **Cross-platform**: Same code on all OSes  
+✅ **Configurable**: Set storage path via CLI, env, or config file
+
+### Configuration
+
+Storage path can be configured via:
+
+1. **CLI flags** (highest priority):
+   ```bash
+   cargo run --bin miraset -- node start --storage-path /custom/path
+   ```
+
+2. **Environment variables**:
+   ```bash
+   export MIRASET_STORAGE_PATH=/custom/path
+   cargo run --bin miraset -- node start
+   ```
+
+3. **Config file** (`miraset.toml` in project root):
+   ```toml
+   [node]
+   storage_path = ".data"
+   rpc_addr = "127.0.0.1:9944"
+   block_interval = 5
+   ```
+
+4. **Default**: `.data` (relative to working directory)  
 
 ### Usage
 
 Storage is **automatic** - no configuration needed!
 
 ```bash
-# Start node (creates ./data if doesn't exist)
+# Start node (creates .data if doesn't exist)
 cargo run --bin miraset -- node start
 
 # Data persists here
-ls ./data/
+ls .data/
 
 # Restart node - data is still there!
 cargo run --bin miraset -- node start
+
+# Custom storage path
+cargo run --bin miraset -- node start --storage-path /my/data
+
+# Custom block interval
+cargo run --bin miraset -- node start --block-interval 10
 ```
 
 ### Storage Module API
@@ -50,7 +82,7 @@ cargo run --bin miraset -- node start
 use miraset_node::Storage;
 
 // Open storage
-let storage = Storage::open("./data")?;
+let storage = Storage::open(".data")?;
 
 // Save block
 storage.save_block(&block)?;
@@ -69,13 +101,13 @@ let balance = storage.get_balance(&address)?;
 
 ```bash
 # Backup data
-cp -r ./data ./data.backup
+cp -r .data .data.backup
 
 # Clear all data (fresh start)
-rm -rf ./data
+rm -rf .data
 
 # View storage size
-du -sh ./data
+du -sh .data
 ```
 
 ---
@@ -217,7 +249,7 @@ docker run --rm \
 
 **On Host** (when running locally):
 ```
-./data/
+.data/
 ```
 
 **In Docker** (mapped to volume):
