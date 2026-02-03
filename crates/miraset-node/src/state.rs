@@ -5,12 +5,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use crate::storage::Storage;
 use crate::epoch::{Epoch, EpochStatus, WorkerEpochStats, JobResult as EpochJobResult};
+use crate::gas::GasConfig;
 use chrono::Utc;
 
 #[derive(Clone)]
 pub struct State {
     inner: Arc<RwLock<StateInner>>,
     storage: Option<Storage>,
+    gas_config: Arc<GasConfig>,
 }
 
 struct StateInner {
@@ -83,7 +85,18 @@ impl State {
                 past_epochs: Vec::new(),
             })),
             storage,
+            gas_config: Arc::new(GasConfig::default()),
         }
+    }
+
+    /// Get gas configuration
+    pub fn gas_config(&self) -> Arc<GasConfig> {
+        Arc::clone(&self.gas_config)
+    }
+
+    /// Set gas configuration (for governance)
+    pub fn set_gas_config(&mut self, config: GasConfig) {
+        self.gas_config = Arc::new(config);
     }
 
     pub fn get_balance(&self, addr: &Address) -> u64 {

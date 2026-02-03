@@ -1,9 +1,13 @@
 pub mod epoch;
+pub mod gas;
+pub mod move_vm;
 pub mod rpc;
 pub mod state;
 pub mod storage;
 
 pub use epoch::{Epoch, EpochRewards, EpochStatus, WorkerEpochStats};
+pub use gas::{GasConfig, GasBudget, GasStatus, GasCost, GasCoin};
+pub use move_vm::{MoveVMSession, ModuleId, FunctionId, MoveValue, MoveType};
 pub use rpc::serve_rpc;
 pub use state::State;
 pub use storage::Storage;
