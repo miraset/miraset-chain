@@ -18,10 +18,10 @@ pub async fn serve_rpc(state: State, addr: SocketAddr) -> anyhow::Result<()> {
     let rpc_state = RpcState { state };
 
     let app = Router::new()
-        .route("/balance/:address", get(get_balance))
-        .route("/nonce/:address", get(get_nonce))
+        .route("/balance/{address}", get(get_balance))
+        .route("/nonce/{address}", get(get_nonce))
         .route("/block/latest", get(get_latest_block))
-        .route("/block/:height", get(get_block_by_height))
+        .route("/block/{height}", get(get_block_by_height))
         .route("/events", get(get_events))
         .route("/chat/messages", get(get_chat_messages))
         .route("/tx/submit", post(submit_transaction))

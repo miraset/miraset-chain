@@ -114,4 +114,97 @@ mod tests {
         let addr2 = Address::from_hex(&hex).unwrap();
         assert_eq!(addr, addr2);
     }
+
+    #[test]
+    fn test_keypair_from_bytes() {
+        let secret = [42u8; 32];
+        let kp1 = KeyPair::from_bytes(&secret);
+        let kp2 = KeyPair::from_bytes(&secret);
+
+        // Same secret should produce same address
+        assert_eq!(kp1.address(), kp2.address());
+        assert_eq!(kp1.secret_bytes(), kp2.secret_bytes());
+    }
+
+    #[test]
+    fn test_signature_replay() {
+        let kp = KeyPair::generate();
+        let msg1 = b"message 1";
+        let msg2 = b"message 2";
+
+        let sig1 = kp.sign(msg1);
+        let sig2 = kp.sign(msg2);
+
+        // Each message should have unique signature
+        assert_ne!(sig1, sig2);
+
+        // Signatures should not be interchangeable
+        assert!(!verify_signature(&kp.address(), msg1, &sig2));
+        assert!(!verify_signature(&kp.address(), msg2, &sig1));
+    }
+
+    #[test]
+    fn test_invalid_signature() {
+        let kp = KeyPair::generate();
+        let msg = b"test message";
+        let sig = kp.sign(msg);
+
+        // Modify signature
+        let mut bad_sig = sig;
+        bad_sig[0] = bad_sig[0].wrapping_add(1);
+
+        assert!(!verify_signature(&kp.address(), msg, &bad_sig));
+    }
+
+    #[test]
+    fn test_wrong_address() {
+        let kp1 = KeyPair::generate();
+        let kp2 = KeyPair::generate();
+        let msg = b"test";
+        let sig = kp1.sign(msg);
+
+        // Signature from kp1 should not verify with kp2's address
+        assert!(!verify_signature(&kp2.address(), msg, &sig));
+    }
+
+    #[test]
+    fn test_address_from_invalid_hex() {
+        assert!(Address::from_hex("invalid").is_err());
+        assert!(Address::from_hex("").is_err());
+        assert!(Address::from_hex("00").is_err()); // Too short
+    }
+
+    #[test]
+    fn test_address_display() {
+        let kp = KeyPair::generate();
+        let addr = kp.address();
+        let display = format!("{}", addr);
+
+        // Display should be 8 characters (first 8 hex chars)
+        assert_eq!(display.len(), 8);
+    }
+
+    #[test]
+    fn test_address_debug() {
+        let kp = KeyPair::generate();
+        let addr = kp.address();
+        let debug = format!("{:?}", addr);
+
+        // Debug should contain full hex
+        assert!(debug.contains("Address("));
+        assert!(debug.len() > 40); // Address(64 hex chars...)
+    }
+
+    #[test]
+    fn test_signature_deterministic() {
+        let secret = [7u8; 32];
+        let kp = KeyPair::from_bytes(&secret);
+        let msg = b"deterministic test";
+
+        let sig1 = kp.sign(msg);
+        let sig2 = kp.sign(msg);
+
+        // Same keypair and message should produce same signature
+        assert_eq!(sig1, sig2);
+    }
 }

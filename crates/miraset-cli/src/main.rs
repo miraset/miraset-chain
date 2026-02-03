@@ -123,9 +123,11 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             println!("Starting Miraset devnet node...");
             let state = State::new();
 
-            // Fund genesis account for testing
-            let genesis_kp = KeyPair::generate();
-            state.add_balance(&genesis_kp.address(), 1_000_000_000);
+            // Fund genesis account for testing (fixed for devnet)
+            // Using a fixed secret for reproducibility in devnet
+            let genesis_secret = [1u8; 32]; // Fixed devnet genesis key
+            let genesis_kp = KeyPair::from_bytes(&genesis_secret);
+            state.add_balance(&genesis_kp.address(), 1_000_000_000_000); // 1 trillion tokens
             println!("Genesis account: {}", genesis_kp.address().to_hex());
             println!("Genesis secret: {}", hex::encode(genesis_kp.secret_bytes()));
 
