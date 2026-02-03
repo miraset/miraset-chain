@@ -1,8 +1,10 @@
 pub mod rpc;
 pub mod state;
+pub mod storage;
 
 pub use rpc::serve_rpc;
 pub use state::State;
+pub use storage::Storage;
 
 use std::time::Duration;
 use tokio::time;
