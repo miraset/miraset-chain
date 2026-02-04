@@ -23,9 +23,11 @@ use chrono::{DateTime, Utc};
 
 mod receipt;
 mod backend;
+mod node_client;
 
 pub use receipt::{ReceiptPayload, ReceiptHash};
 pub use backend::{InferenceBackend, OllamaBackend};
+pub use node_client::NodeClient;
 
 /// Worker configuration
 #[derive(Debug, Clone)]
@@ -33,6 +35,7 @@ pub struct WorkerConfig {
     pub worker_id: ObjectId,
     pub keypair: KeyPair,
     pub endpoint: String,
+    pub node_url: String,
     pub ollama_url: String,
     pub gpu_model: String,
     pub vram_total_gib: u32,
@@ -44,6 +47,7 @@ pub struct Worker {
     config: WorkerConfig,
     jobs: Arc<RwLock<HashMap<ObjectId, JobExecution>>>,
     backend: Arc<dyn InferenceBackend>,
+    node_client: NodeClient,
 }
 
 /// Job execution state
@@ -73,7 +77,7 @@ pub enum JobStatus {
 /// Job acceptance request
 #[derive(Debug, Deserialize)]
 pub struct AcceptJobRequest {
-    pub job_id: ObjectId,
+    pub job_id: String,  // Hex-encoded job ID
     pub epoch_id: u64,
     pub model_id: String,
     pub max_tokens: u64,
@@ -127,11 +131,13 @@ mod signature_serde {
 impl Worker {
     pub fn new(config: WorkerConfig) -> Arc<Self> {
         let backend = Arc::new(OllamaBackend::new(config.ollama_url.clone()));
+        let node_client = NodeClient::new(config.node_url.clone(), config.keypair.clone());
 
         Arc::new(Self {
             config,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             backend,
+            node_client,
         })
     }
 
@@ -183,7 +189,7 @@ impl Worker {
                     }
                 }
             }))
-            .route("/jobs/:id/stream", get(move |Path(job_id_hex): Path<String>| {
+            .route("/jobs/{id}/stream", get(move |Path(job_id_hex): Path<String>| {
                 let worker = Arc::clone(&stream_worker);
                 async move {
                     let job_id = match parse_object_id(&job_id_hex) {
@@ -211,7 +217,7 @@ impl Worker {
                     })).into_response()
                 }
             }))
-            .route("/jobs/:id/report", post(move |Path(job_id_hex): Path<String>| {
+            .route("/jobs/{id}/report", post(move |Path(job_id_hex): Path<String>| {
                 let worker = Arc::clone(&report_worker);
                 async move {
                     let job_id = match parse_object_id(&job_id_hex) {
@@ -231,7 +237,7 @@ impl Worker {
                     }
                 }
             }))
-            .route("/jobs/:id/status", get(move |Path(job_id_hex): Path<String>| {
+            .route("/jobs/{id}/status", get(move |Path(job_id_hex): Path<String>| {
                 let worker = Arc::clone(&status_worker);
                 async move {
                     let job_id = match parse_object_id(&job_id_hex) {
@@ -256,9 +262,12 @@ impl Worker {
 
     /// Accept a job assignment
     pub fn accept_job(&self, req: AcceptJobRequest) -> Result<()> {
+        // Parse hex job_id
+        let job_id = parse_object_id(&req.job_id)?;
+
         let mut jobs = self.jobs.write();
 
-        if jobs.contains_key(&req.job_id) {
+        if jobs.contains_key(&job_id) {
             return Err(anyhow!("Job already accepted"));
         }
 
@@ -268,7 +277,7 @@ impl Worker {
         }
 
         let job = JobExecution {
-            job_id: req.job_id,
+            job_id,
             epoch_id: req.epoch_id,
             model_id: req.model_id,
             prompt: String::new(),
@@ -281,9 +290,9 @@ impl Worker {
             response: Vec::new(),
         };
 
-        jobs.insert(req.job_id, job);
+        jobs.insert(job_id, job);
 
-        tracing::info!("Accepted job: {:?}", req.job_id);
+        tracing::info!("Accepted job: {}", hex::encode(job_id));
 
         Ok(())
     }
@@ -367,6 +376,41 @@ impl Worker {
             signature,
         })
     }
+
+    /// Submit job result to chain (end-to-end flow)
+    pub async fn submit_result_to_chain(&self, job_id: ObjectId) -> Result<()> {
+        // Generate receipt
+        let report = self.generate_receipt(job_id)?;
+
+        // Submit to chain
+        self.node_client.submit_job_result(
+            report.job_id,
+            self.config.worker_id,
+            report.receipt_payload.output_tokens,
+            report.receipt_hash,
+        ).await?;
+
+        // Optionally anchor the full receipt
+        self.node_client.anchor_receipt(
+            report.job_id,
+            report.receipt_hash,
+        ).await?;
+
+        tracing::info!("Submitted and anchored job result on-chain: {:?}", job_id);
+
+        Ok(())
+    }
+
+    /// Register worker on-chain
+    pub async fn register_on_chain(&self) -> Result<ObjectId> {
+        self.node_client.register_worker(
+            vec![format!("http://{}", self.config.endpoint)],
+            self.config.gpu_model.clone(),
+            self.config.vram_total_gib,
+            self.config.supported_models.clone(),
+            1000, // stake_bond
+        ).await
+    }
 }
 
 /// Health check handler
@@ -398,6 +442,7 @@ mod tests {
             worker_id: [1u8; 32],
             keypair: KeyPair::generate(),
             endpoint: "http://localhost:8080".to_string(),
+            node_url: "http://127.0.0.1:9944".to_string(),
             ollama_url: "http://localhost:11434".to_string(),
             gpu_model: "NVIDIA RTX 4090".to_string(),
             vram_total_gib: 24,
@@ -417,6 +462,7 @@ mod tests {
             worker_id: [1u8; 32],
             keypair: KeyPair::generate(),
             endpoint: "http://localhost:8080".to_string(),
+            node_url: "http://127.0.0.1:9944".to_string(),
             ollama_url: "http://localhost:11434".to_string(),
             gpu_model: "NVIDIA RTX 4090".to_string(),
             vram_total_gib: 24,
@@ -426,7 +472,7 @@ mod tests {
         let worker = Worker::new(config);
 
         let req = AcceptJobRequest {
-            job_id: [2u8; 32],
+            job_id: "0202020202020202020202020202020202020202020202020202020202020202".to_string(),
             epoch_id: 1,
             model_id: "llama2".to_string(),
             max_tokens: 1000,

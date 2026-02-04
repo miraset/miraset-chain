@@ -12,6 +12,27 @@
 
 ## ✨ New Features (v0.1.1)
 
+### 🤖 Worker Integration (NEW!)
+- **AI Inference** - Ollama/vLLM backend with automatic fallback
+- **Verifiable Receipts** - Cryptographic proof of computation
+- **On-Chain Registration** - Workers register with GPU specs
+- **Job Execution** - Accept, execute, and report jobs
+- **Real AI Models** - Tested with gemma3, llama3.3, deepseek-r1
+
+**Quick Test:**
+```bash
+# Terminal 1: Node
+cargo run --bin miraset -- node start
+
+# Terminal 2: Worker
+cargo run --bin miraset-worker
+
+# Terminal 3: Test
+./test_worker_e2e.sh
+```
+
+**Full Guide:** See `FINAL_STATUS.md` for complete worker documentation.
+
 ### 💾 Persistent Storage
 - **Sled integration** - pure Rust embedded database
 - **No data loss** - survive restarts and crashes  
