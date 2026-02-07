@@ -171,4 +171,27 @@ Miraset Chain now features:
 **Implementation Date:** February 3, 2026  
 **Developers:** AI Assistant  
 **Status:** ✅ PRODUCTION READY (placeholder Move VM)  
-**Next Milestone:** Enable full Move VM for smart contracts  
+**Next Milestone:** Enable full Move VM for smart contracts
+
+---
+
+## 🚀 Move VM Implementation - February 7, 2026
+
+**Status:** IN PROGRESS
+
+### Implementation Plan
+
+1. ✅ Enable Move VM dependencies in miraset-node
+2. ⏳ Implement real Move VM runtime
+3. ⏳ Add bytecode verification
+4. ⏳ Implement gas metering for Move execution
+5. ⏳ Add Move standard library
+6. ⏳ Create example Move modules
+7. ⏳ Integration tests
+
+### Progress Log
+
+**[Feb 7, 2026 - Starting Move VM Implementation]**
+- Enabling Move VM dependencies from Sui mainnet-v1.21.0
+- Replacing placeholder implementations with real Move VM integration  
+

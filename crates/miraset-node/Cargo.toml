@@ -20,15 +20,14 @@ tower-http.workspace = true
 sled.workspace = true
 blake3.workspace = true
 
-# Move VM dependencies (optional - comment out if not using full Move VM)
-# To enable: uncomment and ensure correct Sui git revision
-# move-vm-runtime.workspace = true
-# move-core-types.workspace = true
-# move-binary-format.workspace = true
-# move-bytecode-verifier.workspace = true
-# move-vm-types.workspace = true
-# sui-types.workspace = true
-# sui-framework.workspace = true
+# Move VM dependencies (enabled)
+move-vm-runtime.workspace = true
+move-core-types.workspace = true
+move-binary-format.workspace = true
+move-bytecode-verifier.workspace = true
+move-vm-types.workspace = true
+sui-types = { workspace = true, optional = true }
+sui-framework = { workspace = true, optional = true }
 
 # Gas metering
 once_cell.workspace = true
