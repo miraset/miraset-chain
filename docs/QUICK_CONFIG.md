@@ -185,4 +185,4 @@ cargo run --bin miraset -- node start --help
 
 - **[CONFIGURATION.md](CONFIGURATION.md)** - Full configuration guide
 - **[PERSISTENCE.md](PERSISTENCE.md)** - Persistence details
-- **[README.md](README.md)** - Getting started
+- **[README.md](../README.md.md)** - Getting started

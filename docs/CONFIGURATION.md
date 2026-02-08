@@ -481,4 +481,4 @@ cargo run --bin miraset -- node start --storage-path /new/path
 
 - [PERSISTENCE.md](PERSISTENCE.md) - Storage internals
 - [DOCKER.md](DOCKER.md) - Docker deployment
-- [README.md](README.md) - Quick start guide
+- [README.md](../README.md.md) - Quick start guide

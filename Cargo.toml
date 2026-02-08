@@ -12,9 +12,9 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
-license = "MIT"
-authors = ["Miraset Contributors"]
+edition = "2024"
+license = "GPL-3"
+authors = ["daochild"]
 
 [workspace.dependencies]
 # Async runtime

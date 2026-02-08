@@ -212,18 +212,22 @@ See `docs/`:
 
 ## 📚 Documentation
 
-- **[QUICKSTART.md](QUICKSTART.md)** - Quick start guide
-- **[USER_GUIDE.md](USER_GUIDE.md)** - Complete user manual
-- **[CONFIGURATION.md](CONFIGURATION.md)** - Configuration options & precedence ✨ **NEW**
-- **[PERSISTENCE.md](PERSISTENCE.md)** - Storage & multi-node guide ✨ **NEW**
-- **[DOCKER.md](DOCKER.md)** - Docker detailed guide ✨ **NEW**
-- **[TESTING.md](TESTING.md)** - Test documentation
+- **[QUICKSTART.md](docs/QUICKSTART.md)** - Quick start guide
+- **[USER_GUIDE.md](docs/USER_GUIDE.md)** - Complete user manual
+- **[CONFIGURATION.md](docs/CONFIGURATION.md)** - Configuration options & precedence ✨ **NEW**
+- **[PERSISTENCE.md](docs/PERSISTENCE.md)** - Storage & multi-node guide ✨ **NEW**
+- **[DOCKER.md](docs/DOCKER.md)** - Docker detailed guide ✨ **NEW**
+- **[TESTING.md](docs/TESTING.md)** - Test documentation
 - **[FINAL_REPORT.md](FINAL_REPORT.md)** - Project summary
 - **[docs/](docs/)** - Architecture & specifications
 
 ---
 
+## AI Usage
+
+Read the [Copilot documentation](.github/instructions/copilot.md) for details on AI must work during the project.
+
 ## License
 
-MIT
+This project is licensed under the GPL-3 License. See the [LICENSE](LICENSE) file for details.
 

@@ -426,8 +426,8 @@ cat /data/LOG
 ## 📚 References
 
 - [DOCKER.md](DOCKER.md) - Detailed Docker documentation
-- [Storage Module](crates/miraset-node/src/storage.rs) - Storage implementation
-- [docker-compose.yml](docker-compose.yml) - Multi-node configuration
+- [Storage Module](../crates/miraset-node/src/storage.rs) - Storage implementation
+- [docker-compose.yml](../docker-compose.yml) - Multi-node configuration
 
 ---
 

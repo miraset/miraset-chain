@@ -599,9 +599,9 @@ cargo run --bin miraset -- node start
 
 Now that you know the basics:
 
-1. Read [ARCHITECTURE.md](docs/ARCHITECTURE.md) to understand the system design
-2. Check [REWARDS.md](docs/REWARDS.md) for the reward calculation formulas
-3. Review [SOW.md](docs/SOW.md) for the complete specification
+1. Read [ARCHITECTURE.md](ARCHITECTURE.md) to understand the system design
+2. Check [REWARDS.md](REWARDS.md) for the reward calculation formulas
+3. Review [SOW.md](SOW.md) for the complete specification
 4. Explore the code in `crates/` to see how it works
 
 ---
