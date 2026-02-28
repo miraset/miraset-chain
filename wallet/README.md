@@ -34,3 +34,41 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+## MIRASET Desktop Wallet
+
+This UI is used by the desktop wallet (`wallet-miraset.exe`) via Tauri.
+
+### Dev (Desktop)
+
+```bash
+bun install
+bun run tauri:dev
+```
+
+### Build (Desktop)
+
+```bash
+bun install
+bun run tauri:build
+```
+
+The executable is emitted under `wallet/src-tauri/target/release/`.
+
+## Package (ZIP)
+
+Build the desktop executable and create a ZIP bundle:
+
+```bash
+bun install
+bun run tauri:build
+node scripts/package-zip.mjs
+```
+
+Dry run (no files written):
+
+```bash
+node scripts/package-zip.mjs --dry-run
+```
+
+The ZIP is emitted under `wallet/dist/`.
