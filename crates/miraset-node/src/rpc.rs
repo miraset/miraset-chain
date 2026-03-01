@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::Utc;
 use miraset_core::{Address, Block, Event, Transaction};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -18,6 +19,9 @@ pub async fn serve_rpc(state: State, addr: SocketAddr) -> anyhow::Result<()> {
     let rpc_state = RpcState { state };
 
     let app = Router::new()
+        .route("/health", get(get_health))
+        .route("/status", get(get_health))
+        .route("/ping", get(ping))
         .route("/balance/{address}", get(get_balance))
         .route("/nonce/{address}", get(get_nonce))
         .route("/block/latest", get(get_latest_block))
@@ -31,6 +35,33 @@ pub async fn serve_rpc(state: State, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[derive(Serialize)]
+struct NodeStatus {
+    status: String,
+    timestamp: String,
+    latest_block_height: u64,
+}
+
+#[derive(Serialize)]
+struct PingResponse {
+    status: String,
+}
+
+async fn get_health(AxumState(rpc): AxumState<RpcState>) -> Json<NodeStatus> {
+    let latest_block = rpc.state.get_latest_block();
+    Json(NodeStatus {
+        status: "healthy".to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        latest_block_height: latest_block.height,
+    })
+}
+
+async fn ping() -> Json<PingResponse> {
+    Json(PingResponse {
+        status: "ok".to_string(),
+    })
 }
 
 async fn get_balance(

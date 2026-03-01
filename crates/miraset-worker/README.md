@@ -12,6 +12,8 @@ cargo run --bin miraset-worker
 Worker will auto-register on-chain and listen on `http://127.0.0.1:8080`
 ## API Endpoints
 - `GET /health` - Health check
+- `GET /status` - Status alias
+- `GET /ping` - Lightweight ping
 - `POST /jobs/accept` - Accept job assignment
 - `POST /jobs/run` - Execute job with prompt
 - `GET /jobs/:id/status` - Get job status
@@ -22,7 +24,7 @@ Edit `src/main.rs`:
 ```rust
 WorkerConfig {
     endpoint: "127.0.0.1:8080".to_string(),
-    node_url: "http://127.0.0.1:3000".to_string(),
+    node_url: "http://127.0.0.1:9944".to_string(),
     ollama_url: "http://localhost:11434".to_string(),
     gpu_model: "NVIDIA RTX 4090".to_string(),
     vram_total_gib: 24,

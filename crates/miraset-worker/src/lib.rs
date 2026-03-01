@@ -151,6 +151,8 @@ impl Worker {
 
         Router::new()
             .route("/health", get(health_handler))
+            .route("/status", get(health_handler))
+            .route("/ping", get(ping_handler))
             .route("/jobs/accept", post(move |Json(req): Json<AcceptJobRequest>| {
                 let worker = Arc::clone(&accept_worker);
                 async move {
@@ -418,6 +420,13 @@ async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "healthy",
         "timestamp": Utc::now(),
+    }))
+}
+
+/// Ping handler
+async fn ping_handler() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "ok",
     }))
 }
 

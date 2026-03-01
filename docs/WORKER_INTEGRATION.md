@@ -37,10 +37,10 @@ RPC server listening on 127.0.0.1:9944
 **Verify node is running:**
 ```bash
 # In another terminal
-curl http://127.0.0.1:9944/block/latest
+curl http://127.0.0.1:9944/health
 ```
 
-If you see JSON with block data, node is ready! ✅
+If you see JSON with status data, node is ready! ✅
 
 ### Step 2: Start Worker (Terminal 2)
 **Only after node is running!**
@@ -121,10 +121,14 @@ Worker listening on 127.0.0.1:8080
 ### Health Check
 ```bash
 # Node
-curl http://localhost:9944/block/latest
+curl http://localhost:9944/health
+curl http://localhost:9944/status
+curl http://localhost:9944/ping
 
 # Worker
 curl http://localhost:8080/health
+curl http://localhost:8080/status
+curl http://localhost:8080/ping
 ```
 
 ### Accept Job
@@ -217,5 +221,3 @@ Check logs for detailed error messages:
 - Node logs: Terminal 1 output
 - Worker logs: Terminal 2 output
 - Or: `tail -f node.log worker.log` (if using start_demo.sh)
-
-

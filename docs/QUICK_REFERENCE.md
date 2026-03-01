@@ -40,23 +40,36 @@ cargo tree -p miraset-node | grep move
 
 ### Node RPC (Port 9944)
 ```bash
-# Get chain info
-curl http://127.0.0.1:9944/chain
+# Health/status
+curl http://127.0.0.1:9944/health
+curl http://127.0.0.1:9944/status
+curl http://127.0.0.1:9944/ping
+
+# Latest block
+curl http://127.0.0.1:9944/block/latest
 
 # Get block
 curl http://127.0.0.1:9944/block/:height
 
-# Get events
-curl http://127.0.0.1:9944/events
+# Get balance
+curl http://127.0.0.1:9944/balance/:address
 
 # Get nonce
 curl http://127.0.0.1:9944/nonce/:address
+
+# Get events
+curl http://127.0.0.1:9944/events
+
+# Chat messages
+curl http://127.0.0.1:9944/chat/messages
 ```
 
 ### Worker API (Port 8080)
 ```bash
-# Health check
+# Health/status
 curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/status
+curl http://127.0.0.1:8080/ping
 
 # Accept job
 curl -X POST http://127.0.0.1:8080/jobs/accept \
@@ -69,7 +82,7 @@ curl -X POST http://127.0.0.1:8080/jobs/run \
   -d '{"job_id":"0x42","model_id":"gemma3:latest","prompt":"Hello","max_tokens":50}'
 
 # Get job status
-curl http://127.0.0.1:8080/jobs/:id
+curl http://127.0.0.1:8080/jobs/:id/status
 ```
 
 ---
@@ -256,7 +269,7 @@ cargo run --bin miraset -- node start
 ### Worker Connection Failed
 ```bash
 # Ensure node is running first
-curl http://127.0.0.1:9944/chain
+curl http://127.0.0.1:9944/health
 
 # Check Ollama is running
 curl http://localhost:11434/api/tags
@@ -268,6 +281,8 @@ curl http://localhost:11434/api/tags
 
 | File | Description |
 |------|-------------|
+| `API_NODE.md` | Node HTTP API reference |
+| `API_WORKER.md` | Worker HTTP API reference |
 | `FINAL_REPORT.md` | Complete status |
 | `MOVE_VM_STATUS.md` | Move VM details |
 | `COMPLETE_STATUS.md` | Implementation summary |

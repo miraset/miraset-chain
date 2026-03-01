@@ -1,7 +1,11 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/tauri";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+
+const DEFAULT_RPC_URL = "http://127.0.0.1:9944";
+const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
+const DEFAULT_WORKER_URL = "http://127.0.0.1:8080";
 
 type Account = {
   name: string;
@@ -19,6 +23,126 @@ type Status = {
   message: string;
 };
 
+type ConnectionState = "unknown" | "checking" | "online" | "offline";
+
+type ConnectionStatus = {
+  state: ConnectionState;
+  detail?: string;
+};
+
+type ConnectionSnapshot = {
+  rpc: ConnectionStatus;
+  ollama: ConnectionStatus;
+  worker: ConnectionStatus;
+  lastChecked?: number;
+};
+
+const DEFAULT_CONNECTION_SNAPSHOT: ConnectionSnapshot = {
+  rpc: { state: "unknown" },
+  ollama: { state: "unknown" },
+  worker: { state: "unknown" },
+};
+
+let connectionSnapshot: ConnectionSnapshot = DEFAULT_CONNECTION_SNAPSHOT;
+const connectionSubscribers = new Set<() => void>();
+let connectionTimer: number | null = null;
+let connectionTargets = {
+  rpcUrl: DEFAULT_RPC_URL,
+  ollamaUrl: DEFAULT_OLLAMA_URL,
+  workerUrl: DEFAULT_WORKER_URL,
+};
+
+function notifyConnectionSubscribers() {
+  connectionSubscribers.forEach((listener) => listener());
+}
+
+async function checkConnectionsOnce() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  if (!detectTauri()) {
+    connectionSnapshot = DEFAULT_CONNECTION_SNAPSHOT;
+    notifyConnectionSubscribers();
+    return;
+  }
+  connectionSnapshot = {
+    ...connectionSnapshot,
+    rpc: { state: "checking" },
+    ollama: { state: "checking" },
+    worker: { state: "checking" },
+  };
+  notifyConnectionSubscribers();
+
+  try {
+    const result = await invoke<ConnectionSnapshot>("check_connections", {
+      rpcUrl: connectionTargets.rpcUrl,
+      workerUrl: connectionTargets.workerUrl,
+      ollamaUrl: connectionTargets.ollamaUrl,
+    });
+    connectionSnapshot = {
+      ...result,
+      lastChecked: Date.now(),
+    };
+  } catch (error) {
+    const detail = formatErrorMessage(error, "unreachable");
+    connectionSnapshot = {
+      rpc: { state: "offline", detail },
+      worker: { state: "offline", detail },
+      ollama: { state: "offline", detail },
+      lastChecked: Date.now(),
+    };
+  }
+  notifyConnectionSubscribers();
+}
+
+function startConnectionPolling() {
+  if (connectionTimer !== null || typeof window === "undefined") {
+    return;
+  }
+  void checkConnectionsOnce();
+  connectionTimer = window.setInterval(() => {
+    void checkConnectionsOnce();
+  }, 10000);
+}
+
+function stopConnectionPolling() {
+  if (connectionTimer === null) {
+    return;
+  }
+  window.clearInterval(connectionTimer);
+  connectionTimer = null;
+}
+
+function subscribeConnections(listener: () => void) {
+  connectionSubscribers.add(listener);
+  if (connectionSubscribers.size === 1) {
+    startConnectionPolling();
+  }
+  return () => {
+    connectionSubscribers.delete(listener);
+    if (connectionSubscribers.size === 0) {
+      stopConnectionPolling();
+    }
+  };
+}
+
+function getConnectionSnapshot() {
+  return connectionSnapshot;
+}
+
+function updateConnectionTargets(
+  rpcUrl: string,
+  ollamaUrl: string,
+  workerUrl: string
+) {
+  connectionTargets = {
+    rpcUrl: rpcUrl || DEFAULT_RPC_URL,
+    ollamaUrl: ollamaUrl || DEFAULT_OLLAMA_URL,
+    workerUrl: workerUrl || DEFAULT_WORKER_URL,
+  };
+  void checkConnectionsOnce();
+}
+
 function detectTauri() {
   return (
     typeof window !== "undefined" &&
@@ -26,20 +150,58 @@ function detectTauri() {
   );
 }
 
+
+function formatErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  if (typeof error === "string") {
+    return error;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return fallback;
+  }
+}
+
 export default function Home() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<string>("");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "idle", message: "" });
-  const [isHydrated, setIsHydrated] = useState(false);
-  const [isTauri, setIsTauri] = useState(false);
+  const [accountsLoaded, setAccountsLoaded] = useState(false);
 
-  async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>) {
-    if (!detectTauri()) {
-      throw new Error("Tauri runtime not available. Start the desktop app.");
-    }
-    return invoke<T>(cmd, args);
-  }
+  const connectionSnapshot = useSyncExternalStore(
+    subscribeConnections,
+    getConnectionSnapshot,
+    getConnectionSnapshot
+  );
+  const rpcStatus = connectionSnapshot.rpc;
+  const ollamaStatus = connectionSnapshot.ollama;
+  const workerStatus = connectionSnapshot.worker;
+
+  const isHydrated = useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false
+  );
+
+  const isTauri = useSyncExternalStore(
+    () => () => undefined,
+    () => detectTauri(),
+    () => false
+  );
+
+  const tauriInvoke = useCallback(
+    async <T,>(cmd: string, args?: Record<string, unknown>) => {
+      if (!detectTauri()) {
+        throw new Error("Tauri runtime not available. Start the desktop app.");
+      }
+      return invoke<T>(cmd, args);
+    },
+    []
+  );
 
   const [newAccountName, setNewAccountName] = useState("");
   const [importName, setImportName] = useState("");
@@ -61,24 +223,18 @@ export default function Home() {
     return account?.balance ?? 0;
   }, [accounts, selectedAccount]);
 
-  useEffect(() => {
-    setIsHydrated(true);
-    setIsTauri(detectTauri());
-  }, []);
-
-  useEffect(() => {
-    if (!isTauri) {
-      return;
-    }
-    void refreshAll();
-  }, [isTauri]);
-
-  async function refreshAll() {
+  const refreshAll = useCallback(async () => {
     setStatus({ kind: "loading", message: "Loading wallet data..." });
     try {
       const loadedConfig = await tauriInvoke<AppConfig>("get_config");
       setConfig(loadedConfig);
       setRpcUrlDraft(loadedConfig.rpc_url);
+
+      updateConnectionTargets(
+        loadedConfig.rpc_url || DEFAULT_RPC_URL,
+        DEFAULT_OLLAMA_URL,
+        DEFAULT_WORKER_URL
+      );
 
       const accountsList = await tauriInvoke<Account[]>("list_accounts");
       const enriched = await Promise.all(
@@ -90,6 +246,7 @@ export default function Home() {
         })
       );
       setAccounts(enriched);
+      setAccountsLoaded(true);
       if (!selectedAccount && enriched.length > 0) {
         setSelectedAccount(enriched[0].name);
       }
@@ -97,10 +254,10 @@ export default function Home() {
     } catch (error) {
       setStatus({
         kind: "error",
-        message: error instanceof Error ? error.message : "Unexpected error",
+        message: formatErrorMessage(error, "Unexpected error"),
       });
     }
-  }
+  }, [selectedAccount, tauriInvoke]);
 
   async function handleCreateAccount() {
     if (!newAccountName.trim()) {
@@ -115,7 +272,7 @@ export default function Home() {
     } catch (error) {
       setStatus({
         kind: "error",
-        message: error instanceof Error ? error.message : "Failed to create account",
+        message: formatErrorMessage(error, "Failed to create account"),
       });
     }
   }
@@ -140,7 +297,7 @@ export default function Home() {
     } catch (error) {
       setStatus({
         kind: "error",
-        message: error instanceof Error ? error.message : "Failed to import account",
+        message: formatErrorMessage(error, "Failed to import account"),
       });
     }
   }
@@ -163,7 +320,7 @@ export default function Home() {
     } catch (error) {
       setStatus({
         kind: "error",
-        message: error instanceof Error ? error.message : "Failed to export secret",
+        message: formatErrorMessage(error, "Failed to export secret"),
       });
     }
   }
@@ -194,7 +351,7 @@ export default function Home() {
     } catch (error) {
       setStatus({
         kind: "error",
-        message: error instanceof Error ? error.message : "Transfer failed",
+        message: formatErrorMessage(error, "Transfer failed"),
       });
     }
   }
@@ -210,11 +367,16 @@ export default function Home() {
         rpc_url: rpcUrlDraft.trim(),
       });
       setConfig(updated);
+      updateConnectionTargets(
+        updated.rpc_url || DEFAULT_RPC_URL,
+        DEFAULT_OLLAMA_URL,
+        DEFAULT_WORKER_URL
+      );
       setStatus({ kind: "success", message: "RPC URL updated." });
     } catch (error) {
       setStatus({
         kind: "error",
-        message: error instanceof Error ? error.message : "Failed to update RPC URL",
+        message: formatErrorMessage(error, "Failed to update RPC URL"),
       });
     }
   }
@@ -229,11 +391,11 @@ export default function Home() {
 
   if (!isHydrated) {
     return (
-      <div className="min-h-screen bg-zinc-50 text-zinc-900">
-        <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-8">
+      <div className="min-h-screen bg-[#0b0d10] text-zinc-100">
+        <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-10">
           <header className="flex flex-col gap-2">
-            <h1 className="text-3xl font-semibold">MIRASET Wallet</h1>
-            <p className="text-sm text-zinc-600">Loading...</p>
+            <h1 className="font-display text-4xl">MIRASET Wallet</h1>
+            <p className="text-sm text-zinc-400">Loading...</p>
           </header>
         </div>
       </div>
@@ -242,9 +404,9 @@ export default function Home() {
 
   if (!isTauri) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-zinc-950 text-white">
-        <div className="max-w-xl rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center">
-          <h1 className="text-2xl font-semibold">MIRASET Wallet</h1>
+      <div className="flex min-h-screen items-center justify-center bg-[#0b0d10] text-white">
+        <div className="max-w-xl rounded-lg border border-[#24262c] bg-[#14161a] p-8 text-center">
+          <h1 className="font-display text-3xl">MIRASET Wallet</h1>
           <p className="mt-3 text-sm text-zinc-300">
             This UI runs inside the desktop app. Use the installer or run
             <span className="font-semibold"> bunx tauri dev</span>.
@@ -255,23 +417,86 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-50 text-zinc-900">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-8">
+    <div className="min-h-screen bg-[#0b0d10] text-zinc-100">
+      <div className="mx-auto flex max-w-6xl flex-col gap-6 px-6 py-10">
         <header className="flex flex-col gap-2">
-          <h1 className="text-3xl font-semibold">MIRASET Wallet</h1>
-          <p className="text-sm text-zinc-600">
+          <h1 className="font-display text-4xl">MIRASET Wallet</h1>
+          <p className="text-sm text-zinc-400">
             Desktop wallet connected to the MIRASET RPC.
           </p>
+          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-zinc-400">
+            <span className="font-semibold uppercase tracking-[0.2em] text-zinc-500">
+              Status
+            </span>
+            <span className="flex items-center gap-2 rounded-full border border-[#24262c] px-3 py-1">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  rpcStatus.state === "online"
+                    ? "bg-emerald-400"
+                    : rpcStatus.state === "offline"
+                    ? "bg-red-400"
+                    : rpcStatus.state === "checking"
+                    ? "bg-amber-400"
+                    : "bg-zinc-600"
+                }`}
+              />
+              MIRASET RPC
+            </span>
+            <span className="flex items-center gap-2 rounded-full border border-[#24262c] px-3 py-1">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  workerStatus.state === "online"
+                    ? "bg-emerald-400"
+                    : workerStatus.state === "offline"
+                    ? "bg-red-400"
+                    : workerStatus.state === "checking"
+                    ? "bg-amber-400"
+                    : "bg-zinc-600"
+                }`}
+              />
+              MIRASET Worker
+            </span>
+            <span className="flex items-center gap-2 rounded-full border border-[#24262c] px-3 py-1">
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  ollamaStatus.state === "online"
+                    ? "bg-emerald-400"
+                    : ollamaStatus.state === "offline"
+                    ? "bg-red-400"
+                    : ollamaStatus.state === "checking"
+                    ? "bg-amber-400"
+                    : "bg-zinc-600"
+                }`}
+              />
+              Ollama
+            </span>
+            {connectionSnapshot.lastChecked && (
+              <span className="text-zinc-500">
+                Checked {new Date(connectionSnapshot.lastChecked).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
         </header>
 
-        <section className="rounded-lg border border-zinc-200 bg-white p-5">
+        {rpcStatus.state === "offline" && (
+          <section className="rounded-md border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm text-red-200">
+            MIRASET RPC is offline. Start the node or update the RPC URL.
+          </section>
+        )}
+        {workerStatus.state === "offline" && (
+          <section className="rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
+            MIRASET Worker is offline. Start the worker on port 8080.
+          </section>
+        )}
+
+        <section className="rounded-xl border border-[#24262c] bg-[#14161a] p-6 shadow-lg">
           <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div className="flex-1">
-              <label className="text-xs font-semibold uppercase text-zinc-500">
+              <label className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
                 RPC URL
               </label>
               <input
-                className="mt-2 w-full rounded-md border border-zinc-200 px-3 py-2 text-sm"
+                className="mt-2 w-full rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500"
                 value={rpcUrlDraft}
                 onChange={(event) => setRpcUrlDraft(event.target.value)}
                 placeholder="http://127.0.0.1:9944"
@@ -279,17 +504,73 @@ export default function Home() {
             </div>
             <div className="flex gap-2">
               <button
-                className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-semibold text-white"
+                className="rounded-md bg-[#f7931a] px-4 py-2 text-sm font-semibold text-black"
                 onClick={handleUpdateRpc}
               >
                 Save
               </button>
               <button
-                className="rounded-md border border-zinc-200 px-4 py-2 text-sm"
+                className="rounded-md border border-[#24262c] px-4 py-2 text-sm text-zinc-200"
                 onClick={refreshAll}
               >
                 Refresh
               </button>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-2 text-xs text-zinc-400 md:grid-cols-3">
+            <div className="flex items-center gap-2">
+              <span
+                className={`h-2.5 w-2.5 rounded-full ${
+                  rpcStatus.state === "online"
+                    ? "bg-emerald-400"
+                    : rpcStatus.state === "offline"
+                    ? "bg-red-400"
+                    : rpcStatus.state === "checking"
+                    ? "bg-amber-400"
+                    : "bg-zinc-600"
+                }`}
+              />
+              <span className="font-semibold text-zinc-200">MIRASET RPC</span>
+              <span className="text-zinc-500">
+                {rpcStatus.state}
+                {rpcStatus.detail ? ` • ${rpcStatus.detail}` : ""}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span
+                className={`h-2.5 w-2.5 rounded-full ${
+                  workerStatus.state === "online"
+                    ? "bg-emerald-400"
+                    : workerStatus.state === "offline"
+                    ? "bg-red-400"
+                    : workerStatus.state === "checking"
+                    ? "bg-amber-400"
+                    : "bg-zinc-600"
+                }`}
+              />
+              <span className="font-semibold text-zinc-200">MIRASET Worker</span>
+              <span className="text-zinc-500">
+                {workerStatus.state}
+                {workerStatus.detail ? ` • ${workerStatus.detail}` : ""}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span
+                className={`h-2.5 w-2.5 rounded-full ${
+                  ollamaStatus.state === "online"
+                    ? "bg-emerald-400"
+                    : ollamaStatus.state === "offline"
+                    ? "bg-red-400"
+                    : ollamaStatus.state === "checking"
+                    ? "bg-amber-400"
+                    : "bg-zinc-600"
+                }`}
+              />
+              <span className="font-semibold text-zinc-200">Ollama</span>
+              <span className="text-zinc-500">
+                {ollamaStatus.state}
+                {ollamaStatus.detail ? ` • ${ollamaStatus.detail}` : ""}
+              </span>
             </div>
           </div>
           <p className="mt-3 text-xs text-zinc-500">
@@ -298,50 +579,59 @@ export default function Home() {
         </section>
 
         <section className="grid gap-6 lg:grid-cols-[1.1fr_1fr]">
-          <div className="rounded-lg border border-zinc-200 bg-white p-5">
+          <div className="rounded-xl border border-[#24262c] bg-[#14161a] p-6">
             <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Accounts</h2>
-              <span className="text-xs text-zinc-500">
-                {accounts.length} total
-              </span>
+              <h2 className="font-display text-2xl">Accounts</h2>
+              <span className="text-xs text-zinc-500">{accounts.length} total</span>
             </div>
             <div className="mt-4 grid gap-3">
               {accounts.map((account) => (
                 <button
                   key={account.name}
-                  className={`flex flex-col rounded-md border px-3 py-2 text-left text-sm transition ${
+                  className={`flex flex-col rounded-md border px-3 py-3 text-left text-sm transition ${
                     selectedAccount === account.name
-                      ? "border-zinc-900 bg-zinc-50"
-                      : "border-zinc-200"
+                      ? "border-[#f7931a] bg-[#0f1115]"
+                      : "border-[#24262c] bg-[#0f1115]/60"
                   }`}
                   onClick={() => setSelectedAccount(account.name)}
                 >
-                  <span className="font-semibold">{account.name}</span>
+                  <span className="font-semibold text-zinc-100">{account.name}</span>
                   <span className="text-xs text-zinc-500">{account.address}</span>
-                  <span className="mt-1 text-xs text-zinc-700">
-                    Balance: {account.balance ?? 0} MIRA
+                  <span className="mt-1 text-xs text-zinc-300">
+                    Balance: {account.balance ?? 0} SECCO
                   </span>
                 </button>
               ))}
-              {accounts.length === 0 && (
+              {!accountsLoaded && (
+                <div className="rounded-md border border-dashed border-[#24262c] bg-[#0f1115]/50 px-3 py-4 text-sm text-zinc-400">
+                  Existing wallets are not loaded by default.
+                  <button
+                    className="mt-3 inline-flex rounded-md bg-[#f7931a] px-3 py-2 text-xs font-semibold text-black"
+                    onClick={refreshAll}
+                  >
+                    Load existing wallets
+                  </button>
+                </div>
+              )}
+              {accountsLoaded && accounts.length === 0 && (
                 <p className="text-sm text-zinc-500">No accounts yet.</p>
               )}
             </div>
 
             <div className="mt-6 grid gap-3">
               <div>
-                <label className="text-xs font-semibold uppercase text-zinc-500">
+                <label className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
                   New account name
                 </label>
                 <div className="mt-2 flex gap-2">
                   <input
-                    className="flex-1 rounded-md border border-zinc-200 px-3 py-2 text-sm"
+                    className="flex-1 rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100"
                     value={newAccountName}
                     onChange={(event) => setNewAccountName(event.target.value)}
                     placeholder="alice"
                   />
                   <button
-                    className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-semibold text-white"
+                    className="rounded-md bg-[#f7931a] px-4 py-2 text-sm font-semibold text-black"
                     onClick={handleCreateAccount}
                   >
                     Create
@@ -350,24 +640,24 @@ export default function Home() {
               </div>
 
               <div>
-                <label className="text-xs font-semibold uppercase text-zinc-500">
+                <label className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
                   Import account
                 </label>
                 <div className="mt-2 grid gap-2">
                   <input
-                    className="rounded-md border border-zinc-200 px-3 py-2 text-sm"
+                    className="rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100"
                     value={importName}
                     onChange={(event) => setImportName(event.target.value)}
                     placeholder="name"
                   />
                   <input
-                    className="rounded-md border border-zinc-200 px-3 py-2 text-sm"
+                    className="rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100"
                     value={importSecret}
                     onChange={(event) => setImportSecret(event.target.value)}
                     placeholder="secret hex"
                   />
                   <button
-                    className="rounded-md border border-zinc-200 px-4 py-2 text-sm"
+                    className="rounded-md border border-[#24262c] px-4 py-2 text-sm text-zinc-200"
                     onClick={handleImportAccount}
                   >
                     Import
@@ -378,48 +668,48 @@ export default function Home() {
           </div>
 
           <div className="flex flex-col gap-6">
-            <div className="rounded-lg border border-zinc-200 bg-white p-5">
-              <h2 className="text-lg font-semibold">Selected Account</h2>
+            <div className="rounded-xl border border-[#24262c] bg-[#14161a] p-6">
+              <h2 className="font-display text-2xl">Selected Account</h2>
               <p className="mt-2 text-sm text-zinc-500">
                 {selectedAccount
                   ? `${selectedAccount} • ${selectedAddress}`
                   : "Select an account to continue."}
               </p>
-              <p className="mt-2 text-sm text-zinc-700">
-                Balance: {selectedBalance} MIRA
+              <p className="mt-2 text-sm text-zinc-300">
+                Balance: {selectedBalance} SECCO
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
-                  className="rounded-md border border-zinc-200 px-4 py-2 text-sm"
+                  className="rounded-md border border-[#24262c] px-4 py-2 text-sm text-zinc-200"
                   onClick={handleCopyAddress}
                 >
                   Copy Address
                 </button>
                 <button
-                  className="rounded-md border border-zinc-200 px-4 py-2 text-sm"
+                  className="rounded-md border border-[#24262c] px-4 py-2 text-sm text-zinc-200"
                   onClick={handleExportSecret}
                 >
                   Export Secret
                 </button>
               </div>
               {exportSecret && (
-                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
                   Secret key: {exportSecret}
                 </div>
               )}
             </div>
 
-            <div className="rounded-lg border border-zinc-200 bg-white p-5">
-              <h2 className="text-lg font-semibold">Send MIRA</h2>
+            <div className="rounded-xl border border-[#24262c] bg-[#14161a] p-6">
+              <h2 className="font-display text-2xl">Send SECCO</h2>
               <div className="mt-3 grid gap-2">
                 <input
-                  className="rounded-md border border-zinc-200 px-3 py-2 text-sm"
+                  className="rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100"
                   value={transferTo}
                   onChange={(event) => setTransferTo(event.target.value)}
                   placeholder="Recipient address"
                 />
                 <input
-                  className="rounded-md border border-zinc-200 px-3 py-2 text-sm"
+                  className="rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100"
                   value={transferAmount}
                   onChange={(event) => setTransferAmount(event.target.value)}
                   placeholder="Amount"
@@ -427,7 +717,7 @@ export default function Home() {
                   min="0"
                 />
                 <button
-                  className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-semibold text-white"
+                  className="rounded-md bg-[#f7931a] px-4 py-2 text-sm font-semibold text-black"
                   onClick={handleTransfer}
                 >
                   Send
@@ -435,12 +725,12 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="rounded-lg border border-zinc-200 bg-white p-5">
-              <h2 className="text-lg font-semibold">Receive MIRA</h2>
-              <p className="mt-2 text-sm text-zinc-600">
+            <div className="rounded-xl border border-[#24262c] bg-[#14161a] p-6">
+              <h2 className="font-display text-2xl">Receive SECCO</h2>
+              <p className="mt-2 text-sm text-zinc-500">
                 Share this address with the sender:
               </p>
-              <div className="mt-2 rounded-md border border-dashed border-zinc-300 bg-zinc-50 px-3 py-2 text-xs">
+              <div className="mt-2 rounded-md border border-dashed border-[#24262c] bg-[#0f1115] px-3 py-2 text-xs text-zinc-300">
                 {selectedAddress || "Select an account."}
               </div>
             </div>
@@ -451,10 +741,10 @@ export default function Home() {
           <section
             className={`rounded-md px-4 py-2 text-sm ${
               status.kind === "error"
-                ? "bg-red-50 text-red-700"
+                ? "bg-red-500/10 text-red-300"
                 : status.kind === "success"
-                ? "bg-emerald-50 text-emerald-700"
-                : "bg-zinc-100 text-zinc-700"
+                ? "bg-emerald-500/10 text-emerald-300"
+                : "bg-[#14161a] text-zinc-300"
             }`}
           >
             {status.message}

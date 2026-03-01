@@ -688,3 +688,47 @@ This comprehensive test suite covers:
 - ✅ End-to-end workflows
 
 Run these tests regularly to ensure system stability and correctness.
+
+---
+
+## Desktop Wallet Smoke Test
+
+**Goal**: Validate the MIRASET GUI wallet against a running RPC node.
+
+**Steps**:
+
+1. **Start node**
+   ```bash
+   cargo run --bin miraset -- node start
+   ```
+
+2. **Run desktop wallet (dev)**
+   ```bash
+   cd wallet
+   bun install
+   bun run tauri:dev
+   ```
+
+3. **Create account**
+   - Use the UI to create `alice`
+   - Verify the account appears with an address
+
+4. **Fund account**
+   ```bash
+   cargo run --bin miraset -- wallet import genesis 0101010101010101010101010101010101010101010101010101010101010101
+   cargo run --bin miraset -- wallet transfer genesis <ALICE_ADDR> 10000
+   ```
+
+5. **Refresh balance**
+   - Click Refresh in the GUI
+   - Expect balance to update to `10000` MIRA
+
+6. **Send transfer**
+   - Create `bob` in the GUI
+   - Send `1000` MIRA from `alice` to `bob`
+   - Refresh and verify balances update
+
+**Expected**:
+- ✅ Accounts list updates
+- ✅ Balances refresh correctly
+- ✅ Transfers submit without errors

@@ -4,6 +4,7 @@ use miraset_wallet::Wallet;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct AppConfig {
@@ -15,6 +16,19 @@ struct AppConfig {
 struct AccountView {
     name: String,
     address: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ConnectionStatus {
+    state: String,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ConnectionSnapshot {
+    rpc: ConnectionStatus,
+    worker: ConnectionStatus,
+    ollama: ConnectionStatus,
 }
 
 impl AppConfig {
@@ -164,6 +178,50 @@ async fn transfer(from: String, to: String, amount: u64) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn check_connections(
+    rpc_url: String,
+    worker_url: String,
+    ollama_url: String,
+) -> Result<ConnectionSnapshot, String> {
+    let rpc = probe_endpoint(&rpc_url, "/health").await;
+    let worker = probe_endpoint(&worker_url, "/health").await;
+    let ollama = probe_endpoint(&ollama_url, "/api/tags").await;
+
+    Ok(ConnectionSnapshot { rpc, worker, ollama })
+}
+
+async fn probe_endpoint(base_url: &str, path: &str) -> ConnectionStatus {
+    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            return ConnectionStatus {
+                state: "offline".to_string(),
+                detail: Some(err.to_string()),
+            }
+        }
+    };
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => ConnectionStatus {
+            state: "online".to_string(),
+            detail: None,
+        },
+        Ok(resp) => ConnectionStatus {
+            state: "offline".to_string(),
+            detail: Some(format!("HTTP {}", resp.status().as_u16())),
+        },
+        Err(err) => ConnectionStatus {
+            state: "offline".to_string(),
+            detail: Some(err.to_string()),
+        },
+    }
+}
+
 async fn get_nonce(rpc: &str, addr: &Address) -> anyhow::Result<u64> {
     let url = format!("{}/nonce/{}", rpc, addr.to_hex());
     let resp = reqwest::get(&url).await?;
@@ -191,6 +249,7 @@ fn main() {
             export_secret,
             get_balance,
             transfer,
+            check_connections,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
