@@ -8,6 +8,7 @@ members = [
     "crates/miraset-wallet",
     "crates/miraset-indexer",
     "crates/miraset-worker",
+    "crates/miraset-launcher",
 ]
 
 [workspace.package]
@@ -73,4 +74,3 @@ sui-framework = { git = "https://github.com/MystenLabs/sui", tag = "mainnet-v1.9
 
 # Gas metering
 once_cell = "1.19"
-
