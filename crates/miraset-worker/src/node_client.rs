@@ -71,30 +71,25 @@ impl NodeClient {
         let owner = self.keypair.address();
         let pubkey = owner; // For simplicity, using same key
 
-        // Create transaction payload for signing
-        let mut tx_data = Vec::new();
-        tx_data.extend_from_slice(owner.as_bytes());
-        tx_data.extend_from_slice(pubkey.as_bytes());
-        tx_data.extend_from_slice(&bincode::serialize(&endpoints)?);
-        tx_data.extend_from_slice(&bincode::serialize(&gpu_model)?);
-        tx_data.extend_from_slice(&vram_total_gib.to_le_bytes());
-        tx_data.extend_from_slice(&bincode::serialize(&supported_models)?);
-        tx_data.extend_from_slice(&stake_bond.to_le_bytes());
-        tx_data.extend_from_slice(&nonce.to_le_bytes());
-
-        let signature = self.keypair.sign(&tx_data);
-
-        let tx = Transaction::RegisterWorker {
+        // Build TX with zero signature, serialize, sign, then fill signature
+        let mut tx = Transaction::RegisterWorker {
             owner,
             pubkey,
-            endpoints,
-            gpu_model,
+            endpoints: endpoints.clone(),
+            gpu_model: gpu_model.clone(),
             vram_total_gib,
-            supported_models,
+            supported_models: supported_models.clone(),
             stake_bond,
             nonce,
-            signature,
+            signature: [0; 64],
         };
+
+        let msg = bincode::serialize(&tx)?;
+        let signature = self.keypair.sign(&msg);
+
+        if let Transaction::RegisterWorker { signature: ref mut sig, .. } = tx {
+            *sig = signature;
+        }
 
         self.submit_transaction(tx).await?;
 
@@ -116,26 +111,22 @@ impl NodeClient {
         let nonce = self.get_nonce().await?;
         let worker = self.keypair.address();
 
-        // Create transaction payload for signing
-        let mut tx_data = Vec::new();
-        tx_data.extend_from_slice(&job_id);
-        tx_data.extend_from_slice(&worker_id);
-        tx_data.extend_from_slice(&output_tokens.to_le_bytes());
-        tx_data.extend_from_slice(&receipt_hash);
-        tx_data.extend_from_slice(worker.as_bytes());
-        tx_data.extend_from_slice(&nonce.to_le_bytes());
-
-        let signature = self.keypair.sign(&tx_data);
-
-        let tx = Transaction::SubmitJobResult {
+        let mut tx = Transaction::SubmitJobResult {
             job_id,
             worker_id,
             output_tokens,
             receipt_hash,
             worker,
             nonce,
-            signature,
+            signature: [0; 64],
         };
+
+        let msg = bincode::serialize(&tx)?;
+        let signature = self.keypair.sign(&msg);
+
+        if let Transaction::SubmitJobResult { signature: ref mut sig, .. } = tx {
+            *sig = signature;
+        }
 
         self.submit_transaction(tx).await?;
 
@@ -157,26 +148,78 @@ impl NodeClient {
         let nonce = self.get_nonce().await?;
         let submitter = self.keypair.address();
 
-        let mut tx_data = Vec::new();
-        tx_data.extend_from_slice(&job_id);
-        tx_data.extend_from_slice(&receipt_hash);
-        tx_data.extend_from_slice(submitter.as_bytes());
-        tx_data.extend_from_slice(&nonce.to_le_bytes());
-
-        let signature = self.keypair.sign(&tx_data);
-
-        let tx = Transaction::AnchorReceipt {
+        let mut tx = Transaction::AnchorReceipt {
             job_id,
             receipt_hash,
             submitter,
             nonce,
-            signature,
+            signature: [0; 64],
         };
+
+        let msg = bincode::serialize(&tx)?;
+        let signature = self.keypair.sign(&msg);
+
+        if let Transaction::AnchorReceipt { signature: ref mut sig, .. } = tx {
+            *sig = signature;
+        }
 
         self.submit_transaction(tx).await?;
 
         tracing::info!("Anchored receipt: job={:?}", job_id);
 
         Ok(())
+    }
+
+    /// Submit resource snapshot (heartbeat with VRAM data)
+    pub async fn submit_resource_snapshot(
+        &self,
+        worker_id: ObjectId,
+        epoch_id: u64,
+        vram_avail_gib: u32,
+    ) -> Result<()> {
+        let nonce = self.get_nonce().await?;
+        let owner = self.keypair.address();
+
+        let mut tx = Transaction::SubmitResourceSnapshot {
+            worker_id,
+            epoch_id,
+            vram_avail_gib,
+            owner,
+            nonce,
+            signature: [0; 64],
+        };
+
+        let msg = bincode::serialize(&tx)?;
+        let signature = self.keypair.sign(&msg);
+
+        if let Transaction::SubmitResourceSnapshot { signature: ref mut sig, .. } = tx {
+            *sig = signature;
+        }
+
+        self.submit_transaction(tx).await?;
+
+        tracing::debug!(
+            "Submitted resource snapshot: worker={}, vram={}GiB",
+            hex::encode(worker_id),
+            vram_avail_gib,
+        );
+
+        Ok(())
+    }
+
+    /// Get current epoch info from node
+    pub async fn get_epoch(&self) -> Result<serde_json::Value> {
+        let url = format!("{}/epoch", self.base_url);
+        let response = self.client.get(&url).send().await?;
+        Ok(response.json().await?)
+    }
+
+    /// Ping node health
+    pub async fn ping(&self) -> Result<bool> {
+        let url = format!("{}/ping", self.base_url);
+        match self.client.get(&url).send().await {
+            Ok(resp) => Ok(resp.status().is_success()),
+            Err(_) => Ok(false),
+        }
     }
 }

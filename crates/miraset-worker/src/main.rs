@@ -2,6 +2,7 @@
 use anyhow::Result;
 use miraset_worker::{Worker, WorkerConfig};
 use miraset_core::KeyPair;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -27,13 +28,21 @@ async fn main() -> Result<()> {
     let worker = Worker::new(config.clone());
 
     // Register worker on-chain
-    match worker.register_on_chain().await {
+    let registered_worker_id = match worker.register_on_chain().await {
         Ok(worker_id) => {
-            tracing::info!("✓ Worker registered on-chain with ID: {:?}", hex::encode(worker_id));
+            tracing::info!("✓ Worker registered on-chain with ID: {}", hex::encode(worker_id));
+            Some(worker_id)
         }
         Err(e) => {
             tracing::warn!("Failed to register on-chain (node may not be running): {}", e);
+            None
         }
+    };
+
+    // D5: Start heartbeat loop (every 30 seconds)
+    if let Some(worker_id) = registered_worker_id {
+        tracing::info!("♥ Starting heartbeat loop (30s interval)");
+        Arc::clone(&worker).start_heartbeat_loop(worker_id, 30);
     }
 
     let app = worker.router();

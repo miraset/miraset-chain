@@ -1,7 +1,7 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/tauri";
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 const DEFAULT_RPC_URL = "http://127.0.0.1:9944";
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
@@ -213,6 +213,17 @@ export default function Home() {
 
   const [rpcUrlDraft, setRpcUrlDraft] = useState("");
 
+  // D2: Transaction history
+  const [events, setEvents] = useState<Record<string, unknown>[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+
+  // D10: Job submission
+  const [jobModel, setJobModel] = useState("llama2");
+  const [jobMaxTokens, setJobMaxTokens] = useState("256");
+  const [jobEscrow, setJobEscrow] = useState("1000");
+  const [jobs, setJobs] = useState<Record<string, unknown>[]>([]);
+  const [workers, setWorkers] = useState<Record<string, unknown>[]>([]);
+
   const selectedAddress = useMemo(() => {
     const account = accounts.find((item) => item.name === selectedAccount);
     return account?.address ?? "";
@@ -258,6 +269,105 @@ export default function Home() {
       });
     }
   }, [selectedAccount, tauriInvoke]);
+
+  // D3: Auto-refresh balance every 10 seconds
+  const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    if (!isTauri || !accountsLoaded) return;
+    refreshTimerRef.current = setInterval(async () => {
+      try {
+        const accountsList = await tauriInvoke<Account[]>("list_accounts");
+        const enriched = await Promise.all(
+          accountsList.map(async (item) => {
+            const balance = await tauriInvoke<number>("get_balance", {
+              address: item.address,
+            });
+            return { ...item, balance };
+          })
+        );
+        setAccounts(enriched);
+      } catch {
+        // silently ignore — connection polling handles status
+      }
+    }, 10_000);
+    return () => {
+      if (refreshTimerRef.current) clearInterval(refreshTimerRef.current);
+    };
+  }, [isTauri, accountsLoaded, tauriInvoke]);
+
+  // D2: Load transaction events
+  const loadEvents = useCallback(async () => {
+    if (!detectTauri()) return;
+    setEventsLoading(true);
+    try {
+      const evts = await tauriInvoke<Record<string, unknown>[]>("get_events", {
+        from_height: 0,
+        limit: 200,
+      });
+      setEvents(evts);
+    } catch {
+      // silently ignore
+    } finally {
+      setEventsLoading(false);
+    }
+  }, [tauriInvoke]);
+
+  // D10: Load jobs & workers
+  const loadJobs = useCallback(async () => {
+    if (!detectTauri()) return;
+    try {
+      const [j, w] = await Promise.all([
+        tauriInvoke<Record<string, unknown>[]>("get_jobs"),
+        tauriInvoke<Record<string, unknown>[]>("get_workers"),
+      ]);
+      setJobs(j);
+      setWorkers(w);
+    } catch {
+      // silently ignore
+    }
+  }, [tauriInvoke]);
+
+  // D10: Submit inference job
+  async function handleSubmitJob() {
+    if (!selectedAccount) {
+      setStatus({ kind: "error", message: "Select an account first." });
+      return;
+    }
+    const maxTokens = Number(jobMaxTokens);
+    const escrow = Number(jobEscrow);
+    if (!jobModel.trim() || Number.isNaN(maxTokens) || maxTokens <= 0 || Number.isNaN(escrow) || escrow <= 0) {
+      setStatus({ kind: "error", message: "Fill in model, max tokens, and escrow amount." });
+      return;
+    }
+    setStatus({ kind: "loading", message: "Submitting job..." });
+    try {
+      const result = await tauriInvoke<Record<string, unknown>>("submit_job", {
+        from: selectedAccount,
+        model_id: jobModel.trim(),
+        max_tokens: maxTokens,
+        escrow_amount: escrow,
+      });
+      setStatus({
+        kind: "success",
+        message: `Job ${result.status}: ${result.job_id ?? ""}`,
+      });
+      await loadJobs();
+      await refreshAll();
+    } catch (error) {
+      setStatus({
+        kind: "error",
+        message: formatErrorMessage(error, "Job submission failed"),
+      });
+    }
+  }
+
+  // Auto-load events & jobs when accounts are loaded
+  useEffect(() => {
+    if (accountsLoaded && isTauri) {
+      void loadEvents();
+      void loadJobs();
+    }
+  }, [accountsLoaded, isTauri, loadEvents, loadJobs]);
 
   async function handleCreateAccount() {
     if (!newAccountName.trim()) {
@@ -732,6 +842,237 @@ export default function Home() {
               </p>
               <div className="mt-2 rounded-md border border-dashed border-[#24262c] bg-[#0f1115] px-3 py-2 text-xs text-zinc-300">
                 {selectedAddress || "Select an account."}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* D2: Transaction History */}
+        <section className="rounded-xl border border-[#24262c] bg-[#14161a] p-6">
+          <div className="flex items-center justify-between">
+            <h2 className="font-display text-2xl">Transaction History</h2>
+            <button
+              className="rounded-md border border-[#24262c] px-3 py-1.5 text-xs text-zinc-300"
+              onClick={loadEvents}
+            >
+              {eventsLoading ? "Loading…" : "Refresh"}
+            </button>
+          </div>
+          <div className="mt-4 max-h-72 overflow-y-auto">
+            {events.length === 0 ? (
+              <p className="text-sm text-zinc-500">No events yet.</p>
+            ) : (
+              <table className="w-full text-xs text-zinc-300">
+                <thead>
+                  <tr className="border-b border-[#24262c] text-left text-zinc-500">
+                    <th className="pb-2 pr-3">Block</th>
+                    <th className="pb-2 pr-3">Type</th>
+                    <th className="pb-2 pr-3">Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.map((evt, i) => {
+                    const evtType = Object.keys(evt).find(
+                      (k) => k !== "tx_hash" && k !== "block_height"
+                    );
+                    const blockH =
+                      (evt as Record<string, unknown>).block_height ??
+                      (evt as Record<string, Record<string, unknown>>)[evtType ?? ""]?.block_height ??
+                      "?";
+                    let detail = "";
+                    const inner = evtType
+                      ? (evt as Record<string, unknown>)[evtType]
+                      : evt;
+                    if (typeof inner === "object" && inner !== null) {
+                      const d = inner as Record<string, unknown>;
+                      if (d.amount !== undefined) {
+                        const fromShort = String(d.from ?? "").slice(0, 8);
+                        const toShort = String(d.to ?? "").slice(0, 8);
+                        detail = `${fromShort}→${toShort} ${d.amount} SECCO`;
+                      } else if (d.message !== undefined) {
+                        const fromShort = String(d.from ?? "").slice(0, 8);
+                        detail = `${fromShort}: ${String(d.message).slice(0, 60)}`;
+                      } else if (d.gpu_model !== undefined) {
+                        detail = `Worker: ${d.gpu_model} ${d.vram_gib}GiB`;
+                      } else if (d.model_id !== undefined) {
+                        detail = `Job: ${d.model_id} (${d.max_tokens} tok)`;
+                      } else {
+                        detail = JSON.stringify(inner).slice(0, 80);
+                      }
+                    }
+                    // Determine a readable event type label
+                    let typeLabel = "Event";
+                    if (evtType) {
+                      typeLabel = evtType;
+                    } else {
+                      // Tagged enum from serde — the type key holds the variant
+                      const keys = Object.keys(evt);
+                      const variant = keys.find(
+                        (k) =>
+                          k !== "tx_hash" &&
+                          k !== "block_height" &&
+                          typeof (evt as Record<string, unknown>)[k] !== "string"
+                      );
+                      if (variant) typeLabel = variant;
+                      // Serde tagged: top level has variant name as key
+                      // If event is flat, try common fields
+                      if (evt.Transferred !== undefined) typeLabel = "Transfer";
+                      if (evt.ChatMessage !== undefined) typeLabel = "Chat";
+                      if (evt.WorkerRegistered !== undefined) typeLabel = "Worker Reg";
+                      if (evt.JobCreated !== undefined) typeLabel = "Job Created";
+                      if (evt.JobCompleted !== undefined) typeLabel = "Job Done";
+                    }
+                    return (
+                      <tr
+                        key={i}
+                        className="border-b border-[#24262c]/50"
+                      >
+                        <td className="py-1.5 pr-3 tabular-nums">{String(blockH)}</td>
+                        <td className="py-1.5 pr-3 font-semibold">{typeLabel}</td>
+                        <td className="py-1.5 truncate max-w-[300px]">{detail}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </section>
+
+        {/* D10: Submit Inference Job + Workers & Jobs */}
+        <section className="grid gap-6 lg:grid-cols-2">
+          {/* Submit Job */}
+          <div className="rounded-xl border border-[#24262c] bg-[#14161a] p-6">
+            <h2 className="font-display text-2xl">Submit Inference Job</h2>
+            <div className="mt-3 grid gap-2">
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
+                  Model
+                </label>
+                <input
+                  className="mt-1 w-full rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100"
+                  value={jobModel}
+                  onChange={(e) => setJobModel(e.target.value)}
+                  placeholder="llama2"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
+                    Max Tokens
+                  </label>
+                  <input
+                    className="mt-1 w-full rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100"
+                    value={jobMaxTokens}
+                    onChange={(e) => setJobMaxTokens(e.target.value)}
+                    type="number"
+                    min="1"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-400">
+                    Escrow (SECCO)
+                  </label>
+                  <input
+                    className="mt-1 w-full rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-sm text-zinc-100"
+                    value={jobEscrow}
+                    onChange={(e) => setJobEscrow(e.target.value)}
+                    type="number"
+                    min="1"
+                  />
+                </div>
+              </div>
+              <button
+                className="rounded-md bg-[#f7931a] px-4 py-2 text-sm font-semibold text-black"
+                onClick={handleSubmitJob}
+              >
+                Submit Job
+              </button>
+            </div>
+          </div>
+
+          {/* Workers & Jobs panels */}
+          <div className="flex flex-col gap-4">
+            {/* Workers */}
+            <div className="rounded-xl border border-[#24262c] bg-[#14161a] p-6">
+              <div className="flex items-center justify-between">
+                <h2 className="font-display text-xl">Workers</h2>
+                <span className="text-xs text-zinc-500">{workers.length} registered</span>
+              </div>
+              <div className="mt-3 max-h-36 overflow-y-auto">
+                {workers.length === 0 ? (
+                  <p className="text-xs text-zinc-500">No workers registered.</p>
+                ) : (
+                  <div className="grid gap-2">
+                    {workers.map((w, i) => (
+                      <div
+                        key={i}
+                        className="flex items-center justify-between rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-xs"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`h-2 w-2 rounded-full ${
+                              String(w.status) === "Active"
+                                ? "bg-emerald-400"
+                                : "bg-zinc-500"
+                            }`}
+                          />
+                          <span className="text-zinc-200">{String(w.gpu_model)}</span>
+                          <span className="text-zinc-500">{String(w.vram_gib)}GiB</span>
+                        </div>
+                        <span className="text-zinc-500 truncate max-w-[120px]">
+                          {String(w.worker_id).slice(0, 12)}…
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Jobs */}
+            <div className="rounded-xl border border-[#24262c] bg-[#14161a] p-6">
+              <div className="flex items-center justify-between">
+                <h2 className="font-display text-xl">Jobs</h2>
+                <button
+                  className="rounded-md border border-[#24262c] px-3 py-1 text-xs text-zinc-300"
+                  onClick={loadJobs}
+                >
+                  Refresh
+                </button>
+              </div>
+              <div className="mt-3 max-h-36 overflow-y-auto">
+                {jobs.length === 0 ? (
+                  <p className="text-xs text-zinc-500">No jobs.</p>
+                ) : (
+                  <div className="grid gap-2">
+                    {jobs.map((j, i) => (
+                      <div
+                        key={i}
+                        className="flex items-center justify-between rounded-md border border-[#24262c] bg-[#0f1115] px-3 py-2 text-xs"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`h-2 w-2 rounded-full ${
+                              String(j.status) === "Completed"
+                                ? "bg-emerald-400"
+                                : String(j.status) === "Assigned"
+                                ? "bg-amber-400"
+                                : String(j.status) === "Failed"
+                                ? "bg-red-400"
+                                : "bg-blue-400"
+                            }`}
+                          />
+                          <span className="text-zinc-200">{String(j.model_id)}</span>
+                          <span className="text-zinc-500">{String(j.status)}</span>
+                        </div>
+                        <span className="text-zinc-500 truncate max-w-[120px]">
+                          {String(j.job_id).slice(0, 12)}…
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </div>

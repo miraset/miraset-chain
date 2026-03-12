@@ -222,6 +222,83 @@ async fn probe_endpoint(base_url: &str, path: &str) -> ConnectionStatus {
     }
 }
 
+// D2: Fetch transaction events from node
+#[tauri::command]
+async fn get_events(from_height: Option<u64>, limit: Option<usize>) -> Result<Vec<serde_json::Value>, String> {
+    let config = load_config().map_err(|err| err.to_string())?;
+    let from = from_height.unwrap_or(0);
+    let lim = limit.unwrap_or(100);
+    let url = format!("{}/events?from_height={}&limit={}", config.rpc_url, from, lim);
+    let resp = reqwest::get(&url).await.map_err(|err| err.to_string())?;
+    let events: Vec<serde_json::Value> = resp.json().await.map_err(|err| err.to_string())?;
+    Ok(events)
+}
+
+// D10: List registered workers from node
+#[tauri::command]
+async fn get_workers() -> Result<Vec<serde_json::Value>, String> {
+    let config = load_config().map_err(|err| err.to_string())?;
+    let url = format!("{}/workers", config.rpc_url);
+    let resp = reqwest::get(&url).await.map_err(|err| err.to_string())?;
+    let workers: Vec<serde_json::Value> = resp.json().await.map_err(|err| err.to_string())?;
+    Ok(workers)
+}
+
+// D10: Submit inference job via coordinator
+#[tauri::command]
+async fn submit_job(
+    from: String,
+    model_id: String,
+    max_tokens: u64,
+    escrow_amount: u64,
+) -> Result<serde_json::Value, String> {
+    let config = load_config().map_err(|err| err.to_string())?;
+    let wallet = open_wallet(Path::new(&config.wallet_path)).map_err(|err| err.to_string())?;
+    let kp = wallet.get_keypair(&from).map_err(|err| err.to_string())?;
+
+    let url = format!("{}/jobs/submit", config.rpc_url);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "requester": kp.address().to_hex(),
+            "model_id": model_id,
+            "max_tokens": max_tokens,
+            "escrow_amount": escrow_amount
+        }))
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Job submission failed: {}", text));
+    }
+
+    let result: serde_json::Value = resp.json().await.map_err(|err| err.to_string())?;
+    Ok(result)
+}
+
+// D10: Get current epoch info
+#[tauri::command]
+async fn get_epoch() -> Result<serde_json::Value, String> {
+    let config = load_config().map_err(|err| err.to_string())?;
+    let url = format!("{}/epoch", config.rpc_url);
+    let resp = reqwest::get(&url).await.map_err(|err| err.to_string())?;
+    let epoch: serde_json::Value = resp.json().await.map_err(|err| err.to_string())?;
+    Ok(epoch)
+}
+
+// D10: List jobs
+#[tauri::command]
+async fn get_jobs() -> Result<Vec<serde_json::Value>, String> {
+    let config = load_config().map_err(|err| err.to_string())?;
+    let url = format!("{}/jobs", config.rpc_url);
+    let resp = reqwest::get(&url).await.map_err(|err| err.to_string())?;
+    let jobs: Vec<serde_json::Value> = resp.json().await.map_err(|err| err.to_string())?;
+    Ok(jobs)
+}
+
 async fn get_nonce(rpc: &str, addr: &Address) -> anyhow::Result<u64> {
     let url = format!("{}/nonce/{}", rpc, addr.to_hex());
     let resp = reqwest::get(&url).await?;
@@ -250,6 +327,11 @@ fn main() {
             get_balance,
             transfer,
             check_connections,
+            get_events,
+            get_workers,
+            submit_job,
+            get_epoch,
+            get_jobs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

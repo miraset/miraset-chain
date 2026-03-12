@@ -135,19 +135,25 @@ impl State {
         let nonce = tx.nonce();
         let signature = tx.signature();
 
-        // Verify signature (simplified for MVP - only for legacy transactions)
-        let needs_sig_verify = matches!(tx,
-            Transaction::Transfer { .. } |
-            Transaction::ChatSend { .. });
-
-        if needs_sig_verify {
-            let tx_copy = tx.clone();
-            let mut tx_for_hash = tx_copy;
-            // Remove signature for hashing
+        // D6: Verify signature for ALL transaction types using zero-sig canonical pattern
+        {
+            let mut tx_for_hash = tx.clone();
+            // Zero out signature for canonical hashing
             match &mut tx_for_hash {
                 Transaction::Transfer { signature, .. } => *signature = [0; 64],
                 Transaction::ChatSend { signature, .. } => *signature = [0; 64],
-                _ => {}
+                Transaction::CreateObject { signature, .. } => *signature = [0; 64],
+                Transaction::MutateObject { signature, .. } => *signature = [0; 64],
+                Transaction::TransferObject { signature, .. } => *signature = [0; 64],
+                Transaction::RegisterWorker { signature, .. } => *signature = [0; 64],
+                Transaction::SubmitResourceSnapshot { signature, .. } => *signature = [0; 64],
+                Transaction::CreateJob { signature, .. } => *signature = [0; 64],
+                Transaction::AssignJob { signature, .. } => *signature = [0; 64],
+                Transaction::SubmitJobResult { signature, .. } => *signature = [0; 64],
+                Transaction::AnchorReceipt { signature, .. } => *signature = [0; 64],
+                Transaction::ChallengeJob { signature, .. } => *signature = [0; 64],
+                Transaction::MoveCall { signature, .. } => *signature = [0; 64],
+                Transaction::PublishModule { signature, .. } => *signature = [0; 64],
             }
             let msg = bincode::serialize(&tx_for_hash).unwrap();
             if !miraset_core::verify_signature(from, &msg, signature) {
@@ -874,6 +880,116 @@ impl State {
         };
 
         w.current_epoch.add_job_result(result);
+    }
+
+    // ===== Job Coordinator (D1) =====
+
+    /// Create a job directly (coordinator path, no TX needed for demo)
+    pub fn create_job(
+        &self,
+        requester: &Address,
+        model_id: String,
+        max_tokens: u64,
+        escrow_amount: u64,
+    ) -> Result<ObjectId, String> {
+        let mut w = self.inner.write();
+
+        let balance = w.balances.get(requester).copied().unwrap_or(0);
+        if balance < escrow_amount {
+            return Err("Insufficient balance for escrow".to_string());
+        }
+
+        // Deduct escrow
+        let new_balance = balance - escrow_amount;
+        w.balances.insert(*requester, new_balance);
+        if let Some(ref storage) = self.storage {
+            let _ = storage.save_balance(requester, new_balance);
+        }
+
+        let job_id = new_object_id(
+            &bincode::serialize(&(requester, &model_id, Utc::now().timestamp_nanos_opt())).unwrap(),
+        );
+
+        let data = ObjectData::InferenceJob {
+            job_id,
+            epoch_id: w.current_epoch.id,
+            requester: *requester,
+            model_id,
+            max_tokens,
+            assigned_worker_id: None,
+            fixed_price_per_token: crate::epoch::PRICE_PER_TOKEN,
+            escrow_amount,
+            status: JobStatus::Created,
+            created_at: Utc::now(),
+        };
+
+        let obj = Object::new(*requester, data);
+        w.objects.insert(job_id, obj);
+        w.object_versions.insert(job_id, 0);
+        w.owned_objects
+            .entry(*requester)
+            .or_insert_with(Vec::new)
+            .push(job_id);
+
+        Ok(job_id)
+    }
+
+    /// Auto-assign a job to the first available worker that supports the model
+    pub fn auto_assign_job(&self, job_id: &ObjectId, model_id: &str) -> Option<ObjectId> {
+        let mut w = self.inner.write();
+
+        // Find a worker that supports this model and is Active
+        let worker_id = {
+            let mut found = None;
+            for (wid, obj) in &w.objects {
+                if let ObjectData::WorkerRegistration {
+                    supported_models,
+                    status,
+                    ..
+                } = &obj.data
+                {
+                    if *status == WorkerStatus::Active
+                        && supported_models.iter().any(|m| m == model_id)
+                    {
+                        found = Some(*wid);
+                        break;
+                    }
+                }
+            }
+            found
+        };
+
+        if let Some(worker_id) = worker_id {
+            // Update job with assignment
+            if let Some(obj) = w.objects.get_mut(job_id) {
+                if let ObjectData::InferenceJob {
+                    assigned_worker_id,
+                    status,
+                    ..
+                } = &mut obj.data
+                {
+                    *assigned_worker_id = Some(worker_id);
+                    *status = JobStatus::Assigned;
+                    obj.version += 1;
+                }
+                let new_version = obj.version;
+                w.object_versions.insert(*job_id, new_version);
+            }
+            Some(worker_id)
+        } else {
+            None
+        }
+    }
+
+    /// Get the HTTP endpoint of a registered worker
+    pub fn get_worker_endpoint(&self, worker_id: &ObjectId) -> Option<String> {
+        let r = self.inner.read();
+        if let Some(obj) = r.objects.get(worker_id) {
+            if let ObjectData::WorkerRegistration { endpoints, .. } = &obj.data {
+                return endpoints.first().cloned();
+            }
+        }
+        None
     }
 }
 

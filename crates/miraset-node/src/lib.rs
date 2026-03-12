@@ -26,11 +26,16 @@ pub async fn run_block_producer(state: State, interval: Duration) {
     let mut ticker = time::interval(interval);
     loop {
         ticker.tick().await;
+
+        // D4: Auto-advance epoch status
+        state.update_epoch();
+
         let block = state.produce_block();
         tracing::info!(
-            "Produced block #{} with {} txs",
+            "Produced block #{} with {} txs (epoch {})",
             block.height,
-            block.transactions.len()
+            block.transactions.len(),
+            state.get_current_epoch().id,
         );
     }
 }

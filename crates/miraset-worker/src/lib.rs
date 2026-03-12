@@ -413,6 +413,67 @@ impl Worker {
             1000, // stake_bond
         ).await
     }
+
+    /// Get worker config (for heartbeat loop)
+    pub fn worker_id(&self) -> ObjectId {
+        self.config.worker_id
+    }
+
+    pub fn vram_total_gib(&self) -> u32 {
+        self.config.vram_total_gib
+    }
+
+    /// Start heartbeat loop — sends ResourceSnapshot TX every `interval` seconds
+    pub fn start_heartbeat_loop(self: Arc<Self>, worker_id: ObjectId, interval_secs: u64) {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                ticker.tick().await;
+
+                // Ping node to check connectivity
+                match self.node_client.ping().await {
+                    Ok(true) => {
+                        tracing::debug!("Heartbeat: node is reachable");
+                    }
+                    _ => {
+                        tracing::warn!("Heartbeat: node is unreachable, skipping snapshot");
+                        continue;
+                    }
+                }
+
+                // Get current epoch id from node
+                let epoch_id = match self.node_client.get_epoch().await {
+                    Ok(epoch) => epoch["id"].as_u64().unwrap_or(0),
+                    Err(_) => 0,
+                };
+
+                // Estimate available VRAM (for demo: total minus active jobs)
+                let active_jobs = self.jobs.read().values()
+                    .filter(|j| j.status == JobStatus::Running)
+                    .count() as u32;
+                let vram_used_per_job: u32 = 4; // estimate 4 GiB per job
+                let vram_avail = self.config.vram_total_gib.saturating_sub(active_jobs * vram_used_per_job);
+
+                // Submit resource snapshot TX
+                match self.node_client.submit_resource_snapshot(
+                    worker_id,
+                    epoch_id,
+                    vram_avail,
+                ).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "♥ Heartbeat sent: epoch={}, vram_avail={}GiB",
+                            epoch_id,
+                            vram_avail
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Heartbeat failed: {}", e);
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Health check handler
