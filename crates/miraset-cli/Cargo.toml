@@ -1,0 +1,25 @@
+[package]
+name = "miraset-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "miraset"
+path = "src/main.rs"
+
+[dependencies]
+miraset-core = { path = "../miraset-core" }
+miraset-wallet = { path = "../miraset-wallet" }
+miraset-node = { path = "../miraset-node" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest = { version = "0.13.1", features = ["json"] }
+hex.workspace = true
+bincode.workspace = true
+toml.workspace = true

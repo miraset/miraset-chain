@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    container_name: miraset-node1
+    ports:
+      - "9944:9944"
+    volumes:
+      - node1-data:/data
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    networks:
+      - miraset-net
+    command: ["sh", "-c", "miraset node start --rpc-addr 0.0.0.0:9944 2>&1"]
+
+networks:
+  miraset-net:
+    driver: bridge
+
+volumes:
+  node1-data:

@@ -1,0 +1,161 @@
+# Miraset Chain - Sui-like Object-Centric Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         MIRASET BLOCKCHAIN                           │
+│                    (Sui-like Object Model)                           │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                        OBJECT STORAGE LAYER                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐              │
+│  │   Account    │  │   Worker     │  │    Job       │              │
+│  │   Object     │  │ Registration │  │   Object     │              │
+│  ├──────────────┤  ├──────────────┤  ├──────────────┤              │
+│  │ id: [u8;32]  │  │ id: [u8;32]  │  │ id: [u8;32]  │              │
+│  │ version: u64 │  │ version: u64 │  │ version: u64 │              │
+│  │ owner: Addr  │  │ owner: Addr  │  │ owner: Addr  │              │
+│  │ balance: u64 │  │ gpu_model    │  │ model_id     │              │
+│  │ nonce: u64   │  │ vram_gib     │  │ max_tokens   │              │
+│  └──────────────┘  │ endpoints    │  │ escrow       │              │
+│                     │ status       │  │ status       │              │
+│  ┌──────────────┐  └──────────────┘  │ worker_id    │              │
+│  │  Resource    │                     └──────────────┘              │
+│  │  Snapshot    │  ┌──────────────┐                                │
+│  ├──────────────┤  │   Receipt    │  ┌──────────────┐              │
+│  │ id: [u8;32]  │  │   Anchor     │  │    Epoch     │              │
+│  │ worker_id    │  ├──────────────┤  │    Batch     │              │
+│  │ epoch_id     │  │ job_id       │  ├──────────────┤              │
+│  │ vram_avail   │  │ receipt_hash │  │ epoch_id     │              │
+│  │ timestamp    │  │ anchored_at  │  │ batch_root   │              │
+│  └──────────────┘  └──────────────┘  │ total_tokens │              │
+│                                       │ settled      │              │
+│                                       └──────────────┘              │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                      TRANSACTION LAYER                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  Object Operations:          PoCC Operations:                        │
+│  ├─ CreateObject            ├─ RegisterWorker                       │
+│  ├─ MutateObject            ├─ SubmitResourceSnapshot               │
+│  ├─ TransferObject          ├─ CreateJob                            │
+│  └─ (version checking)      ├─ AssignJob                            │
+│                              ├─ SubmitJobResult                      │
+│  Legacy Operations:          ├─ AnchorReceipt                       │
+│  ├─ Transfer                 └─ ChallengeJob                        │
+│  └─ ChatSend                                                         │
+│                                                                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    EPOCH SETTLEMENT LAYER                            │
+│                      (60-minute cycles)                              │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  Epoch Timeline:                                                     │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │ 0min    Active Phase (60min)    60min   Submit (40min)  100min│ │
+│  │  │◄────────────────────────────►│◄────────────────────►│       │ │
+│  │  │     Jobs executed            │  Workers submit      │       │ │
+│  │  │     Heartbeats recorded      │  results & receipts  │       │ │
+│  │  │                              │                      │       │ │
+│  │  └──────────────────────────────┴──────────────────────┘       │ │
+│  │                                                                  │ │
+│  │ 100min  Challenge Window (20min)    120min                      │ │
+│  │  │◄──────────────────────────────────►│                        │ │
+│  │  │   Anyone can challenge results    │  Settlement            │ │
+│  │  │   Submit dispute evidence         │  & Rewards             │ │
+│  │  └───────────────────────────────────┴─► Distribution         │ │
+│  └────────────────────────────────────────────────────────────────┘ │
+│                                                                       │
+│  Per-Worker Statistics:                                              │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ U_i(e) = Uptime Score      [0,1]  (heartbeat_success / total) │  │
+│  │ V_i(e) = VRAM Available    GiB    (time-averaged snapshots)   │  │
+│  │ T_i(e) = Verified Tokens   count  (sum of job outputs)        │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                       │
+│  Reward Calculation:                                                 │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Total Budget: 1,000,000,000 tokens/epoch                      │  │
+│  │                                                                │  │
+│  │ Capacity Pool (70%):  700,000,000 tokens                      │  │
+│  │   Formula: C_i(e) = U_i(e)² × min(V_i(e), 80)¹               │  │
+│  │   Minimum: U_i(e) ≥ 0.90 to qualify                          │  │
+│  │   Distribution: proportional to C_i(e)                        │  │
+│  │                                                                │  │
+│  │ Compute Pool (30%):   300,000,000 tokens                      │  │
+│  │   Distribution: proportional to T_i(e) / Σ T_i(e)            │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                                                                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                        EVENT STREAM                                  │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  Object Events:              PoCC Events:                            │
+│  ├─ ObjectCreated           ├─ WorkerRegistered                     │
+│  ├─ ObjectMutated           ├─ ResourceSnapshotSubmitted            │
+│  ├─ ObjectTransferred       ├─ JobCreated                           │
+│                              ├─ JobAssigned                          │
+│  Legacy Events:              ├─ JobCompleted                        │
+│  ├─ Transferred             ├─ ReceiptAnchored                      │
+│  ├─ ChatMessage             ├─ JobChallenged                        │
+│                              ├─ EpochSettled                         │
+│                              └─ RewardsDistributed                   │
+│                                                                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    EXECUTION FLOW EXAMPLE                            │
+└─────────────────────────────────────────────────────────────────────┘
+
+Worker Registration → Job Creation → Job Assignment → Job Execution
+        │                  │              │                  │
+        ▼                  ▼              ▼                  ▼
+┌────────────────┐  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐
+│ CreateObject:  │  │ CreateJob:  │  │ AssignJob:  │  │SubmitResult: │
+│ WorkerReg      │  │ - Escrow    │  │ - Update    │  │ - Tokens     │
+│ - GPU info     │  │ - Create    │  │   job obj   │  │ - Receipt    │
+│ - Endpoints    │  │   job obj   │  │ - Assign    │  │   hash       │
+│ - VRAM         │  │             │  │   worker    │  │              │
+└────────┬───────┘  └──────┬──────┘  └──────┬──────┘  └──────┬───────┘
+         │                 │                 │                 │
+         ▼                 ▼                 ▼                 ▼
+    [Worker Obj]      [Job Obj]        [Job Obj]         [Epoch Stats]
+    ID: 0x1a2b       ID: 0x3c4d       Status: Assigned   T_i(e) += 850
+    Owner: Alice     Owner: Bob       Worker: 0x1a2b     
+    Status: Active   Escrow: 10000    
+         │                 │                 │                 │
+         └─────────────────┴─────────────────┴─────────────────┘
+                                   │
+                                   ▼
+                         ┌──────────────────┐
+                         │  Epoch End:      │
+                         │  - Settle jobs   │
+                         │  - Calc rewards  │
+                         │  - Distribute    │
+                         └──────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                    KEY ARCHITECTURAL FEATURES                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│  ✓ Object Ownership & Versioning (Sui-like)                         │
+│  ✓ Optimistic Concurrency Control                                   │
+│  ✓ Parallel Execution Ready (independent objects)                   │
+│  ✓ First-class Objects for Workers & Jobs                           │
+│  ✓ Epoch-based Settlement (60-minute cycles)                        │
+│  ✓ Dual Reward System (Capacity + Compute)                          │
+│  ✓ Receipt Hash Anchoring (proof of work)                           │
+│  ✓ Challenge Window (dispute resolution)                            │
+│  ✓ Deterministic Reward Calculation                                 │
+│  ✓ Backward Compatible (account balances preserved)                 │
+│                                                                       │
+└─────────────────────────────────────────────────────────────────────┘
+```
