@@ -1,0 +1,45 @@
+[package]
+name = "miraset-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+miraset-core = { path = "../miraset-core" }
+tokio = { workspace = true, features = ["full"] }
+axum = { workspace = true }
+tower.workspace = true
+tower-http = { workspace = true, features = ["trace", "cors"] }
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+hex.workspace = true
+
+# HTTP client for calling Ollama/vLLM
+reqwest = { version = "0.11", features = ["json", "stream"] }
+
+# Async streaming
+futures = "0.3"
+tokio-stream.workspace = true
+
+# Async trait
+async-trait = "0.1"
+
+# Metrics
+prometheus = "0.13"
+
+# Random (for testing)
+rand.workspace = true
+
+[[bin]]
+name = "miraset-worker"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3.8"

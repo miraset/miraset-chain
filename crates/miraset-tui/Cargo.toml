@@ -1,0 +1,23 @@
+[package]
+name = "miraset-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "miraset-tui"
+path = "src/main.rs"
+
+[dependencies]
+miraset-core = { path = "../miraset-core" }
+miraset-wallet = { path = "../miraset-wallet" }
+tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest = { version = "0.12", features = ["json"] }
+chrono.workspace = true
+hex.workspace = true
+bincode.workspace = true

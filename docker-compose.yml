@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    container_name: miraset-node1
+    ports:
+      - "9944:9944"
+    volumes:
+      - node1-data:/data
+    environment:
+      - NODE_ID=1
+      - RUST_LOG=info
+      - RPC_ADDR=0.0.0.0:9944
+    networks:
+      miraset-net:
+        ipv4_address: 172.20.0.11
+    command: miraset node start --rpc-addr 0.0.0.0:9944
+
+  node2:
+    build: .
+    container_name: miraset-node2
+    ports:
+      - "9945:9944"
+    volumes:
+      - node2-data:/data
+    environment:
+      - NODE_ID=2
+      - RUST_LOG=info
+      - RPC_ADDR=0.0.0.0:9944
+    networks:
+      miraset-net:
+        ipv4_address: 172.20.0.12
+    command: miraset node start --rpc-addr 0.0.0.0:9944
+
+  node3:
+    build: .
+    container_name: miraset-node3
+    ports:
+      - "9946:9944"
+    volumes:
+      - node3-data:/data
+    environment:
+      - NODE_ID=3
+      - RUST_LOG=info
+      - RPC_ADDR=0.0.0.0:9944
+    networks:
+      miraset-net:
+        ipv4_address: 172.20.0.13
+    command: miraset node start --rpc-addr 0.0.0.0:9944
+
+  node4:
+    build: .
+    container_name: miraset-node4
+    ports:
+      - "9947:9944"
+    volumes:
+      - node4-data:/data
+    environment:
+      - NODE_ID=4
+      - RUST_LOG=info
+      - RPC_ADDR=0.0.0.0:9944
+    networks:
+      miraset-net:
+        ipv4_address: 172.20.0.14
+    command: miraset node start --rpc-addr 0.0.0.0:9944
+
+networks:
+  miraset-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
