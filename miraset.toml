@@ -8,5 +8,5 @@ rpc_addr = "127.0.0.1:9944"
 # Storage path (relative to project root)
 storage_path = ".data"
 
-# Block production interval in seconds
-block_interval = 5
+# Block production interval in seconds (5 minutes)
+block_interval = 300

@@ -9,7 +9,7 @@ cargo run --bin miraset -- node start
 **Defaults:**
 - RPC: `127.0.0.1:9944`
 - Storage: `.data`
-- Block interval: 5 seconds
+- Block interval: 5 minutes (300 seconds)
 
 ---
 
@@ -42,7 +42,7 @@ Create `miraset.toml` in project root:
 [node]
 rpc_addr = "127.0.0.1:9944"
 storage_path = ".data"
-block_interval = 5
+block_interval = 300
 ```
 
 ### Environment Variables
@@ -50,7 +50,7 @@ block_interval = 5
 ```bash
 export MIRASET_RPC_ADDR="127.0.0.1:9944"
 export MIRASET_STORAGE_PATH=".data"
-export MIRASET_BLOCK_INTERVAL="5"
+export MIRASET_BLOCK_INTERVAL="300"
 ```
 
 ---
@@ -69,7 +69,7 @@ CLI Flags > Environment Variables > Config File > Defaults
 
 ```bash
 cargo run --bin miraset -- node start
-# Uses: .data, 127.0.0.1:9944, 5s blocks
+# Uses: .data, 127.0.0.1:9944, 300s blocks
 ```
 
 ### Fast Testing

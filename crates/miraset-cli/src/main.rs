@@ -50,7 +50,7 @@ fn default_storage_path() -> String {
 }
 
 fn default_block_interval() -> u64 {
-    5
+    300
 }
 
 /// Load configuration with precedence: CLI flags > Env vars > Config file > Defaults

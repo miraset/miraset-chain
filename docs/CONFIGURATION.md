@@ -32,7 +32,7 @@ cargo run --bin miraset -- node start \
 |------|------|---------|-------------|
 | `--rpc-addr` | String | `127.0.0.1:9944` | RPC server bind address |
 | `--storage-path` | String | `.data` | Path to persistent storage |
-| `--block-interval` | u64 | `5` | Block production interval (seconds) |
+| `--block-interval` | u64 | `300` | Block production interval (seconds) |
 
 ### 2. Environment Variables
 
@@ -75,8 +75,8 @@ rpc_addr = "127.0.0.1:9944"
 # Storage path (relative to project root)
 storage_path = ".data"
 
-# Block production interval in seconds
-block_interval = 5
+# Block production interval in seconds (5 minutes)
+block_interval = 300
 ```
 
 **Location:**
@@ -92,7 +92,7 @@ If no configuration is provided, these defaults are used:
 |---------|---------------|
 | `rpc_addr` | `127.0.0.1:9944` |
 | `storage_path` | `.data` |
-| `block_interval` | `5` |
+| `block_interval` | `300` |
 
 ---
 
@@ -108,7 +108,7 @@ cargo run --bin miraset -- node start
 **Result:**
 - RPC: `127.0.0.1:9944`
 - Storage: `.data/`
-- Block interval: 5 seconds
+- Block interval: 5 minutes
 
 ### Example 2: Production Setup
 
@@ -152,7 +152,7 @@ services:
     environment:
       - MIRASET_RPC_ADDR=0.0.0.0:9944
       - MIRASET_STORAGE_PATH=/data
-      - MIRASET_BLOCK_INTERVAL=5
+      - MIRASET_BLOCK_INTERVAL=300
 ```
 
 ### Example 5: Multiple Overrides
@@ -162,7 +162,7 @@ services:
 [node]
 rpc_addr = "127.0.0.1:9944"
 storage_path = ".data"
-block_interval = 5
+block_interval = 300
 ```
 
 **Environment:**
