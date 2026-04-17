@@ -51,15 +51,15 @@ Blockchain validators who:
 
 ## Technical Architecture
 
-### Blockchain Layer (Sui-Based)
+### Blockchain Layer
 
-**Platform:** Built on Sui blockchain (v1.9.1 Move VM)
+**Platform:** Built as a custom Rust blockchain focused on native assets and object-backed protocol state.
 
-**Why Sui:**
-- Lower resource consumption compared to alternatives
-- Object-centric state model (perfect for job lifecycle management)
-- Production-ready with robust tooling
-- Native Move language for smart contracts
+**Why this design:**
+- Object-centric state model for job lifecycle management
+- Native protocol operations without smart-contract complexity
+- Tight control over serialization, storage, and execution
+- Smaller runtime surface for the MVP
 
 **On-Chain State:**
 - Worker registrations and capabilities
@@ -242,7 +242,7 @@ User Escrow → Worker Payment (per-token pricing)
 
 ## Data Architecture
 
-### On-Chain Objects (Sui Model)
+### On-Chain Objects
 
 #### WorkerRegistration
 ```
@@ -305,7 +305,7 @@ User Escrow → Worker Payment (per-token pricing)
 
 ### Core Components
 
-- **Blockchain:** Sui (Rust + Move smart contracts)
+- **Blockchain:** Custom Rust chain with native asset and object operations
 - **Worker Runtime:** Rust (`axum` + `tokio` async runtime)
 - **Inference Engine:** Ollama or LMStudio (interchangeable)
 - **Storage:** Sled DB (on-chain state), PostgreSQL (indexer)
@@ -316,7 +316,7 @@ User Escrow → Worker Payment (per-token pricing)
 
 - **Language:** Rust (performance, safety, async)
 - **HTTP Framework:** Axum (ergonomic, fast)
-- **Serialization:** Serde + BCS (canonical binary format)
+- **Serialization:** Serde + bincode
 - **Database:** SQLx + PostgreSQL
 - **Observability:** Tracing, Prometheus metrics
 - **Testing:** Integration tests with Docker Compose
@@ -356,7 +356,7 @@ User Escrow → Worker Payment (per-token pricing)
 ## Roadmap
 
 ### Phase 1: MVP (Current)
-- ✅ Sui-based blockchain integration
+- ✅ Custom Rust blockchain integration
 - ✅ Worker registration and capability tracking
 - ✅ Permissioned coordinator for job assignment
 - ✅ Basic PoCC consensus
@@ -398,10 +398,10 @@ User Escrow → Worker Payment (per-token pricing)
 - Prevents "race-to-zero" pricing for workers
 - Sustains long-term network health
 
-### 3. Production-Ready Foundation
-- Building on Sui avoids custom blockchain maintenance
-- Leverages battle-tested consensus and tooling
-- Faster time-to-market
+### 3. Focused Core Runtime
+- Native transaction types keep the execution model predictable
+- Smaller trusted surface than a programmable chain runtime
+- Faster iteration on compute-marketplace settlement flows
 
 ### 4. Flexible Infrastructure
 - Workers can use any compatible inference engine
@@ -474,7 +474,7 @@ User Escrow → Worker Payment (per-token pricing)
 |------------|----------|-------------------|
 | **Centralized APIs** (OpenAI, Anthropic) | Easy integration, high quality | Lower cost, censorship-resistant |
 | **Decentralized Compute** (Akash, Render) | General-purpose compute | AI-specific optimizations, token economics |
-| **Blockchain AI** (Bittensor, Ritual) | Established networks | Sui foundation, simpler architecture |
+| **Blockchain AI** (Bittensor, Ritual) | Established networks | Focused AI-settlement runtime, simpler architecture |
 | **Self-Hosted** (Ollama, vLLM) | Full control | Monetization layer, no ops overhead |
 
 ---
@@ -614,7 +614,6 @@ We welcome contributions! See `CONTRIBUTING.md` for guidelines.
 
 **Areas for contribution:**
 - Core protocol development (Rust)
-- Move smart contract development
 - Worker runtime optimizations
 - Indexer improvements
 - Documentation and tutorials
@@ -649,10 +648,10 @@ A: Similar to centralized APIs (MVP). Phase 3 adds QoS tiers.
 ### For Validators
 
 **Q: What are validator requirements?**
-A: Standard Sui validator requirements + ability to verify GPU proofs.
+A: Sufficient hardware to run the node reliably plus the ability to verify GPU proofs.
 
 **Q: What rewards do validators earn?**
-A: 5% of job fees + staking rewards from Sui consensus.
+A: Protocol-defined job fees and epoch rewards from the chain runtime.
 
 ---
 
@@ -663,7 +662,7 @@ Miraset Chain creates a sustainable economic protocol for decentralized GPU comp
 1. **Blockchain settlement** for trust and auditability
 2. **Off-chain inference** for performance and cost
 3. **Dual incentives** (capacity + compute) for network health
-4. **Production-ready foundation** (Sui) for reliability
+4. **Focused chain runtime** for reliability
 
 By rewarding both **availability** and **utilization**, Miraset incentivizes a robust, distributed network of AI inference providers while maintaining the security and transparency of blockchain settlement.
 

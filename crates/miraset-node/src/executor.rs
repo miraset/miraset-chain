@@ -1,10 +1,8 @@
-/// Transaction executor - integrates Move VM, gas metering, and state management
-/// Similar to Sui's transaction execution pipeline
+/// Transaction executor for native asset and object operations.
 
 use anyhow::{anyhow, Result};
 use miraset_core::{Transaction, Object, ObjectId, Address};
 use crate::gas::{GasConfig, GasBudget, GasStatus};
-use crate::move_vm::{MoveVMRuntime, MoveVMStateView, FunctionId};
 use crate::state::State;
 use std::sync::Arc;
 use tracing::info;
@@ -13,17 +11,13 @@ use tracing::info;
 pub struct ExecutionContext {
     state: State,
     gas_config: Arc<GasConfig>,
-    move_runtime: Arc<MoveVMRuntime>,
 }
 
 impl ExecutionContext {
     pub fn new(state: State, gas_config: GasConfig) -> Result<Self> {
-        let move_runtime = MoveVMRuntime::new()?;
-
         Ok(Self {
             state,
             gas_config: Arc::new(gas_config),
-            move_runtime: Arc::new(move_runtime),
         })
     }
 
@@ -51,12 +45,6 @@ impl ExecutionContext {
             }
             Transaction::TransferObject { object_id, from, to, .. } => {
                 self.execute_transfer_object(object_id, from, to, &mut gas_status)?
-            }
-            Transaction::MoveCall { function, type_args, args, sender, .. } => {
-                self.execute_move_call(function, type_args, args, sender, &mut gas_status)?
-            }
-            Transaction::PublishModule { modules, sender, .. } => {
-                self.execute_publish_module(modules, sender, &mut gas_status)?
             }
             _ => {
                 return Err(anyhow!("Transaction type not supported in executor"));
@@ -215,95 +203,6 @@ impl ExecutionContext {
         })
     }
 
-    /// Execute Move function call
-    fn execute_move_call(
-        &self,
-        move_fn: miraset_core::MoveFunction,
-        _type_args: Vec<String>,
-        args: Vec<Vec<u8>>,
-        _sender: Address,
-        gas: &mut GasStatus,
-    ) -> Result<TransactionEffects> {
-        // Convert MoveFunction to FunctionId
-        let module_id = crate::move_vm::ModuleId::new(
-            move_fn.package,
-            move_fn.module.clone(),
-        );
-        let function = FunctionId {
-            module: module_id,
-            name: move_fn.function,
-        };
-        // Create a state view for the Move VM
-        let state_view = StateViewAdapter {
-            state: self.state.clone(),
-            move_runtime: Arc::clone(&self.move_runtime),
-        };
-
-        // Create Move VM session
-        let mut session = self.move_runtime.new_session(&state_view)?;
-
-        // Parse type arguments (simplified)
-        let type_tags = vec![]; // TODO: Parse type_args strings to TypeTags
-
-        // Execute the Move function
-        let result = session.execute_function(
-            &function,
-            type_tags,
-            args,
-            gas.remaining_gas(),
-        )?;
-
-        // Charge gas used by Move VM
-        gas.charge_computation(result.gas_used).map_err(|e| anyhow!(e))?;
-
-        if !result.success {
-            return Err(anyhow!("Move execution failed: {:?}", result.error));
-        }
-
-        // Apply session changes
-        let changes = session.finish()?;
-
-        Ok(TransactionEffects {
-            status: ExecutionStatus::Success,
-            gas_used: 0,
-            created: changes.objects_created.iter()
-                .map(|_| [0u8; 32]) // TODO: Extract actual IDs
-                .collect(),
-            mutated: vec![],
-            deleted: vec![],
-            events: vec![],
-        })
-    }
-
-    /// Execute Move module publishing
-    fn execute_publish_module(
-        &self,
-        modules: Vec<Vec<u8>>,
-        _sender: Address,
-        gas: &mut GasStatus,
-    ) -> Result<TransactionEffects> {
-        let mut published_ids = Vec::new();
-
-        for bytecode in modules {
-            // Charge for module size
-            gas.charge_object_create(bytecode.len(), &self.gas_config).map_err(|e| anyhow!(e))?;
-            gas.charge_computation(5000).map_err(|e| anyhow!(e))?; // Module verification is expensive
-
-            // Publish module
-            let module_id = self.move_runtime.publish_module(bytecode)?;
-            info!("Published module: {:?}", module_id);
-            published_ids.push(module_id);
-        }
-
-        Ok(TransactionEffects {
-            status: ExecutionStatus::Success,
-            gas_used: 0,
-            created: vec![], // Modules are stored separately
-            mutated: vec![],
-            deleted: vec![],
-            events: vec![],
-        })
-    }
 }
 
 /// Transaction execution effects (similar to Sui's TransactionEffects)
@@ -329,31 +228,6 @@ pub struct Event {
     pub sender: Address,
     pub data: Vec<u8>,
 }
-
-/// Adapter to provide state view for Move VM
-struct StateViewAdapter {
-    state: State,
-    move_runtime: Arc<MoveVMRuntime>,
-}
-
-impl MoveVMStateView for StateViewAdapter {
-    fn get_object(&self, id: &[u8]) -> Option<Vec<u8>> {
-        let mut object_id = [0u8; 32];
-        if id.len() >= 32 {
-            object_id.copy_from_slice(&id[..32]);
-        } else {
-            return None;
-        }
-
-        self.state.get_object(&object_id)
-            .and_then(|obj| bincode::serialize(&obj).ok())
-    }
-
-    fn get_module_bytecode(&self, module_id: &crate::move_vm::ModuleId) -> Option<Vec<u8>> {
-        self.move_runtime.get_module(module_id)
-    }
-}
-
 
 #[cfg(test)]
 mod tests {

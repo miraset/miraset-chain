@@ -348,7 +348,7 @@ Key object types (from `miraset-core::ObjectData`):
 | ReceiptAnchor | on-chain commitment to receipt payload | job_id, epoch_id, receipt_hash, anchored_at |
 | EpochBatch | batch settlement marker | epoch_id, batch_root, total_verified_tokens, settled |
 
-> Implementation note: the current repo includes a placeholder Move VM wrapper for future programmable transactions, but the core system currently operates via native Rust transaction types.
+> Implementation note: the current repo operates via native Rust transaction types and does not include Move or smart-contract execution support.
 
 ### 6.3 Transaction surface (implemented)
 

@@ -1,7 +1,6 @@
 pub mod epoch;
 pub mod executor;
 pub mod gas;
-pub mod move_vm;
 pub mod pocc;
 pub mod pocc_manager;
 pub mod rpc;
@@ -11,7 +10,6 @@ pub mod storage;
 pub use epoch::{Epoch, EpochRewards, EpochStatus, WorkerEpochStats};
 pub use executor::{ExecutionContext, TransactionEffects, ExecutionStatus};
 pub use gas::{GasConfig, GasBudget, GasStatus, GasCost, GasCoin};
-pub use move_vm::{MoveVMRuntime, MoveVMSession, ModuleId, FunctionId, MoveValue, MoveType, MoveObject};
 pub use pocc::{PoccConsensus, Validator, ValidatorSet, ValidatorStatus, ComputeProof, GpuInfo, ModelInfo};
 pub use pocc_manager::PoccManager;
 pub use rpc::serve_rpc;

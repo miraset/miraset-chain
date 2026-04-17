@@ -152,8 +152,6 @@ impl State {
                 Transaction::SubmitJobResult { signature, .. } => *signature = [0; 64],
                 Transaction::AnchorReceipt { signature, .. } => *signature = [0; 64],
                 Transaction::ChallengeJob { signature, .. } => *signature = [0; 64],
-                Transaction::MoveCall { signature, .. } => *signature = [0; 64],
-                Transaction::PublishModule { signature, .. } => *signature = [0; 64],
             }
             let msg = bincode::serialize(&tx_for_hash).unwrap();
             if !miraset_core::verify_signature(from, &msg, signature) {
@@ -284,18 +282,6 @@ impl State {
                     timestamp: Utc::now(),
                 };
                 self.emit_event(w, event);
-            }
-
-            Transaction::MoveCall { sender, .. } => {
-                // Move calls are handled by the executor
-                // This is just a placeholder for block inclusion
-                tracing::info!("MoveCall transaction from {:?} included in block {}", sender, height);
-            }
-
-            Transaction::PublishModule { sender, .. } => {
-                // Module publishing is handled by the executor
-                // This is just a placeholder for block inclusion
-                tracing::info!("PublishModule transaction from {:?} included in block {}", sender, height);
             }
 
             Transaction::RegisterWorker {

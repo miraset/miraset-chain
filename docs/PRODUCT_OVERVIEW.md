@@ -5,7 +5,7 @@
 **Miraset Chain** is a Rust-based, compute-first blockchain that rewards participants for providing GPU capacity and executing AI inference workloads. It combines on-chain settlement with off-chain inference to create an economic layer for distributed AI compute resources.
 
 > Note on implementation vs concept: some documents describe the design using “Sui-like object model” terminology.
-> The current implementation is **not** Sui-based; it implements an object-centric state model directly in Rust, and contains a **placeholder** Move VM wrapper for future expansion.
+> The current implementation is a custom Rust chain with an object-centric state model and native protocol transactions only.
 
 ---
 
@@ -67,7 +67,7 @@ Validators secure the network:
 - `ReceiptAnchor`
 - `EpochBatch`
 
-**Move/Smart contracts:** `crates/miraset-node/src/move_vm.rs` currently provides a *placeholder* Move VM wrapper for future work.
+**Smart contracts:** not supported. The chain exposes only built-in protocol transactions and core asset/object operations.
 
 **Consensus:** PoCC (Proof of Compute & Capacity) implementation lives in `crates/miraset-node/src/pocc.rs` and `pocc_manager.rs`.
 
@@ -102,7 +102,7 @@ The node exposes an HTTP RPC (Axum) for basic querying and transaction submissio
 - **API protocols:** HTTP (node RPC and worker API)
 
 > Prior versions of this document referenced “Sui (Rust + Move smart contracts)” and “BCS”.
-> Those are conceptual inspirations; the current implementation uses Rust serialization (`bincode`/Serde) and a custom node.
+> Those references are obsolete; the current implementation uses Rust serialization (`bincode`/Serde) and a custom node.
 
 ---
 
@@ -111,4 +111,4 @@ The node exposes an HTTP RPC (Axum) for basic querying and transaction submissio
 - Expand PoCC into full end-to-end job marketplace settlement (epoch batching, disputes)
 - Harden verifiability and receipt formats (canonical serialization, challenge flows)
 - Evolve scheduler from permissioned coordinator toward decentralization
-- Optional: integrate a real Move VM and on-chain programmable transactions
+- Continue hardening native asset, job, and settlement flows

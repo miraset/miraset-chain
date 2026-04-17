@@ -42,7 +42,7 @@
 
 | Функция | Файлы | Деталь |
 |---------|-------|--------|
-| **Transaction model** (14 типов) | `miraset-core/src/types.rs` | Transfer, ChatSend, CreateObject, MutateObject, TransferObject, RegisterWorker, SubmitResourceSnapshot, CreateJob, AssignJob, SubmitJobResult, AnchorReceipt, ChallengeJob, MoveCall, PublishModule |
+| **Transaction model** (12 типов) | `miraset-core/src/types.rs` | Transfer, ChatSend, CreateObject, MutateObject, TransferObject, RegisterWorker, SubmitResourceSnapshot, CreateJob, AssignJob, SubmitJobResult, AnchorReceipt, ChallengeJob |
 | **Object-centric state** (Sui-like) | `miraset-node/src/state.rs` | Objects, version control, ownership index, ObjectData (Account, WorkerRegistration, ResourceSnapshot, InferenceJob, JobResult, EpochBatch, ReceiptAnchor) |
 | **RPC server** (Axum) | `miraset-node/src/rpc.rs` | 9 эндпоинтов: `/health`, `/status`, `/ping`, `/balance/{addr}`, `/nonce/{addr}`, `/block/latest`, `/block/{height}`, `/events`, `/chat/messages`, `/tx/submit` |
 | **Persistence** (Sled) | `miraset-node/src/storage.rs` | Блоки (bincode), events (JSON), balances, nonces — 209 строк с тестами |
@@ -50,8 +50,7 @@
 | **Epoch management** | `miraset-node/src/epoch.rs` | 60-мин эпохи, Submit/Challenge windows, capacity + compute rewards (351 строк с unit-тестами) |
 | **Gas metering** | `miraset-node/src/gas.rs` | GasConfig, GasBudget, GasStatus, per-operation costs (382 строки) |
 | **PoCC consensus** | `miraset-node/src/pocc.rs` | ValidatorSet, validator requirements (16 GiB VRAM, 3 models, stake), consensus weight, heartbeats (601 строка) |
-| **Move VM** (scaffold) | `miraset-node/src/move_vm.rs` | Placeholder: publish/execute modules, sessions, typed values (387 строк) |
-| **Transaction executor** | `miraset-node/src/executor.rs` | Gas-metered Transfer, CreateObject, MutateObject, TransferObject, MoveCall, PublishModule (370 строк) |
+| **Transaction executor** | `miraset-node/src/executor.rs` | Gas-metered Transfer, CreateObject, MutateObject, TransferObject (native operations only) |
 | **CLI** (`miraset`) | `miraset-cli/src/main.rs` | `node start`, `wallet new/list/balance/transfer/export/import`, `chat send/list` |
 | **Config system** | `miraset-cli/src/main.rs` | CLI > env > file (`miraset.toml`) > defaults; `MIRASET_*` env vars |
 | **Crypto (ed25519)** | `miraset-core/src/crypto.rs` | KeyPair generate/from_bytes, sign/verify, Address |
@@ -66,8 +65,7 @@
 |----------|---------|-----------|
 | **Нет P2P networking** | Single-node only, нет репликации | 🔴 Prod |
 | **Нет real consensus** | Block producer — простой таймер, нет голосования валидаторов | 🔴 Prod |
-| **Move VM — placeholder** | `MoveCall`/`PublishModule` — заглушки, возвращают mock результаты | 🟡 |
-| **Signature verify** только для Transfer/ChatSend | Остальные 12 типов TX не верифицируются | 🔴 Demo+Prod |
+| **Signature verify** только для Transfer/ChatSend | Остальные 10 типов TX не верифицируются | 🔴 Demo+Prod |
 | **Нет mempool prioritization** | Все TX включаются FIFO | 🟡 Prod |
 | **state_root = [0; 32]** | Нет Merkle root, нет state proofs | 🔴 Prod |
 | **Epoch settlement не привязан к block production** | `update_epoch()` вызывается вручную | 🟡 Demo |
@@ -208,7 +206,7 @@
 | P1 | **P2P networking (libp2p)** | Node | 3–4 недели | Gossip protocol для блоков, TX relay, peer discovery |
 | P2 | **Real BFT consensus** | Node | 4–6 недель | PoCC-based validator voting, block finality, fork choice |
 | P3 | **State Merkle tree** | Node | 2–3 недели | Jellyfish Merkle / sparse Merkle для state root + proofs |
-| P4 | **Full Move VM** | Node | 4–8 недель | Интегрировать `move-vm-runtime`, bytecode verifier, stdlib |
+| P4 | **Native asset/runtime hardening** | Node | 2–4 недели | Упростить execution path, финализировать asset/object-only модель |
 | P5 | **Signature verification для всех TX** | Node | 1 неделя | Единый canonical signing format |
 | P6 | **Wallet encryption** | Wallet | 1 неделя | Password/PIN, encrypted keystore (BIP-39 mnemonic) |
 | P7 | **Indexer (Postgres)** | Indexer | 2–3 недели | Event consumer → Postgres, GraphQL API |
@@ -233,7 +231,7 @@
 ```
 Phase 1 (MVP Network):  P1, P2, P5, P6, P8, P9, P15         → 2–3 месяца
 Phase 2 (Features):     P3, P7, P10, P11, P12, P14            → 2–3 месяца  
-Phase 3 (Scale):        P4, P13, P16, P17, P18, P19            → 2–3 месяца
+Phase 3 (Scale):        P13, P16, P17, P18, P19                → 2–3 месяца
 Phase 4 (Hardening):    P20 + performance tuning + load tests  → 1–2 месяца
 ```
 
@@ -244,7 +242,7 @@ Phase 4 (Hardening):    P20 + performance tuning + load tests  → 1–2 мес�
 | Крейт | Строк кода | Тесты | Покрытие |
 |-------|-----------|-------|----------|
 | `miraset-core` | ~700 (types.rs) + crypto | ✅ 21 тест | Типы, сериализация, крипто |
-| `miraset-node` | ~4,000+ (state 1500, pocc 601, executor 370, gas 382, epoch 351, storage 209, rpc 400, move_vm 387) | ✅ 41 тест | Основные пути + coordinator |
+| `miraset-node` | ~3,600+ (state 1500, pocc 601, executor 275, gas 382, epoch 351, storage 209, rpc 400) | ✅ 41 тест | Основные пути + coordinator |
 | `miraset-cli` | ~393 | ❌ Нет unit-тестов | — |
 | `miraset-worker` | ~1,500 (lib 550, receipt 350, backend 308, node_client 230) | ✅ 8 тестов | Основные пути + heartbeat |
 | `miraset-wallet` | ~590 | ✅ 22 теста (+4 encryption) | CRUD + encryption roundtrip |

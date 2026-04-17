@@ -91,11 +91,11 @@ curl http://127.0.0.1:8080/jobs/:id/status
 
 ```
 ┌─────────────────────────────────────┐
-│   Applications & Smart Contracts    │
+│   Applications & Protocol Clients   │
 ├─────────────────────────────────────┤
-│   Move VM (Sui v1.9.1)              │
-│   - Module deployment               │
-│   - Function execution              │
+│   Native Transaction Runtime        │
+│   - Asset transfers                 │
+│   - Object state transitions        │
 │   - Gas metering                    │
 ├─────────────────────────────────────┤
 │   PoCC Consensus                    │
@@ -115,7 +115,6 @@ curl http://127.0.0.1:8080/jobs/:id/status
 
 ```
 crates/miraset-node/src/
-├── move_vm.rs          # Move VM (386 lines)
 ├── pocc.rs             # PoCC consensus (600 lines)
 ├── gas.rs              # Gas system (381 lines)
 ├── blockchain.rs       # Block management
@@ -138,15 +137,6 @@ crates/miraset-worker/src/
 
 ### Workspace (Cargo.toml)
 ```toml
-# Move VM (from Sui mainnet-v1.9.1)
-move-vm-runtime = { git = "https://github.com/MystenLabs/sui", tag = "mainnet-v1.9.1" }
-move-core-types = { git = "https://github.com/MystenLabs/sui", tag = "mainnet-v1.9.1" }
-move-binary-format = { git = "https://github.com/MystenLabs/sui", tag = "mainnet-v1.9.1" }
-move-bytecode-verifier = { git = "https://github.com/MystenLabs/sui", tag = "mainnet-v1.9.1" }
-move-vm-types = { git = "https://github.com/MystenLabs/sui", tag = "mainnet-v1.9.1" }
-sui-types = { git = "https://github.com/MystenLabs/sui", tag = "mainnet-v1.9.1" }
-sui-framework = { git = "https://github.com/MystenLabs/sui", tag = "mainnet-v1.9.1" }
-
 # Async runtime
 tokio = { version = "1.41", features = ["full"] }
 
@@ -166,10 +156,6 @@ ollama-rs = "0.2.1"
 
 ### Automated Tests
 ```bash
-# Move VM integration
-./test_move_vm.sh
-# ✅ Verifies Move VM, PoCC, Gas system
-
 # Worker end-to-end
 ./test_worker_e2e.sh
 # ✅ Tests full AI inference flow
@@ -221,26 +207,12 @@ Memory Usage:       ~100 MB per node
 Base transaction:     1,000
 Storage (per byte):      10
 Computation (per op):     1
-Move VM call:         5,000
-Package publish:     50,000 + size
 Object creation:     10,000
 Object mutation:      5,000
 Object deletion:      1,000
 ```
 
 ---
-
-## 🎯 Sui Comparison
-
-| Feature | Miraset | Sui |
-|---------|---------|-----|
-| Move VM | ✅ v1.9.1 | ✅ Latest |
-| Object Model | ✅ Same | ✅ |
-| Consensus | PoCC (GPU) | Narwhal |
-| AI Support | ✅ Native | ➖ |
-| Smart Contracts | ✅ | ✅ |
-
-**Miraset = Sui architecture + AI/GPU specialization**
 
 ---
 
@@ -284,10 +256,8 @@ curl http://localhost:11434/api/tags
 | `API_NODE.md` | Node HTTP API reference |
 | `API_WORKER.md` | Worker HTTP API reference |
 | `FINAL_REPORT.md` | Complete status |
-| `MOVE_VM_STATUS.md` | Move VM details |
 | `COMPLETE_STATUS.md` | Implementation summary |
 | `WORKER_INTEGRATION.md` | Worker setup |
-| `SUI_COMPARISON_DETAILED.md` | Sui comparison |
 
 ---
 
@@ -297,9 +267,8 @@ curl http://localhost:11434/api/tags
 Build:              ✅ PASSING (0 errors, 16 warnings)
 Tests:              ✅ PASSING (2/2 automated)
 Data Persistence:   ✅ WORKING (1.1 MB stored)
-Move VM:            ✅ INTEGRATED (Sui v1.9.1)
 Worker Network:     ✅ TESTED (E2E passing)
-Documentation:      ✅ COMPLETE (8 docs)
+Documentation:      ✅ COMPLETE (core docs)
 Production Ready:   ✅ YES (core features)
 ```
 
@@ -307,24 +276,20 @@ Production Ready:   ✅ YES (core features)
 
 ## 🚀 Next Steps
 
-1. **Smart Contracts**: Create example Move modules
-2. **Testing**: Add unit tests for all components
-3. **Multi-Validator**: Test consensus with 3+ nodes
-4. **Optimization**: Performance tuning
-5. **Testnet**: Public deployment
+1. **Testing**: Add unit tests for all components
+2. **Multi-Validator**: Test consensus with 3+ nodes
+3. **Optimization**: Performance tuning
+4. **Testnet**: Public deployment
 
 ---
 
 ## 🏆 Key Achievements
 
-- ✅ Sui-compatible Move VM integration
 - ✅ Novel PoCC consensus mechanism
 - ✅ Working AI worker network
 - ✅ 1,367 lines of core blockchain code
 - ✅ Data persistence verified
 - ✅ All tests passing
-
-**Ready for smart contract development!** 🎉
 
 ---
 
