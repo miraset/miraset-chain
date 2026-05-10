@@ -41,7 +41,7 @@ impl AppConfig {
 }
 
 fn config_file_path() -> PathBuf {
-    let base = tauri::api::path::config_dir().unwrap_or_else(|| PathBuf::from("."));
+    let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("miraset-wallet").join("config.json")
 }
 

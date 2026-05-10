@@ -1,6 +1,6 @@
 "use client";
 
-import { invoke } from "@tauri-apps/api/tauri";
+import { invoke } from "@tauri-apps/api/core";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 const DEFAULT_RPC_URL = "http://127.0.0.1:9944";
@@ -146,7 +146,7 @@ function updateConnectionTargets(
 function detectTauri() {
   return (
     typeof window !== "undefined" &&
-    typeof (window as { __TAURI_IPC__?: unknown }).__TAURI_IPC__ !== "undefined"
+    typeof (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== "undefined"
   );
 }
 
