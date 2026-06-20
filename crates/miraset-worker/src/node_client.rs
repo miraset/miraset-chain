@@ -1,6 +1,6 @@
 /// Client for interacting with Miraset node RPC
 use anyhow::Result;
-use miraset_core::{Address, KeyPair, ObjectId, Transaction};
+use miraset_core::{KeyPair, ObjectId, Transaction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
