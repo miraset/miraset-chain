@@ -6,7 +6,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
-use miraset_core::{Address, Block, Event, ObjectData, Transaction, ObjectId, JobStatus};
+use miraset_core::{Address, Block, Event, ObjectData, Transaction, ObjectId};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};

@@ -1,8 +1,8 @@
 /// PoCC Manager - Integrates Proof of Compute Contribution
-use anyhow::{anyhow, Result};
-use crate::pocc::{PoccConsensus, Validator, ValidatorSet, ComputeProof, GpuInfo, ModelInfo};
+use anyhow::Result;
+use crate::pocc::{PoccConsensus, Validator, ValidatorSet, GpuInfo, ModelInfo};
 use crate::state::State;
-use miraset_core::{Address, Block, Transaction, ObjectId};
+use miraset_core::{Address, ObjectId};
 use std::sync::Arc;
 pub struct PoccManager {
     consensus: Arc<PoccConsensus>,
