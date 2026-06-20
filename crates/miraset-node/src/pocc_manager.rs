@@ -6,7 +6,7 @@ use miraset_core::{Address, ObjectId};
 use std::sync::Arc;
 pub struct PoccManager {
     consensus: Arc<PoccConsensus>,
-    state: State,
+    _state: State,
 }
 impl PoccManager {
     pub fn new(state: State) -> Self {
@@ -14,7 +14,7 @@ impl PoccManager {
         let consensus = PoccConsensus::new(validator_set);
         Self {
             consensus: Arc::new(consensus),
-            state,
+            _state: state,
         }
     }
     pub fn register_validator(
