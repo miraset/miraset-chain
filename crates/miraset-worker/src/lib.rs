@@ -26,7 +26,10 @@ mod backend;
 mod node_client;
 
 pub use receipt::{ReceiptPayload, ReceiptHash};
-pub use backend::{InferenceBackend, OllamaBackend};
+pub use backend::{
+    BackendType, InferenceBackend, LlamaCppBackend, MockBackend, OllamaBackend,
+    OpenAiCompatibleBackend, OpenLlmBackend, TgiBackend,
+};
 pub use node_client::NodeClient;
 
 /// Worker configuration
@@ -36,7 +39,16 @@ pub struct WorkerConfig {
     pub keypair: KeyPair,
     pub endpoint: String,
     pub node_url: String,
-    pub ollama_url: String,
+    /// Inference backend type to use (ollama/openai/llamacpp/tgi).
+    pub backend_type: BackendType,
+    /// Base URL of the inference backend (e.g. `http://localhost:11434` for
+    /// Ollama, `http://localhost:1234/v1` for LM Studio, `https://api.openai.com/v1`
+    /// for OpenAI cloud, `https://api.groq.com/openai/v1` for Groq).
+    pub backend_url: String,
+    /// Optional API key (Bearer auth). Required for cloud OpenAI-compatible
+    /// providers (OpenAI, Groq, OpenRouter, Together, ...); ignored by local
+    /// backends that don't use auth (Ollama, llama.cpp, TGI).
+    pub backend_api_key: Option<String>,
     pub gpu_model: String,
     pub vram_total_gib: u32,
     pub supported_models: Vec<String>,
@@ -130,7 +142,16 @@ mod signature_serde {
 
 impl Worker {
     pub fn new(config: WorkerConfig) -> Arc<Self> {
-        let backend = Arc::new(OllamaBackend::new(config.ollama_url.clone()));
+        let backend: Arc<dyn InferenceBackend> = match config.backend_type {
+            BackendType::Ollama => Arc::new(OllamaBackend::new(config.backend_url.clone())),
+            BackendType::OpenAi => Arc::new(OpenAiCompatibleBackend::new(
+                config.backend_url.clone(),
+                config.backend_api_key.clone(),
+            )),
+            BackendType::OpenLlm => Arc::new(OpenLlmBackend::new(config.backend_url.clone())),
+            BackendType::LlamaCpp => Arc::new(LlamaCppBackend::new(config.backend_url.clone())),
+            BackendType::Tgi => Arc::new(TgiBackend::new(config.backend_url.clone())),
+        };
         let node_client = NodeClient::new(config.node_url.clone(), config.keypair.clone());
 
         Arc::new(Self {
@@ -513,7 +534,9 @@ mod tests {
             keypair: KeyPair::generate(),
             endpoint: "http://localhost:8080".to_string(),
             node_url: "http://127.0.0.1:9944".to_string(),
-            ollama_url: "http://localhost:11434".to_string(),
+            backend_type: BackendType::Ollama,
+            backend_url: "http://localhost:11434".to_string(),
+            backend_api_key: None,
             gpu_model: "NVIDIA RTX 4090".to_string(),
             vram_total_gib: 24,
             supported_models: vec![
@@ -533,7 +556,9 @@ mod tests {
             keypair: KeyPair::generate(),
             endpoint: "http://localhost:8080".to_string(),
             node_url: "http://127.0.0.1:9944".to_string(),
-            ollama_url: "http://localhost:11434".to_string(),
+            backend_type: BackendType::Ollama,
+            backend_url: "http://localhost:11434".to_string(),
+            backend_api_key: None,
             gpu_model: "NVIDIA RTX 4090".to_string(),
             vram_total_gib: 24,
             supported_models: vec!["llama2".to_string()],

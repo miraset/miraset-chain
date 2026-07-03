@@ -34,7 +34,7 @@
 
 ## Project-specific conventions and gotchas
 - Config precedence in CLI is intended as CLI > env > file > defaults (`load_config`/`apply_env_overrides` in `crates/miraset-cli/src/main.rs`). Config file is `miraset.toml` at project root (auto-discovered).
-- Env var names use `MIRASET_` prefix (`MIRASET_RPC_ADDR`, `MIRASET_STORAGE_PATH`, `MIRASET_BLOCK_INTERVAL`).
+- Env var names use `MIRASET_` prefix (`MIRASET_RPC_ADDR`, `MIRASET_STORAGE_PATH`, `MIRASET_BLOCK_INTERVAL`). Worker backend selection also uses `MIRASET_` prefix: `MIRASET_BACKEND_TYPE` (default `ollama`; accepted: `ollama`, `openai` and aliases `lmstudio`/`vllm`/`localai`/`groq`/`openrouter`/`together`/`fireworks`/`anyscale`, `openllm`/`bentoml`, `llamacpp`, `tgi`), `MIRASET_BACKEND_URL` (per-backend / per-preset default), `MIRASET_BACKEND_API_KEY` (optional Bearer auth; required for cloud OpenAI-compatible providers like OpenAI/Groq/OpenRouter), `MIRASET_SUPPORTED_MODELS` (comma-separated model id list; overrides `BackendType::default_models()`).
 - Wallet keystore path is `~/.miraset/wallet.json` (uses `HOME` or `USERPROFILE` on Windows).
 - Signatures are usually computed over serialized tx with signature field zeroed first (see transfer/chat signing in `crates/miraset-cli/src/main.rs` and verification in `State::submit_transaction`).
 - Receipt hash logic is deterministic bincode + blake3 (`crates/miraset-worker/src/receipt.rs`); preserve this when changing receipt fields.
@@ -46,7 +46,7 @@
 ## Integration surfaces
 - Node API contract: `docs/API_NODE.md` plus concrete handler code in `crates/miraset-node/src/rpc.rs`. Includes job coordinator endpoints (`/jobs/submit`, `/jobs`, `/jobs/{id}`, `/workers`, `/epoch`).
 - Worker API contract: `docs/API_WORKER.md` plus concrete router in `crates/miraset-worker/src/lib.rs`. Job lifecycle endpoints: `/jobs/accept` (POST), `/jobs/run` (POST), `/jobs/{id}/stream` (GET), `/jobs/{id}/report` (POST), `/jobs/{id}/status` (GET).
-- External AI backend default is Ollama (`/api/generate`, `/api/tags`) with mock fallback when unavailable (`crates/miraset-worker/src/backend.rs`).
+- External AI backend is selected via `MIRASET_BACKEND_TYPE` (default `ollama`). Implementations in `crates/miraset-worker/src/backend.rs`: `OllamaBackend` (`/api/generate`, `/api/tags`), `OpenAiCompatibleBackend` (`/v1/chat/completions`, `/v1/models`; covers LM Studio, vLLM, LocalAI, llama.cpp OpenAI shim, TGI OpenAI shim, and cloud OpenAI/Groq/OpenRouter/Together — cloud requires `MIRASET_BACKEND_API_KEY`), `OpenLlmBackend` (BentoML OpenLLM `/v1/chat/completions`, `/v1/models`), `LlamaCppBackend` (native llama.cpp `/completion`, `/props`, `/health`; one model per server, ignores per-request `model`), `TgiBackend` (HuggingFace TGI `/generate`, `/info`; one model per instance). All backends share a deterministic mock-fallback when the engine is unreachable. Per-backend default model sets are exposed by `BackendType::default_models()`.
 - Multi-node Docker dev setup is defined in `docker-compose.yml` (ports 9944-9947). Single-node test setup in `docker-compose.test.yml`.
 
 ## Existing agent-instruction sources scanned

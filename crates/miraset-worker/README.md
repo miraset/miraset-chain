@@ -20,17 +20,68 @@ Worker will auto-register on-chain and listen on `http://127.0.0.1:8080`
 - `POST /jobs/:id/report` - Generate signed receipt
 - `GET /jobs/:id/stream` - Stream job output
 ## Configuration
-Edit `src/main.rs`:
-```rust
-WorkerConfig {
-    endpoint: "127.0.0.1:8080".to_string(),
-    node_url: "http://127.0.0.1:9944".to_string(),
-    ollama_url: "http://localhost:11434".to_string(),
-    gpu_model: "NVIDIA RTX 4090".to_string(),
-    vram_total_gib: 24,
-    supported_models: vec!["llama2".to_string()],
-}
+The inference backend is selected via environment variables (no code edit needed):
+
+| Variable | Default | Description |
+|---|---|---|
+| `MIRASET_BACKEND_TYPE` | `ollama` | Backend selector. See table below. |
+| `MIRASET_BACKEND_URL` | per backend | Base URL of the inference engine |
+| `MIRASET_BACKEND_API_KEY` | _(unset)_ | Bearer key for cloud OpenAI-compatible providers |
+| `MIRASET_SUPPORTED_MODELS` | (per backend defaults) | Comma-separated model id list (overrides defaults) |
+
+### Supported backends
+
+| `MIRASET_BACKEND_TYPE` | Engine | Local/Cloud | Default URL | Default models |
+|---|---|---|---|---|
+| `ollama` | Ollama (native `/api/generate`) | local | `http://localhost:11434` | `gemma3:4b`, `llama3.3:latest`, `deepseek-r1:8b`, `qwen2.5:7b` |
+| `lmstudio` | LM Studio (OpenAI-compatible) | local | `http://localhost:1234/v1` | `gpt-4o-mini`, `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo` |
+| `vllm` | vLLM (OpenAI-compatible) | local | `http://localhost:8000/v1` | same as `lmstudio` |
+| `localai` | LocalAI (OpenAI-compatible) | local | `http://localhost:8080/v1` | same as `lmstudio` |
+| `openai` | OpenAI-compatible (LM Studio, vLLM, LocalAI, OpenAI, Groq, OpenRouter, ...) | local + cloud | `http://localhost:1234/v1` | `gpt-4o-mini`, `gpt-4o`, `gpt-4-turbo`, `gpt-3.5-turbo` |
+| `openllm` | BentoML OpenLLM (`/v1/chat/completions`) | local | `http://localhost:3000` | `meta-llama/Llama-3.1-8B-Instruct`, `mistralai/Mistral-7B-Instruct-v0.3`, `Qwen/Qwen2.5-7B-Instruct`, `google/gemma-2-9b-it` |
+| `llamacpp` | llama.cpp server (native `/completion`) | local | `http://localhost:8080` | `Qwen/Qwen2.5-7B-Instruct`, `meta-llama/Llama-3.1-8B-Instruct`, `mistralai/Mistral-7B-Instruct-v0.3`, `google/gemma-2-9b-it` |
+| `tgi` | HuggingFace text-generation-inference (`/generate`) | local | `http://localhost:8080` | `meta-llama/Llama-3.1-8B-Instruct`, `mistralai/Mistral-7B-Instruct-v0.3`, `google/gemma-2-9b-it`, `Qwen/Qwen2.5-7B-Instruct` |
+
+The `openai` family (`openai`, `lmstudio`, `vllm`, `localai`, `groq`,
+`openrouter`, `together`, `fireworks`, `anyscale`) all share the same backend
+implementation. Cloud providers require `MIRASET_BACKEND_API_KEY`.
+
+Examples:
+
+```bash
+# Ollama (default)
+cargo run --bin miraset-worker
+
+# LM Studio
+MIRASET_BACKEND_TYPE=lmstudio cargo run --bin miraset-worker
+
+# vLLM
+MIRASET_BACKEND_TYPE=vllm cargo run --bin miraset-worker
+
+# LocalAI
+MIRASET_BACKEND_TYPE=localai cargo run --bin miraset-worker
+
+# OpenAI cloud
+MIRASET_BACKEND_TYPE=openai MIRASET_BACKEND_URL=https://api.openai.com/v1 MIRASET_BACKEND_API_KEY=sk-... cargo run --bin miraset-worker
+
+# Groq cloud
+MIRASET_BACKEND_TYPE=groq MIRASET_BACKEND_URL=https://api.groq.com/openai/v1 MIRASET_BACKEND_API_KEY=gsk_... cargo run --bin miraset-worker
+
+# BentoML OpenLLM
+MIRASET_BACKEND_TYPE=openllm cargo run --bin miraset-worker
+
+# llama.cpp server
+MIRASET_BACKEND_TYPE=llamacpp cargo run --bin miraset-worker
+
+# HuggingFace TGI
+MIRASET_BACKEND_TYPE=tgi cargo run --bin miraset-worker
+
+# Override supported models
+MIRASET_SUPPORTED_MODELS="llama3.1:8b,mistral:7b" MIRASET_BACKEND_TYPE=ollama cargo run --bin miraset-worker
 ```
+
+When the configured backend is unreachable, the worker falls back to a
+deterministic mock response (devnet/testing friendly).
 ## End-to-End Flow
 1. **Worker Registration**: Worker registers on-chain with GPU specs
 2. **Job Assignment**: Accept job via POST `/jobs/accept`
@@ -70,10 +121,10 @@ curl -X POST http://localhost:8080/jobs/0000000000000000000000000000000000000000
 ```
 ## Architecture
 ```
-┌──────────────┐      ┌──────────────┐      ┌─────────────┐
-│ Miraset Node │◄────►│ Miraset      │◄────►│   Ollama    │
-│   (Chain)    │ RPC  │   Worker     │ HTTP │  Backend    │
-└──────────────┘      └──────────────┘      └─────────────┘
+┌──────────────┐      ┌──────────────┐      ┌─────────────────────┐
+│ Miraset Node │◄────►│ Miraset      │◄────►│ Inference Backend   │
+│   (Chain)    │ RPC  │   Worker     │ HTTP │ ollama/openai/...   │
+└──────────────┘      └──────────────┘      └─────────────────────┘
 ```
 ## Testing
 ```bash
