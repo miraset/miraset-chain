@@ -32,3 +32,5 @@ docker-compose.yml
 # Misc
 .DS_Store
 *.bak
+
+node_modules/

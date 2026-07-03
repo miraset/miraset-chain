@@ -1,0 +1,14 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "devDependencies": {
+        "@daochild/agents-config": "^1.0.5",
+      },
+    },
+  },
+  "packages": {
+    "@daochild/agents-config": ["@daochild/agents-config@1.0.5", "", {}, "sha512-I2vf3gG5GDGSWxlH73giQt80BBwlP0Zx30YPv743lbkwc8/BXxDIsxzYp/bshrZm8rtU+MMbDzdN5WGd52Ta+Q=="],
+  }
+}

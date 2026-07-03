@@ -1,5 +1,10 @@
 # AGENTS.md
 
+Primary instructions are located at:
+- node_modules/@daochild/agents-config/AGENTS.md
+
+Follow all instructions from that file unless overridden below.
+
 ## Repo quick map
 - Rust workspace root in `Cargo.toml`; main crates: `miraset-core` (types/crypto), `miraset-node` (state+RPC+storage), `miraset-cli` (binary `miraset`), `miraset-worker` (HTTP worker), `miraset-wallet` (key store), `miraset-tui` (terminal UI), `miraset-launcher` (desktop launcher).
 - Desktop wallet is separate in `wallet/` (Next.js + Tauri); packaging scripts live in `tools/launcher/`.

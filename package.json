@@ -1,0 +1,49 @@
+{
+  "name": "@miraset/miraset-chain",
+  "version": "0.2.0",
+  "description": "Decentralized GPU compute marketplace for AI inference. Sui-like object-centric chain with Proof of Compute & Capacity (PoCC), epoch-based settlement, and pluggable inference backends (Ollama, LM Studio, vLLM, LocalAI, llama.cpp, OpenLLM, TGI, plus cloud OpenAI-compatible providers).",
+  "license": "GPL-3.0",
+  "private": true,
+  "author": "daochild",
+  "contributors": [
+    {
+      "name": "Pavlo Bolhar",
+      "email": "pavlo.bolhar@proton.me",
+      "url": "https://github.com/daochild"
+    }
+  ],
+  "homepage": "https://github.com/miraset/miraset-chain#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/miraset/miraset-chain.git"
+  },
+  "bugs": {
+    "url": "https://github.com/miraset/miraset-chain/issues"
+  },
+  "keywords": [
+    "blockchain",
+    "ai",
+    "inference",
+    "gpu",
+    "ollama",
+    "llm",
+    "vllm",
+    "lmstudio",
+    "llamacpp",
+    "pocc",
+    "compute",
+    "decentralized",
+    "rust"
+  ],
+  "scripts": {
+    "build": "cargo build --workspace",
+    "build:release": "cargo build --workspace --release",
+    "test": "cargo test --workspace",
+    "lint": "cargo clippy --workspace --all-targets -- -D warnings",
+    "node:start": "cargo run --bin miraset -- node start",
+    "worker:start": "cargo run --bin miraset-worker"
+  },
+  "devDependencies": {
+    "@daochild/agents-config": "^1.0.5"
+  }
+}
