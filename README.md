@@ -22,7 +22,12 @@ In a new terminal, start the worker. It will connect to the node and your local 
 cargo run --bin miraset-worker
 ```
 
-### 4. Run Tests
+### 4. Run Wallet
+```bash
+cd wallet && bun run tauri:dev
+```
+
+### 5. Run Tests (optinal)
 ```bash
 cargo test --workspace
 ```
