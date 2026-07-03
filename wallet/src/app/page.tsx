@@ -1,7 +1,7 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const DEFAULT_RPC_URL = "http://127.0.0.1:9944";
 const DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434";
@@ -143,10 +143,20 @@ function updateConnectionTargets(
   void checkConnectionsOnce();
 }
 
-function detectTauri() {
+function detectTauri(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const w = window as unknown as {
+    __TAURI_INTERNALS__?: unknown;
+    __TAURI__?: unknown;
+    __TAURI_METADATA__?: unknown;
+  };
+  // Tauri v2 injects __TAURI_INTERNALS__ on the global window object.
   return (
-    typeof window !== "undefined" &&
-    typeof (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== "undefined"
+    typeof w.__TAURI_INTERNALS__ !== "undefined" ||
+    typeof w.__TAURI__ !== "undefined" ||
+    typeof w.__TAURI_METADATA__ !== "undefined"
   );
 }
 
@@ -166,32 +176,33 @@ function formatErrorMessage(error: unknown, fallback: string) {
 }
 
 export default function Home() {
+  // Start as "not yet hydrated" on the client. We flip to true after mount.
+  // This avoids hydration mismatches with the static export.
+  const [isHydrated, setIsHydrated] = useState(false);
+  const [isTauri, setIsTauri] = useState(false);
+
+  useEffect(() => {
+    setIsHydrated(true);
+    setIsTauri(detectTauri());
+  }, []);
+
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<string>("");
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [status, setStatus] = useState<Status>({ kind: "idle", message: "" });
   const [accountsLoaded, setAccountsLoaded] = useState(false);
 
-  const connectionSnapshot = useSyncExternalStore(
-    subscribeConnections,
-    getConnectionSnapshot,
-    getConnectionSnapshot
-  );
+  // Local re-render trigger for connection snapshot updates.
+  const [connectionVersion, setConnectionVersion] = useState(0);
+  useEffect(() => {
+    return subscribeConnections(() => setConnectionVersion((v) => v + 1));
+  }, []);
+  // connectionVersion intentionally drives re-renders; suppress unused warning.
+  void connectionVersion;
+  const connectionSnapshot = getConnectionSnapshot();
   const rpcStatus = connectionSnapshot.rpc;
   const ollamaStatus = connectionSnapshot.ollama;
   const workerStatus = connectionSnapshot.worker;
-
-  const isHydrated = useSyncExternalStore(
-    () => () => undefined,
-    () => true,
-    () => false
-  );
-
-  const isTauri = useSyncExternalStore(
-    () => () => undefined,
-    () => detectTauri(),
-    () => false
-  );
 
   const tauriInvoke = useCallback(
     async <T,>(cmd: string, args?: Record<string, unknown>) => {
@@ -499,6 +510,9 @@ export default function Home() {
     setStatus({ kind: "success", message: "Address copied to clipboard." });
   }
 
+  // Pre-hydration / SSR: render a minimal placeholder. We don't try to guess
+  // whether we are inside Tauri on the server; that decision is made after
+  // mount on the client.
   if (!isHydrated) {
     return (
       <div className="min-h-screen bg-[#0b0d10] text-zinc-100">

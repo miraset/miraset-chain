@@ -1,17 +1,44 @@
 import type { Metadata } from "next";
-import { Bebas_Neue, Ubuntu } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 
-const bebasNeue = Bebas_Neue({
+const bebasNeue = localFont({
   variable: "--font-bebas",
-  subsets: ["latin"],
-  weight: ["400"],
+  display: "swap",
+  src: [
+    {
+      path: "./fonts/BebasNeue-Latin.woff2",
+      weight: "400",
+      style: "normal",
+    },
+  ],
 });
 
-const ubuntu = Ubuntu({
+const ubuntu = localFont({
   variable: "--font-ubuntu",
-  subsets: ["latin"],
-  weight: ["300", "400", "500", "700"],
+  display: "swap",
+  src: [
+    {
+      path: "./fonts/Ubuntu-Latin-300.woff2",
+      weight: "300",
+      style: "normal",
+    },
+    {
+      path: "./fonts/Ubuntu-Latin-400.woff2",
+      weight: "400",
+      style: "normal",
+    },
+    {
+      path: "./fonts/Ubuntu-Latin-500.woff2",
+      weight: "500",
+      style: "normal",
+    },
+    {
+      path: "./fonts/Ubuntu-Latin-700.woff2",
+      weight: "700",
+      style: "normal",
+    },
+  ],
 });
 
 export const metadata: Metadata = {

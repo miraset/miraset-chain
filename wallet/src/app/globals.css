@@ -11,15 +11,27 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-panel: var(--panel);
+  --color-panel-border: var(--panel-border);
   --font-sans: var(--font-ubuntu);
   --font-mono: var(--font-ubuntu);
+  --font-display: var(--font-bebas);
 }
 
+html,
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-ubuntu), "Segoe UI", "Helvetica Neue", Arial,
     sans-serif;
+  min-height: 100vh;
+}
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .font-display {
