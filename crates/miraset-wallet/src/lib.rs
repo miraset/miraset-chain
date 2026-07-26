@@ -6,8 +6,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
 use argon2::Argon2;
 use rand::RngCore;
@@ -318,7 +318,9 @@ mod tests {
         let (mut wallet, _temp_dir) = create_temp_wallet();
 
         let secret = "0101010101010101010101010101010101010101010101010101010101010101";
-        let addr = wallet.import_account("imported".to_string(), secret).unwrap();
+        let addr = wallet
+            .import_account("imported".to_string(), secret)
+            .unwrap();
 
         assert!(addr.to_hex().len() == 64);
 
@@ -463,7 +465,11 @@ mod tests {
         let signature = kp.sign(message);
 
         // Verify signature works
-        assert!(miraset_core::verify_signature(&kp.address(), message, &signature));
+        assert!(miraset_core::verify_signature(
+            &kp.address(),
+            message,
+            &signature
+        ));
     }
 
     #[test]
@@ -504,8 +510,7 @@ mod tests {
 
         // Create encrypted wallet
         {
-            let mut wallet =
-                Wallet::open_encrypted(wallet_path.clone(), "mypassword123").unwrap();
+            let mut wallet = Wallet::open_encrypted(wallet_path.clone(), "mypassword123").unwrap();
             assert!(wallet.is_encrypted());
             wallet.create_account("alice".to_string()).unwrap();
             wallet.create_account("bob".to_string()).unwrap();
@@ -513,8 +518,7 @@ mod tests {
 
         // Re-open with correct password
         {
-            let wallet =
-                Wallet::open_encrypted(wallet_path.clone(), "mypassword123").unwrap();
+            let wallet = Wallet::open_encrypted(wallet_path.clone(), "mypassword123").unwrap();
             let accounts = wallet.list_accounts();
             assert_eq!(accounts.len(), 2);
         }
@@ -535,8 +539,7 @@ mod tests {
         let secret = "0101010101010101010101010101010101010101010101010101010101010101";
 
         {
-            let mut wallet =
-                Wallet::open_encrypted(wallet_path.clone(), "pass").unwrap();
+            let mut wallet = Wallet::open_encrypted(wallet_path.clone(), "pass").unwrap();
             wallet.import_account("test".to_string(), secret).unwrap();
         }
 
@@ -554,8 +557,7 @@ mod tests {
 
         // Create encrypted
         {
-            let mut wallet =
-                Wallet::open_encrypted(wallet_path.clone(), "secret").unwrap();
+            let mut wallet = Wallet::open_encrypted(wallet_path.clone(), "secret").unwrap();
             wallet.create_account("alice".to_string()).unwrap();
         }
 
@@ -577,8 +579,7 @@ mod tests {
 
         // Re-open with password → auto-upgrade
         {
-            let wallet =
-                Wallet::open_encrypted(wallet_path.clone(), "newpass").unwrap();
+            let wallet = Wallet::open_encrypted(wallet_path.clone(), "newpass").unwrap();
             assert!(wallet.is_encrypted());
             assert_eq!(wallet.list_accounts().len(), 1);
         }

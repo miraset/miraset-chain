@@ -1,12 +1,12 @@
 use crate::state::State;
 use axum::{
+    Json, Router,
     extract::State as AxumState,
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
 use chrono::Utc;
-use miraset_core::{Address, Block, Event, ObjectData, Transaction, ObjectId};
+use miraset_core::{Address, Block, Event, ObjectData, ObjectId, Transaction};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
@@ -62,13 +62,15 @@ struct PingResponse {
     status: String,
 }
 
-async fn get_health(AxumState(rpc): AxumState<RpcState>) -> Json<NodeStatus> {
-    let latest_block = rpc.state.get_latest_block();
-    Json(NodeStatus {
+async fn get_health(
+    AxumState(rpc): AxumState<RpcState>,
+) -> Result<Json<NodeStatus>, crate::error::StateError> {
+    let latest_block = rpc.state.get_latest_block()?;
+    Ok(Json(NodeStatus {
         status: "healthy".to_string(),
         timestamp: Utc::now().to_rfc3339(),
         latest_block_height: latest_block.height,
-    })
+    }))
 }
 
 async fn ping() -> Json<PingResponse> {
@@ -95,8 +97,8 @@ async fn get_nonce(
 
 async fn get_latest_block(
     AxumState(rpc): AxumState<RpcState>,
-) -> Json<Block> {
-    Json(rpc.state.get_latest_block())
+) -> Result<Json<Block>, crate::error::StateError> {
+    Ok(Json(rpc.state.get_latest_block()?))
 }
 
 async fn get_block_by_height(
@@ -157,10 +159,8 @@ async fn get_chat_messages(
 async fn submit_transaction(
     AxumState(rpc): AxumState<RpcState>,
     Json(tx): Json<Transaction>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    rpc.state
-        .submit_transaction(tx)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+) -> Result<Json<serde_json::Value>, crate::error::TxError> {
+    rpc.state.submit_transaction(tx)?;
     Ok(Json(serde_json::json!({ "status": "accepted" })))
 }
 
@@ -198,9 +198,7 @@ struct SubmitJobRequest {
     escrow_amount: u64,
 }
 
-async fn list_jobs(
-    AxumState(rpc): AxumState<RpcState>,
-) -> Json<Vec<JobView>> {
+async fn list_jobs(AxumState(rpc): AxumState<RpcState>) -> Json<Vec<JobView>> {
     let jobs = rpc.state.get_jobs();
     let views: Vec<JobView> = jobs
         .iter()
@@ -225,7 +223,7 @@ async fn list_jobs(
                     max_tokens: *max_tokens,
                     escrow_amount: *escrow_amount,
                     status: format!("{:?}", status),
-                    assigned_worker: assigned_worker_id.map(|w| hex::encode(w)),
+                    assigned_worker: assigned_worker_id.map(hex::encode),
                     created_at: created_at.to_rfc3339(),
                 })
             } else {
@@ -262,7 +260,7 @@ async fn get_job(
             max_tokens: *max_tokens,
             escrow_amount: *escrow_amount,
             status: format!("{:?}", status),
-            assigned_worker: assigned_worker_id.map(|w| hex::encode(w)),
+            assigned_worker: assigned_worker_id.map(hex::encode),
             created_at: created_at.to_rfc3339(),
         }))
     } else {
@@ -274,9 +272,9 @@ async fn get_job(
 async fn submit_job(
     AxumState(rpc): AxumState<RpcState>,
     Json(req): Json<SubmitJobRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, crate::error::StateError> {
     let requester = Address::from_hex(&req.requester)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid requester address".to_string()))?;
+        .map_err(|_| crate::error::StateError::Other("Invalid requester address".to_string()))?;
 
     // Create the job on-chain via state
     let job_id = rpc.state.create_job(
@@ -284,7 +282,7 @@ async fn submit_job(
         req.model_id.clone(),
         req.max_tokens,
         req.escrow_amount,
-    ).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    )?;
 
     // Try to auto-assign to an available worker
     let assigned_worker = rpc.state.auto_assign_job(&job_id, &req.model_id);
@@ -306,12 +304,15 @@ async fn submit_job(
             let model_id = req.model_id.clone();
             let max_tokens = req.max_tokens;
             tokio::spawn(async move {
-                let client = reqwest::Client::builder()
+                let Ok(client) = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(5))
                     .build()
-                    .unwrap();
+                else {
+                    return;
+                };
                 let accept_url = format!("{}/jobs/accept", endpoint.trim_end_matches('/'));
-                let _ = client.post(&accept_url)
+                let _ = client
+                    .post(&accept_url)
                     .json(&serde_json::json!({
                         "job_id": job_id_hex,
                         "epoch_id": 0,
@@ -328,9 +329,7 @@ async fn submit_job(
     Ok(Json(resp))
 }
 
-async fn list_workers(
-    AxumState(rpc): AxumState<RpcState>,
-) -> Json<Vec<WorkerView>> {
+async fn list_workers(AxumState(rpc): AxumState<RpcState>) -> Json<Vec<WorkerView>> {
     let workers = rpc.state.get_workers();
     let views: Vec<WorkerView> = workers
         .iter()
@@ -372,9 +371,7 @@ struct EpochView {
     jobs_count: usize,
 }
 
-async fn get_epoch(
-    AxumState(rpc): AxumState<RpcState>,
-) -> Json<EpochView> {
+async fn get_epoch(AxumState(rpc): AxumState<RpcState>) -> Json<EpochView> {
     let epoch = rpc.state.get_current_epoch();
     Json(EpochView {
         id: epoch.id,

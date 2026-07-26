@@ -5,32 +5,31 @@
 /// - Executes inference via Ollama/vLLM backend
 /// - Generates signed receipts with canonical hashing
 /// - Submits results to chain
-
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use axum::{
+    Json, Router,
     extract::Path,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
-use miraset_core::{KeyPair, ObjectId};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use parking_lot::RwLock;
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use miraset_core::{KeyPair, ObjectId};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-mod receipt;
 mod backend;
 mod node_client;
+mod receipt;
 
-pub use receipt::{ReceiptPayload, ReceiptHash};
 pub use backend::{
     BackendType, InferenceBackend, LlamaCppBackend, MockBackend, OllamaBackend,
     OpenAiCompatibleBackend, OpenLlmBackend, TgiBackend,
 };
 pub use node_client::NodeClient;
+pub use receipt::{ReceiptHash, ReceiptPayload};
 
 /// Worker configuration
 #[derive(Debug, Clone)]
@@ -89,7 +88,7 @@ pub enum JobStatus {
 /// Job acceptance request
 #[derive(Debug, Deserialize)]
 pub struct AcceptJobRequest {
-    pub job_id: String,  // Hex-encoded job ID
+    pub job_id: String, // Hex-encoded job ID
     pub epoch_id: u64,
     pub model_id: String,
     pub max_tokens: u64,
@@ -99,7 +98,7 @@ pub struct AcceptJobRequest {
 /// Job execution request
 #[derive(Debug, Deserialize)]
 pub struct RunJobRequest {
-    pub job_id: String,  // Hex-encoded job ID
+    pub job_id: String, // Hex-encoded job ID
     pub prompt: String,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -117,7 +116,7 @@ pub struct JobReport {
 
 // Helper module for serializing [u8; 64]
 mod signature_serde {
-    use serde::{Serializer, Deserializer, Deserialize};
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(bytes: &[u8; 64], serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -126,6 +125,7 @@ mod signature_serde {
         serializer.serialize_bytes(bytes)
     }
 
+    #[allow(dead_code)]
     pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 64], D::Error>
     where
         D: Deserializer<'de>,
@@ -174,25 +174,32 @@ impl Worker {
             .route("/health", get(health_handler))
             .route("/status", get(health_handler))
             .route("/ping", get(ping_handler))
-            .route("/jobs/accept", post(move |Json(req): Json<AcceptJobRequest>| {
-                let worker = Arc::clone(&accept_worker);
-                async move {
-                    match worker.accept_job(req) {
-                        Ok(_) => (
-                            StatusCode::OK,
-                            Json(serde_json::json!({ "status": "accepted" })),
-                        ).into_response(),
-                        Err(e) => (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({ "error": e.to_string() })),
-                        ).into_response(),
+            .route(
+                "/jobs/accept",
+                post(move |Json(req): Json<AcceptJobRequest>| {
+                    let worker = Arc::clone(&accept_worker);
+                    async move {
+                        match worker.accept_job(req) {
+                            Ok(_) => (
+                                StatusCode::OK,
+                                Json(serde_json::json!({ "status": "accepted" })),
+                            )
+                                .into_response(),
+                            Err(e) => (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({ "error": e.to_string() })),
+                            )
+                                .into_response(),
+                        }
                     }
-                }
-            }))
-            .route("/jobs/run", post(move |Json(req): Json<RunJobRequest>| {
-                let worker = Arc::clone(&run_worker);
-                async move {
-                    let job_id = match parse_object_id(&req.job_id) {
+                }),
+            )
+            .route(
+                "/jobs/run",
+                post(move |Json(req): Json<RunJobRequest>| {
+                    let worker = Arc::clone(&run_worker);
+                    async move {
+                        let job_id = match parse_object_id(&req.job_id) {
                         Ok(id) => id,
                         Err(e) => return (
                             StatusCode::BAD_REQUEST,
@@ -200,87 +207,114 @@ impl Worker {
                         ).into_response(),
                     };
 
-                    match worker.run_job(job_id, req).await {
-                        Ok(_) => (
-                            StatusCode::OK,
-                            Json(serde_json::json!({ "status": "completed" })),
-                        ).into_response(),
-                        Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({ "error": e.to_string() })),
-                        ).into_response(),
+                        match worker.run_job(job_id, req).await {
+                            Ok(_) => (
+                                StatusCode::OK,
+                                Json(serde_json::json!({ "status": "completed" })),
+                            )
+                                .into_response(),
+                            Err(e) => (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({ "error": e.to_string() })),
+                            )
+                                .into_response(),
+                        }
                     }
-                }
-            }))
-            .route("/jobs/{id}/stream", get(move |Path(job_id_hex): Path<String>| {
-                let worker = Arc::clone(&stream_worker);
-                async move {
-                    let job_id = match parse_object_id(&job_id_hex) {
-                        Ok(id) => id,
-                        Err(e) => return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({ "error": e.to_string() })),
-                        ).into_response(),
-                    };
+                }),
+            )
+            .route(
+                "/jobs/{id}/stream",
+                get(move |Path(job_id_hex): Path<String>| {
+                    let worker = Arc::clone(&stream_worker);
+                    async move {
+                        let job_id = match parse_object_id(&job_id_hex) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(serde_json::json!({ "error": e.to_string() })),
+                                )
+                                    .into_response();
+                            }
+                        };
 
-                    let jobs = worker.jobs.read();
-                    let job = match jobs.get(&job_id) {
-                        Some(j) => j,
-                        None => return (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({ "error": "Job not found" })),
-                        ).into_response(),
-                    };
+                        let jobs = worker.jobs.read();
+                        let job = match jobs.get(&job_id) {
+                            Some(j) => j,
+                            None => {
+                                return (
+                                    StatusCode::NOT_FOUND,
+                                    Json(serde_json::json!({ "error": "Job not found" })),
+                                )
+                                    .into_response();
+                            }
+                        };
 
-                    Json(serde_json::json!({
-                        "job_id": hex::encode(job.job_id),
-                        "status": job.status,
-                        "response": job.response,
-                        "output_tokens": job.output_tokens,
-                    })).into_response()
-                }
-            }))
-            .route("/jobs/{id}/report", post(move |Path(job_id_hex): Path<String>| {
-                let worker = Arc::clone(&report_worker);
-                async move {
-                    let job_id = match parse_object_id(&job_id_hex) {
-                        Ok(id) => id,
-                        Err(e) => return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({ "error": e.to_string() })),
-                        ).into_response(),
-                    };
-
-                    match worker.generate_receipt(job_id) {
-                        Ok(report) => Json(report).into_response(),
-                        Err(e) => (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({ "error": e.to_string() })),
-                        ).into_response(),
+                        Json(serde_json::json!({
+                            "job_id": hex::encode(job.job_id),
+                            "status": job.status,
+                            "response": job.response,
+                            "output_tokens": job.output_tokens,
+                        }))
+                        .into_response()
                     }
-                }
-            }))
-            .route("/jobs/{id}/status", get(move |Path(job_id_hex): Path<String>| {
-                let worker = Arc::clone(&status_worker);
-                async move {
-                    let job_id = match parse_object_id(&job_id_hex) {
-                        Ok(id) => id,
-                        Err(e) => return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({ "error": e.to_string() })),
-                        ).into_response(),
-                    };
+                }),
+            )
+            .route(
+                "/jobs/{id}/report",
+                post(move |Path(job_id_hex): Path<String>| {
+                    let worker = Arc::clone(&report_worker);
+                    async move {
+                        let job_id = match parse_object_id(&job_id_hex) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(serde_json::json!({ "error": e.to_string() })),
+                                )
+                                    .into_response();
+                            }
+                        };
 
-                    let jobs = worker.jobs.read();
-                    match jobs.get(&job_id) {
-                        Some(job) => Json(job.clone()).into_response(),
-                        None => (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({ "error": "Job not found" })),
-                        ).into_response(),
+                        match worker.generate_receipt(job_id) {
+                            Ok(report) => Json(report).into_response(),
+                            Err(e) => (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({ "error": e.to_string() })),
+                            )
+                                .into_response(),
+                        }
                     }
-                }
-            }))
+                }),
+            )
+            .route(
+                "/jobs/{id}/status",
+                get(move |Path(job_id_hex): Path<String>| {
+                    let worker = Arc::clone(&status_worker);
+                    async move {
+                        let job_id = match parse_object_id(&job_id_hex) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                return (
+                                    StatusCode::BAD_REQUEST,
+                                    Json(serde_json::json!({ "error": e.to_string() })),
+                                )
+                                    .into_response();
+                            }
+                        };
+
+                        let jobs = worker.jobs.read();
+                        match jobs.get(&job_id) {
+                            Some(job) => Json(job.clone()).into_response(),
+                            None => (
+                                StatusCode::NOT_FOUND,
+                                Json(serde_json::json!({ "error": "Job not found" })),
+                            )
+                                .into_response(),
+                        }
+                    }
+                }),
+            )
     }
 
     /// Accept a job assignment
@@ -325,7 +359,8 @@ impl Worker {
         // Take the lock, validate, and extract what we need before awaiting.
         let (model_id, max_tokens, prompt) = {
             let mut jobs = self.jobs.write();
-            let job = jobs.get_mut(&job_id)
+            let job = jobs
+                .get_mut(&job_id)
                 .ok_or_else(|| anyhow!("Job not found"))?;
 
             if job.status != JobStatus::Accepted {
@@ -340,17 +375,15 @@ impl Worker {
         };
 
         // Execute inference via backend
-        let response = self.backend.generate(
-            &model_id,
-            &prompt,
-            max_tokens,
-            req.temperature,
-            req.top_p,
-        ).await?;
+        let response = self
+            .backend
+            .generate(&model_id, &prompt, max_tokens, req.temperature, req.top_p)
+            .await?;
 
         // Update job with results
         let mut jobs = self.jobs.write();
-        let job = jobs.get_mut(&job_id)
+        let job = jobs
+            .get_mut(&job_id)
             .ok_or_else(|| anyhow!("Job disappeared"))?;
 
         job.response = response.tokens.clone();
@@ -358,7 +391,11 @@ impl Worker {
         job.status = JobStatus::Completed;
         job.completed_at = Some(Utc::now());
 
-        tracing::info!("Completed job: {:?}, tokens: {}", job_id, response.token_count);
+        tracing::info!(
+            "Completed job: {:?}, tokens: {}",
+            job_id,
+            response.token_count
+        );
 
         Ok(())
     }
@@ -366,8 +403,7 @@ impl Worker {
     /// Generate signed receipt for a job
     pub fn generate_receipt(&self, job_id: ObjectId) -> Result<JobReport> {
         let jobs = self.jobs.read();
-        let job = jobs.get(&job_id)
-            .ok_or_else(|| anyhow!("Job not found"))?;
+        let job = jobs.get(&job_id).ok_or_else(|| anyhow!("Job not found"))?;
 
         if job.status != JobStatus::Completed {
             return Err(anyhow!("Job not completed"));
@@ -406,18 +442,19 @@ impl Worker {
         let report = self.generate_receipt(job_id)?;
 
         // Submit to chain
-        self.node_client.submit_job_result(
-            report.job_id,
-            self.config.worker_id,
-            report.receipt_payload.output_tokens,
-            report.receipt_hash,
-        ).await?;
+        self.node_client
+            .submit_job_result(
+                report.job_id,
+                self.config.worker_id,
+                report.receipt_payload.output_tokens,
+                report.receipt_hash,
+            )
+            .await?;
 
         // Optionally anchor the full receipt
-        self.node_client.anchor_receipt(
-            report.job_id,
-            report.receipt_hash,
-        ).await?;
+        self.node_client
+            .anchor_receipt(report.job_id, report.receipt_hash)
+            .await?;
 
         tracing::info!("Submitted and anchored job result on-chain: {:?}", job_id);
 
@@ -426,13 +463,15 @@ impl Worker {
 
     /// Register worker on-chain
     pub async fn register_on_chain(&self) -> Result<ObjectId> {
-        self.node_client.register_worker(
-            vec![format!("http://{}", self.config.endpoint)],
-            self.config.gpu_model.clone(),
-            self.config.vram_total_gib,
-            self.config.supported_models.clone(),
-            1000, // stake_bond
-        ).await
+        self.node_client
+            .register_worker(
+                vec![format!("http://{}", self.config.endpoint)],
+                self.config.gpu_model.clone(),
+                self.config.vram_total_gib,
+                self.config.supported_models.clone(),
+                1000, // stake_bond
+            )
+            .await
     }
 
     /// Get worker config (for heartbeat loop)
@@ -469,18 +508,24 @@ impl Worker {
                 };
 
                 // Estimate available VRAM (for demo: total minus active jobs)
-                let active_jobs = self.jobs.read().values()
+                let active_jobs = self
+                    .jobs
+                    .read()
+                    .values()
                     .filter(|j| j.status == JobStatus::Running)
                     .count() as u32;
                 let vram_used_per_job: u32 = 4; // estimate 4 GiB per job
-                let vram_avail = self.config.vram_total_gib.saturating_sub(active_jobs * vram_used_per_job);
+                let vram_avail = self
+                    .config
+                    .vram_total_gib
+                    .saturating_sub(active_jobs * vram_used_per_job);
 
                 // Submit resource snapshot TX
-                match self.node_client.submit_resource_snapshot(
-                    worker_id,
-                    epoch_id,
-                    vram_avail,
-                ).await {
+                match self
+                    .node_client
+                    .submit_resource_snapshot(worker_id, epoch_id, vram_avail)
+                    .await
+                {
                     Ok(_) => {
                         tracing::info!(
                             "♥ Heartbeat sent: epoch={}, vram_avail={}GiB",
@@ -539,10 +584,7 @@ mod tests {
             backend_api_key: None,
             gpu_model: "NVIDIA RTX 4090".to_string(),
             vram_total_gib: 24,
-            supported_models: vec![
-                "llama2".to_string(),
-                "mistral".to_string(),
-            ],
+            supported_models: vec!["llama2".to_string(), "mistral".to_string()],
         };
 
         let worker = Worker::new(config);

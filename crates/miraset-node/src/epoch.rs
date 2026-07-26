@@ -1,5 +1,5 @@
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use miraset_core::{Address, ObjectId};
-use chrono::{DateTime, Utc, Duration as ChronoDuration};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -59,9 +59,9 @@ pub enum EpochStatus {
 pub struct WorkerEpochStats {
     pub worker_id: ObjectId,
     pub owner: Address,
-    pub uptime_score: f64,           // U_i(e) ∈ [0,1]
-    pub vram_avail_avg_gib: f64,     // V_i(e)
-    pub verified_tokens: u64,        // T_i(e)
+    pub uptime_score: f64,       // U_i(e) ∈ [0,1]
+    pub vram_avail_avg_gib: f64, // V_i(e)
+    pub verified_tokens: u64,    // T_i(e)
     pub heartbeat_samples: u64,
     pub heartbeat_success: u64,
 }
@@ -143,10 +143,17 @@ impl Epoch {
             EpochStatus::Active if elapsed >= EPOCH_DURATION_SECONDS => {
                 self.status = EpochStatus::SubmitWindow;
             }
-            EpochStatus::SubmitWindow if elapsed >= EPOCH_DURATION_SECONDS + SUBMIT_WINDOW_SECONDS => {
+            EpochStatus::SubmitWindow
+                if elapsed >= EPOCH_DURATION_SECONDS + SUBMIT_WINDOW_SECONDS =>
+            {
                 self.status = EpochStatus::ChallengeWindow;
             }
-            EpochStatus::ChallengeWindow if elapsed >= EPOCH_DURATION_SECONDS + SUBMIT_WINDOW_SECONDS + CHALLENGE_WINDOW_SECONDS => {
+            EpochStatus::ChallengeWindow
+                if elapsed
+                    >= EPOCH_DURATION_SECONDS
+                        + SUBMIT_WINDOW_SECONDS
+                        + CHALLENGE_WINDOW_SECONDS =>
+            {
                 self.status = EpochStatus::Settled;
             }
             _ => {}
@@ -175,9 +182,8 @@ impl Epoch {
         };
 
         // Calculate total capacity score
-        let total_capacity_score: f64 = self.worker_stats.values()
-            .map(|w| w.capacity_score())
-            .sum();
+        let total_capacity_score: f64 =
+            self.worker_stats.values().map(|w| w.capacity_score()).sum();
 
         // Calculate total verified tokens
         let total_tokens = self.total_verified_tokens;
@@ -185,7 +191,7 @@ impl Epoch {
         // Distribute rewards to each worker
         for (worker_id, stats) in &self.worker_stats {
             let capacity_score = stats.capacity_score();
-            
+
             // Capacity reward: proportional to capacity score
             let capacity_reward = if total_capacity_score > 0.0 {
                 ((capacity_pool as f64) * (capacity_score / total_capacity_score)) as u64
@@ -195,21 +201,25 @@ impl Epoch {
 
             // Compute reward: proportional to verified tokens
             let compute_reward = if total_tokens > 0 {
-                ((compute_pool as f64) * (stats.verified_tokens as f64 / total_tokens as f64)) as u64
+                ((compute_pool as f64) * (stats.verified_tokens as f64 / total_tokens as f64))
+                    as u64
             } else {
                 0
             };
 
-            rewards.worker_rewards.insert(*worker_id, WorkerReward {
-                worker_id: *worker_id,
-                owner: stats.owner,
-                capacity_reward,
-                compute_reward,
-                total_reward: capacity_reward + compute_reward,
-                uptime_score: stats.uptime_score,
-                vram_avg_gib: stats.vram_avail_avg_gib,
-                verified_tokens: stats.verified_tokens,
-            });
+            rewards.worker_rewards.insert(
+                *worker_id,
+                WorkerReward {
+                    worker_id: *worker_id,
+                    owner: stats.owner,
+                    capacity_reward,
+                    compute_reward,
+                    total_reward: capacity_reward + compute_reward,
+                    uptime_score: stats.uptime_score,
+                    vram_avg_gib: stats.vram_avail_avg_gib,
+                    verified_tokens: stats.verified_tokens,
+                },
+            );
         }
 
         rewards
@@ -246,10 +256,13 @@ mod tests {
     fn test_epoch_creation() {
         let start = Utc::now();
         let epoch = Epoch::new(0, start);
-        
+
         assert_eq!(epoch.id, 0);
         assert_eq!(epoch.status, EpochStatus::Active);
-        assert_eq!((epoch.end_time - epoch.start_time).num_seconds(), EPOCH_DURATION_SECONDS);
+        assert_eq!(
+            (epoch.end_time - epoch.start_time).num_seconds(),
+            EPOCH_DURATION_SECONDS
+        );
     }
 
     #[test]

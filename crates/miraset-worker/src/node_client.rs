@@ -1,23 +1,12 @@
 /// Client for interacting with Miraset node RPC
 use anyhow::Result;
 use miraset_core::{KeyPair, ObjectId, Transaction};
-use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct NodeClient {
     base_url: String,
     keypair: KeyPair,
     client: reqwest::Client,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct BalanceResponse {
-    balance: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct NonceResponse {
-    nonce: u64,
 }
 
 impl NodeClient {
@@ -44,11 +33,7 @@ impl NodeClient {
     pub async fn submit_transaction(&self, tx: Transaction) -> Result<()> {
         let url = format!("{}/tx/submit", self.base_url);
 
-        let response = self.client
-            .post(&url)
-            .json(&tx)
-            .send()
-            .await?;
+        let response = self.client.post(&url).json(&tx).send().await?;
 
         if !response.status().is_success() {
             let error_text = response.text().await?;
@@ -87,7 +72,11 @@ impl NodeClient {
         let msg = bincode::serialize(&tx)?;
         let signature = self.keypair.sign(&msg);
 
-        if let Transaction::RegisterWorker { signature: ref mut sig, .. } = tx {
+        if let Transaction::RegisterWorker {
+            signature: ref mut sig,
+            ..
+        } = tx
+        {
             *sig = signature;
         }
 
@@ -124,7 +113,11 @@ impl NodeClient {
         let msg = bincode::serialize(&tx)?;
         let signature = self.keypair.sign(&msg);
 
-        if let Transaction::SubmitJobResult { signature: ref mut sig, .. } = tx {
+        if let Transaction::SubmitJobResult {
+            signature: ref mut sig,
+            ..
+        } = tx
+        {
             *sig = signature;
         }
 
@@ -140,11 +133,7 @@ impl NodeClient {
     }
 
     /// Anchor receipt hash on-chain
-    pub async fn anchor_receipt(
-        &self,
-        job_id: ObjectId,
-        receipt_hash: [u8; 32],
-    ) -> Result<()> {
+    pub async fn anchor_receipt(&self, job_id: ObjectId, receipt_hash: [u8; 32]) -> Result<()> {
         let nonce = self.get_nonce().await?;
         let submitter = self.keypair.address();
 
@@ -159,7 +148,11 @@ impl NodeClient {
         let msg = bincode::serialize(&tx)?;
         let signature = self.keypair.sign(&msg);
 
-        if let Transaction::AnchorReceipt { signature: ref mut sig, .. } = tx {
+        if let Transaction::AnchorReceipt {
+            signature: ref mut sig,
+            ..
+        } = tx
+        {
             *sig = signature;
         }
 
@@ -192,7 +185,11 @@ impl NodeClient {
         let msg = bincode::serialize(&tx)?;
         let signature = self.keypair.sign(&msg);
 
-        if let Transaction::SubmitResourceSnapshot { signature: ref mut sig, .. } = tx {
+        if let Transaction::SubmitResourceSnapshot {
+            signature: ref mut sig,
+            ..
+        } = tx
+        {
             *sig = signature;
         }
 

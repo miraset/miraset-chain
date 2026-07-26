@@ -2,16 +2,16 @@ use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use miraset_core::Address;
 use miraset_wallet::Wallet;
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem, Paragraph, Tabs},
-    Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -130,15 +130,14 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_app<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
-    app: &mut App,
-) -> Result<()> {
+fn run_app<B: ratatui::backend::Backend>(terminal: &mut Terminal<B>, app: &mut App) -> Result<()> {
     let mut last_refresh = std::time::Instant::now();
     let handle = tokio::runtime::Handle::current();
 
     loop {
-        terminal.draw(|f| ui(f, app)).map_err(|e| anyhow::anyhow!("{}", e))?;
+        terminal
+            .draw(|f| ui(f, app))
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Auto-refresh every 3 seconds
         if last_refresh.elapsed() > Duration::from_secs(3) {
@@ -147,43 +146,43 @@ fn run_app<B: ratatui::backend::Backend>(
         }
 
         // Handle input
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    match key.code {
-                        KeyCode::Char('q') => return Ok(()),
-                        KeyCode::Char('1') => app.tab = Tab::Wallet,
-                        KeyCode::Char('2') => app.tab = Tab::Chat,
-                        KeyCode::Char('3') => app.tab = Tab::Chain,
-                        KeyCode::Char('r') => {
-                            let _ = handle.block_on(app.refresh_data());
-                        }
-                        KeyCode::Char(c) => {
-                            if matches!(app.tab, Tab::Chat) {
-                                app.chat_input.push(c);
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            if matches!(app.tab, Tab::Chat) {
-                                app.chat_input.pop();
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if matches!(app.tab, Tab::Chat) && !app.chat_input.is_empty() {
-                                if let Some(account) = &app.selected_account {
-                                    let _ = handle.block_on(send_chat_message(
-                                        &app.rpc_url,
-                                        &app.wallet,
-                                        account,
-                                        &app.chat_input,
-                                    ));
-                                    app.chat_input.clear();
-                                }
-                            }
-                        }
-                        _ => {}
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match key.code {
+                KeyCode::Char('q') => return Ok(()),
+                KeyCode::Char('1') => app.tab = Tab::Wallet,
+                KeyCode::Char('2') => app.tab = Tab::Chat,
+                KeyCode::Char('3') => app.tab = Tab::Chain,
+                KeyCode::Char('r') => {
+                    let _ = handle.block_on(app.refresh_data());
+                }
+                KeyCode::Char(c) => {
+                    if matches!(app.tab, Tab::Chat) {
+                        app.chat_input.push(c);
                     }
                 }
+                KeyCode::Backspace => {
+                    if matches!(app.tab, Tab::Chat) {
+                        app.chat_input.pop();
+                    }
+                }
+                KeyCode::Enter => {
+                    if matches!(app.tab, Tab::Chat)
+                        && !app.chat_input.is_empty()
+                        && let Some(account) = &app.selected_account
+                    {
+                        let _ = handle.block_on(send_chat_message(
+                            &app.rpc_url,
+                            &app.wallet,
+                            account,
+                            &app.chat_input,
+                        ));
+                        app.chat_input.clear();
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -192,7 +191,11 @@ fn run_app<B: ratatui::backend::Backend>(
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
         .split(f.area());
 
     // Header tabs
@@ -205,7 +208,11 @@ fn ui(f: &mut Frame, app: &App) {
             Tab::Chain => 2,
         })
         .style(Style::default().fg(Color::White))
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
     f.render_widget(tabs, chunks[0]);
 
     // Content
@@ -233,12 +240,7 @@ fn render_wallet(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|(name, addr)| {
             let balance = app.balances.get(addr).copied().unwrap_or(0);
-            let content = format!(
-                "{}: {} (balance: {})",
-                name,
-                &addr.to_hex()[..12],
-                balance
-            );
+            let content = format!("{}: {} (balance: {})", name, &addr.to_hex()[..12], balance);
             ListItem::new(content)
         })
         .collect();
@@ -254,8 +256,8 @@ fn render_wallet(f: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("Total accounts: {}", app.accounts.len())
     };
-    let info_widget = Paragraph::new(info)
-        .block(Block::default().borders(Borders::ALL).title("Info"));
+    let info_widget =
+        Paragraph::new(info).block(Block::default().borders(Borders::ALL).title("Info"));
     f.render_widget(info_widget, chunks[1]);
 }
 
@@ -276,17 +278,20 @@ fn render_chat(f: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Chat Messages"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Chat Messages"),
+        )
         .style(Style::default().fg(Color::White));
     f.render_widget(list, chunks[0]);
 
     // Input
-    let input = Paragraph::new(app.chat_input.as_str())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Type message (Enter to send)"),
-        );
+    let input = Paragraph::new(app.chat_input.as_str()).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Type message (Enter to send)"),
+    );
     f.render_widget(input, chunks[1]);
 }
 
@@ -300,8 +305,8 @@ fn render_chain(f: &mut Frame, app: &App, area: Rect) {
         "Loading chain info...".to_string()
     };
 
-    let widget = Paragraph::new(info)
-        .block(Block::default().borders(Borders::ALL).title("Chain Info"));
+    let widget =
+        Paragraph::new(info).block(Block::default().borders(Borders::ALL).title("Chain Info"));
     f.render_widget(widget, area);
 }
 
@@ -334,12 +339,7 @@ async fn get_latest_block(rpc: &str) -> Result<BlockInfo> {
     })
 }
 
-async fn send_chat_message(
-    rpc: &str,
-    wallet: &Wallet,
-    account: &str,
-    message: &str,
-) -> Result<()> {
+async fn send_chat_message(rpc: &str, wallet: &Wallet, account: &str, message: &str) -> Result<()> {
     use miraset_core::Transaction;
 
     let kp = wallet.get_keypair(account)?;

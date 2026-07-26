@@ -5,12 +5,10 @@
 /// - Canonical serialization (BCS-like)
 /// - Deterministic hashing
 /// - On-chain anchor as hash
-
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use miraset_core::{Address, ObjectId};
 use serde::{Deserialize, Serialize};
-
 
 /// Receipt hash (32 bytes)
 pub type ReceiptHash = [u8; 32];
@@ -53,7 +51,11 @@ pub struct ReceiptPayload {
     pub worker_signature: [u8; 64],
 
     /// Optional coordinator co-signature
-    #[serde(skip_serializing_if = "Option::is_none", with = "option_signature_serde", default)]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "option_signature_serde",
+        default
+    )]
     pub coordinator_signature: Option<[u8; 64]>,
 }
 
@@ -117,6 +119,7 @@ mod option_signature_serde {
 
 impl ReceiptPayload {
     /// Create new receipt payload
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         job_id: ObjectId,
         epoch_id: u64,
@@ -210,31 +213,6 @@ impl ReceiptPayload {
     }
 }
 
-/// Receipt anchor for on-chain storage
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReceiptAnchor {
-    pub job_id: ObjectId,
-    pub epoch_id: u64,
-    pub receipt_hash: ReceiptHash,
-    pub worker: Address,
-    pub output_tokens: u64,
-    pub timestamp: DateTime<Utc>,
-}
-
-impl ReceiptAnchor {
-    /// Create from receipt payload
-    pub fn from_payload(payload: &ReceiptPayload) -> Result<Self> {
-        Ok(Self {
-            job_id: payload.job_id,
-            epoch_id: payload.epoch_id,
-            receipt_hash: payload.compute_hash()?,
-            worker: payload.worker_pubkey,
-            output_tokens: payload.output_tokens,
-            timestamp: payload.timestamp_end,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,7 +249,8 @@ mod tests {
             2,
             Utc::now(),
             Utc::now(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let hash1 = receipt.compute_hash().unwrap();
         let hash2 = receipt.compute_hash().unwrap();
@@ -300,7 +279,8 @@ mod tests {
             1,
             Utc::now(),
             Utc::now(),
-        ).unwrap();
+        )
+        .unwrap();
 
         let hash = receipt.compute_hash().unwrap();
         assert!(receipt.verify(&hash).unwrap());
@@ -327,7 +307,8 @@ mod tests {
             1,
             start,
             end,
-        ).unwrap();
+        )
+        .unwrap();
 
         let receipt2 = ReceiptPayload::new(
             [1u8; 32],
@@ -339,7 +320,8 @@ mod tests {
             1,
             start,
             end,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(
             receipt1.compute_hash().unwrap(),

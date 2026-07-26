@@ -3,11 +3,11 @@ use miraset_core::{Address, KeyPair, Transaction};
 use miraset_node::{State, Storage};
 use miraset_wallet::Wallet;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Configuration file structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Config {
     #[serde(default)]
     node: NodeConfig,
@@ -33,14 +33,6 @@ impl Default for NodeConfig {
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            node: NodeConfig::default(),
-        }
-    }
-}
-
 fn default_rpc_addr() -> String {
     "127.0.0.1:9944".to_string()
 }
@@ -55,32 +47,41 @@ fn default_block_interval() -> u64 {
 
 /// Load configuration with precedence: CLI flags > Env vars > Config file > Defaults
 fn load_config() -> Config {
-    // Try to load from miraset.toml in project root (silent if missing)
-    let config_path = PathBuf::from("miraset.toml");
-    if config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            if let Ok(config) = toml::from_str::<Config>(&content) {
-                return config;
-            }
-        }
+    load_config_from_path(Path::new("miraset.toml"))
+}
+
+fn load_config_from_path(path: &std::path::Path) -> Config {
+    if path.exists()
+        && let Ok(content) = std::fs::read_to_string(path)
+        && let Ok(config) = toml::from_str::<Config>(&content)
+    {
+        return config;
     }
-    
+
     // Return defaults if config file not found or invalid
     Config::default()
 }
 
 /// Apply environment variable overrides (MIRASET_* prefix)
-fn apply_env_overrides(mut config: Config) -> Config {
-    if let Ok(val) = std::env::var("MIRASET_RPC_ADDR") {
-        config.node.rpc_addr = val;
+fn apply_env_overrides(config: Config) -> Config {
+    let vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+    apply_env_overrides_from_vars(config, &vars)
+}
+
+fn apply_env_overrides_from_vars(
+    mut config: Config,
+    vars: &std::collections::HashMap<String, String>,
+) -> Config {
+    if let Some(val) = vars.get("MIRASET_RPC_ADDR") {
+        config.node.rpc_addr = val.clone();
     }
-    if let Ok(val) = std::env::var("MIRASET_STORAGE_PATH") {
-        config.node.storage_path = val;
+    if let Some(val) = vars.get("MIRASET_STORAGE_PATH") {
+        config.node.storage_path = val.clone();
     }
-    if let Ok(val) = std::env::var("MIRASET_BLOCK_INTERVAL") {
-        if let Ok(interval) = val.parse::<u64>() {
-            config.node.block_interval = interval;
-        }
+    if let Some(val) = vars.get("MIRASET_BLOCK_INTERVAL")
+        && let Ok(interval) = val.parse::<u64>()
+    {
+        config.node.block_interval = interval;
     }
     config
 }
@@ -203,25 +204,29 @@ async fn main() -> anyhow::Result<()> {
 
 async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
     match cmd {
-        NodeCommands::Start { rpc_addr, storage_path, block_interval } => {
+        NodeCommands::Start {
+            rpc_addr,
+            storage_path,
+            block_interval,
+        } => {
             // Load config with precedence: CLI > Env > File > Defaults
             let mut config = load_config();
             config = apply_env_overrides(config);
-            
+
             // CLI flags override everything
             let final_rpc_addr = rpc_addr;
             let final_storage_path = storage_path.unwrap_or(config.node.storage_path);
             let final_block_interval = block_interval.unwrap_or(config.node.block_interval);
-            
+
             println!("Starting Miraset devnet node...");
             println!("RPC address: {}", final_rpc_addr);
             println!("Storage path: {}", final_storage_path);
             println!("Block interval: {}s", final_block_interval);
-            
+
             // Open persistent storage
             let storage = Storage::open(&final_storage_path)?;
             println!("Storage opened at: {}", final_storage_path);
-            
+
             // Initialize state with persistent storage
             let state = State::new_with_storage(Some(storage.clone()));
 
@@ -236,7 +241,11 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             // Start block producer
             let producer_state = state.clone();
             tokio::spawn(async move {
-                miraset_node::run_block_producer(producer_state, Duration::from_secs(final_block_interval)).await;
+                miraset_node::run_block_producer(
+                    producer_state,
+                    Duration::from_secs(final_block_interval),
+                )
+                .await;
             });
 
             // Start RPC
@@ -273,7 +282,12 @@ async fn handle_wallet(cmd: WalletCommands) -> anyhow::Result<()> {
             let balance = get_balance(&rpc, &kp.address()).await?;
             println!("Balance for '{}': {}", name, balance);
         }
-        WalletCommands::Transfer { from, to, amount, rpc } => {
+        WalletCommands::Transfer {
+            from,
+            to,
+            amount,
+            rpc,
+        } => {
             let kp = wallet.get_keypair(&from)?;
             let to_addr = Address::from_hex(&to)?;
             let nonce = get_nonce(&rpc, &kp.address()).await?;
@@ -286,12 +300,7 @@ async fn handle_wallet(cmd: WalletCommands) -> anyhow::Result<()> {
                 signature: [0; 64],
             };
 
-            // Sign
-            let msg = bincode::serialize(&tx)?;
-            let sig = kp.sign(&msg);
-            if let Transaction::Transfer { signature, .. } = &mut tx {
-                *signature = sig;
-            }
+            sign_transaction(&mut tx, &kp)?;
 
             submit_tx(&rpc, &tx).await?;
             println!("Transfer submitted: {} -> {}, amount: {}", from, to, amount);
@@ -326,12 +335,7 @@ async fn handle_chat(cmd: ChatCommands) -> anyhow::Result<()> {
                 signature: [0; 64],
             };
 
-            // Sign
-            let msg = bincode::serialize(&tx)?;
-            let sig = kp.sign(&msg);
-            if let Transaction::ChatSend { signature, .. } = &mut tx {
-                *signature = sig;
-            }
+            sign_transaction(&mut tx, &kp)?;
 
             submit_tx(&rpc, &tx).await?;
             println!("Message sent!");
@@ -389,4 +393,154 @@ async fn get_chat_messages(rpc: &str, limit: usize) -> anyhow::Result<Vec<serde_
     let url = format!("{}/chat/messages?limit={}", rpc, limit);
     let resp = reqwest::get(&url).await?;
     Ok(resp.json().await?)
+}
+
+/// Zero the signature field, serialize, and sign a transaction using the canonical
+/// hash-then-sign pattern. The signature field is updated in-place.
+fn sign_transaction(tx: &mut Transaction, kp: &KeyPair) -> anyhow::Result<()> {
+    let mut tx_for_hash = tx.clone();
+    match &mut tx_for_hash {
+        Transaction::Transfer { signature, .. } => *signature = [0; 64],
+        Transaction::ChatSend { signature, .. } => *signature = [0; 64],
+        Transaction::CreateObject { signature, .. } => *signature = [0; 64],
+        Transaction::MutateObject { signature, .. } => *signature = [0; 64],
+        Transaction::TransferObject { signature, .. } => *signature = [0; 64],
+        Transaction::RegisterWorker { signature, .. } => *signature = [0; 64],
+        Transaction::SubmitResourceSnapshot { signature, .. } => *signature = [0; 64],
+        Transaction::CreateJob { signature, .. } => *signature = [0; 64],
+        Transaction::AssignJob { signature, .. } => *signature = [0; 64],
+        Transaction::SubmitJobResult { signature, .. } => *signature = [0; 64],
+        Transaction::AnchorReceipt { signature, .. } => *signature = [0; 64],
+        Transaction::ChallengeJob { signature, .. } => *signature = [0; 64],
+    }
+    let msg = bincode::serialize(&tx_for_hash)?;
+    let sig = kp.sign(&msg);
+    match tx {
+        Transaction::Transfer { signature, .. } => *signature = sig,
+        Transaction::ChatSend { signature, .. } => *signature = sig,
+        Transaction::CreateObject { signature, .. } => *signature = sig,
+        Transaction::MutateObject { signature, .. } => *signature = sig,
+        Transaction::TransferObject { signature, .. } => *signature = sig,
+        Transaction::RegisterWorker { signature, .. } => *signature = sig,
+        Transaction::SubmitResourceSnapshot { signature, .. } => *signature = sig,
+        Transaction::CreateJob { signature, .. } => *signature = sig,
+        Transaction::AssignJob { signature, .. } => *signature = sig,
+        Transaction::SubmitJobResult { signature, .. } => *signature = sig,
+        Transaction::AnchorReceipt { signature, .. } => *signature = sig,
+        Transaction::ChallengeJob { signature, .. } => *signature = sig,
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::Write;
+
+    #[test]
+    fn test_load_config_defaults() {
+        let config = load_config_from_path(Path::new("nonexistent_config.toml"));
+        assert_eq!(config.node.rpc_addr, "127.0.0.1:9944");
+        assert_eq!(config.node.storage_path, ".data");
+        assert_eq!(config.node.block_interval, 300);
+    }
+
+    #[test]
+    fn test_load_config_from_file() {
+        let mut temp = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            temp,
+            r#"
+[node]
+rpc_addr = "0.0.0.0:19944"
+storage_path = "/tmp/miraset"
+block_interval = 60
+"#
+        )
+        .unwrap();
+        temp.flush().unwrap();
+
+        let config = load_config_from_path(temp.path());
+        assert_eq!(config.node.rpc_addr, "0.0.0.0:19944");
+        assert_eq!(config.node.storage_path, "/tmp/miraset");
+        assert_eq!(config.node.block_interval, 60);
+    }
+
+    #[test]
+    fn test_apply_env_overrides() {
+        let config = Config::default();
+        let mut vars = HashMap::new();
+        vars.insert("MIRASET_RPC_ADDR".to_string(), "0.0.0.0:19944".to_string());
+        vars.insert("MIRASET_STORAGE_PATH".to_string(), "/tmp/store".to_string());
+        vars.insert("MIRASET_BLOCK_INTERVAL".to_string(), "120".to_string());
+
+        let config = apply_env_overrides_from_vars(config, &vars);
+        assert_eq!(config.node.rpc_addr, "0.0.0.0:19944");
+        assert_eq!(config.node.storage_path, "/tmp/store");
+        assert_eq!(config.node.block_interval, 120);
+    }
+
+    #[test]
+    fn test_apply_env_overrides_ignores_invalid_interval() {
+        let config = Config::default();
+        let mut vars = HashMap::new();
+        vars.insert(
+            "MIRASET_BLOCK_INTERVAL".to_string(),
+            "not_a_number".to_string(),
+        );
+
+        let config = apply_env_overrides_from_vars(config, &vars);
+        assert_eq!(config.node.block_interval, 300);
+    }
+
+    #[test]
+    fn test_sign_transaction_transfer() {
+        let kp = KeyPair::from_bytes(&[1u8; 32]);
+        let recipient = KeyPair::generate();
+        let mut tx = Transaction::Transfer {
+            from: kp.address(),
+            to: recipient.address(),
+            amount: 42,
+            nonce: 7,
+            signature: [0; 64],
+        };
+
+        sign_transaction(&mut tx, &kp).unwrap();
+        let sig = *tx.signature();
+
+        let mut tx_for_hash = tx.clone();
+        if let Transaction::Transfer { signature, .. } = &mut tx_for_hash {
+            *signature = [0; 64];
+        }
+        let msg = bincode::serialize(&tx_for_hash).unwrap();
+        assert!(
+            miraset_core::verify_signature(&kp.address(), &msg, &sig),
+            "signature should verify against the canonical transaction hash"
+        );
+    }
+
+    #[test]
+    fn test_sign_transaction_chat() {
+        let kp = KeyPair::from_bytes(&[2u8; 32]);
+        let mut tx = Transaction::ChatSend {
+            from: kp.address(),
+            message: "hello".to_string(),
+            nonce: 1,
+            signature: [0; 64],
+        };
+
+        sign_transaction(&mut tx, &kp).unwrap();
+        let sig = *tx.signature();
+
+        let mut tx_for_hash = tx.clone();
+        if let Transaction::ChatSend { signature, .. } = &mut tx_for_hash {
+            *signature = [0; 64];
+        }
+        let msg = bincode::serialize(&tx_for_hash).unwrap();
+        assert!(
+            miraset_core::verify_signature(&kp.address(), &msg, &sig),
+            "signature should verify against the canonical transaction hash"
+        );
+    }
 }

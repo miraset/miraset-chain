@@ -8,8 +8,7 @@
 /// - `LlamaCppBackend` (native llama.cpp server `/completion` + `/props`)
 /// - `TgiBackend` (HuggingFace text-generation-inference `/generate` + `/info`)
 /// - `MockBackend` (deterministic testing backend)
-
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -58,8 +57,9 @@ pub struct ModelInfo {
 /// - `OpenLlm` — value `openllm` (BentoML OpenLLM native `/v1/generate`)
 /// - `LlamaCpp` — value `llamacpp` (native llama.cpp server)
 /// - `Tgi` — value `tgi` (HuggingFace text-generation-inference)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackendType {
+    #[default]
     Ollama,
     OpenAi,
     OpenLlm,
@@ -102,12 +102,6 @@ impl BackendType {
     }
 }
 
-impl Default for BackendType {
-    fn default() -> Self {
-        Self::Ollama
-    }
-}
-
 impl BackendType {
     /// Default model identifiers shipped by each backend vendor.
     ///
@@ -123,34 +117,34 @@ impl BackendType {
     pub fn default_models(&self) -> &'static [&'static str] {
         match self {
             Self::Ollama => &[
-                "gemma3:4b",                   // Google Gemma 3 4B (latest small)
-                "llama3.3:latest",             // Meta Llama 3.3 70B (default tag)
-                "deepseek-r1:8b",              // DeepSeek R1 distilled 8B
-                "qwen2.5:7b",                  // Alibaba Qwen 2.5 7B
+                "gemma3:4b",       // Google Gemma 3 4B (latest small)
+                "llama3.3:latest", // Meta Llama 3.3 70B (default tag)
+                "deepseek-r1:8b",  // DeepSeek R1 distilled 8B
+                "qwen2.5:7b",      // Alibaba Qwen 2.5 7B
             ],
             Self::OpenAi => &[
-                "gpt-4o-mini",                 // OpenAI GPT-4o mini (cheap default)
-                "gpt-4o",                      // OpenAI GPT-4o
-                "gpt-4-turbo",                 // OpenAI GPT-4 Turbo
-                "gpt-3.5-turbo",               // OpenAI GPT-3.5 Turbo
+                "gpt-4o-mini",   // OpenAI GPT-4o mini (cheap default)
+                "gpt-4o",        // OpenAI GPT-4o
+                "gpt-4-turbo",   // OpenAI GPT-4 Turbo
+                "gpt-3.5-turbo", // OpenAI GPT-3.5 Turbo
             ],
             Self::OpenLlm => &[
-                "meta-llama/Llama-3.1-8B-Instruct",    // Meta Llama 3.1 8B Instruct
-                "mistralai/Mistral-7B-Instruct-v0.3",  // Mistral 7B Instruct v0.3
-                "Qwen/Qwen2.5-7B-Instruct",            // Alibaba Qwen 2.5 7B Instruct
-                "google/gemma-2-9b-it",                // Google Gemma 2 9B IT
+                "meta-llama/Llama-3.1-8B-Instruct",   // Meta Llama 3.1 8B Instruct
+                "mistralai/Mistral-7B-Instruct-v0.3", // Mistral 7B Instruct v0.3
+                "Qwen/Qwen2.5-7B-Instruct",           // Alibaba Qwen 2.5 7B Instruct
+                "google/gemma-2-9b-it",               // Google Gemma 2 9B IT
             ],
             Self::LlamaCpp => &[
-                "Qwen/Qwen2.5-7B-Instruct",            // Alibaba Qwen 2.5 7B Instruct
-                "meta-llama/Llama-3.1-8B-Instruct",    // Meta Llama 3.1 8B Instruct
-                "mistralai/Mistral-7B-Instruct-v0.3",  // Mistral 7B Instruct v0.3
-                "google/gemma-2-9b-it",                // Google Gemma 2 9B IT (gguf form)
+                "Qwen/Qwen2.5-7B-Instruct",           // Alibaba Qwen 2.5 7B Instruct
+                "meta-llama/Llama-3.1-8B-Instruct",   // Meta Llama 3.1 8B Instruct
+                "mistralai/Mistral-7B-Instruct-v0.3", // Mistral 7B Instruct v0.3
+                "google/gemma-2-9b-it",               // Google Gemma 2 9B IT (gguf form)
             ],
             Self::Tgi => &[
-                "meta-llama/Llama-3.1-8B-Instruct",    // Meta Llama 3.1 8B Instruct
-                "mistralai/Mistral-7B-Instruct-v0.3",  // Mistral 7B Instruct v0.3
-                "google/gemma-2-9b-it",                // Google Gemma 2 9B IT
-                "Qwen/Qwen2.5-7B-Instruct",            // Alibaba Qwen 2.5 7B Instruct
+                "meta-llama/Llama-3.1-8B-Instruct",   // Meta Llama 3.1 8B Instruct
+                "mistralai/Mistral-7B-Instruct-v0.3", // Mistral 7B Instruct v0.3
+                "google/gemma-2-9b-it",               // Google Gemma 2 9B IT
+                "Qwen/Qwen2.5-7B-Instruct",           // Alibaba Qwen 2.5 7B Instruct
             ],
         }
     }
@@ -248,8 +242,6 @@ impl InferenceBackend for OllamaBackend {
         #[derive(Deserialize)]
         struct OllamaResponse {
             response: String,
-            #[serde(default)]
-            done: bool,
         }
 
         let request = OllamaRequest {
@@ -536,7 +528,9 @@ impl InferenceBackend for OpenAiCompatibleBackend {
             .map(|m| ModelInfo {
                 name: m.id,
                 size: 0,
-                family: m.owned_by.unwrap_or_else(|| "openai-compatible".to_string()),
+                family: m
+                    .owned_by
+                    .unwrap_or_else(|| "openai-compatible".to_string()),
             })
             .collect();
 
@@ -599,18 +593,17 @@ impl InferenceBackend for LlamaCppBackend {
     ) -> Result<GenerationResponse> {
         // Best-effort: warn if the requested model doesn't match the server's
         // loaded model. llama.cpp ignores `model` in the request body.
-        if let Some(server_model) = self.server_model_id().await {
-            if !server_model.eq_ignore_ascii_case(model)
-                && !server_model.contains(model)
-                && !model.contains(&server_model)
-            {
-                tracing::warn!(
-                    "llama.cpp server has model '{}' loaded but job requested '{}'; \
+        if let Some(server_model) = self.server_model_id().await
+            && !server_model.eq_ignore_ascii_case(model)
+            && !server_model.contains(model)
+            && !model.contains(&server_model)
+        {
+            tracing::warn!(
+                "llama.cpp server has model '{}' loaded but job requested '{}'; \
                      llama.cpp ignores the per-request model and will use the loaded one",
-                    server_model,
-                    model
-                );
-            }
+                server_model,
+                model
+            );
         }
 
         #[derive(Serialize)]
@@ -665,8 +658,9 @@ impl InferenceBackend for LlamaCppBackend {
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
-        let token_count =
-            lcpp_response.tokens_predicted.unwrap_or_else(|| tokens.len() as u64);
+        let token_count = lcpp_response
+            .tokens_predicted
+            .unwrap_or(tokens.len() as u64);
 
         Ok(GenerationResponse {
             text: lcpp_response.content,
@@ -743,8 +737,6 @@ impl TgiBackend {
         struct Info {
             #[serde(default)]
             model_id: Option<String>,
-            #[serde(default)]
-            model_device_type: Option<String>,
         }
 
         let url = format!("{}/info", self.url);
@@ -839,7 +831,9 @@ impl InferenceBackend for TgiBackend {
     async fn is_model_loaded(&self, model: &str) -> Result<bool> {
         // TGI serves one model per instance; `/info` exposes its id.
         match self.info_model_id().await {
-            Some(id) => Ok(id.eq_ignore_ascii_case(model) || id.contains(model) || model.contains(&id)),
+            Some(id) => {
+                Ok(id.eq_ignore_ascii_case(model) || id.contains(model) || model.contains(&id))
+            }
             None => {
                 // Couldn't read /info — probe a bare GET on /info for health.
                 let url = format!("{}/info", self.url);
@@ -1112,7 +1106,10 @@ mod tests {
     async fn test_mock_backend() {
         let backend = MockBackend::new(vec!["llama2".to_string()]);
 
-        let response = backend.generate("llama2", "Hello", 100, None, None).await.unwrap();
+        let response = backend
+            .generate("llama2", "Hello", 100, None, None)
+            .await
+            .unwrap();
 
         assert!(!response.text.is_empty());
         assert!(response.token_count > 0);
@@ -1137,8 +1134,14 @@ mod tests {
         );
         assert_eq!(BackendType::parse("openllm").unwrap(), BackendType::OpenLlm);
         assert_eq!(BackendType::parse("bentoml").unwrap(), BackendType::OpenLlm);
-        assert_eq!(BackendType::parse("llamacpp").unwrap(), BackendType::LlamaCpp);
-        assert_eq!(BackendType::parse("llama-cpp").unwrap(), BackendType::LlamaCpp);
+        assert_eq!(
+            BackendType::parse("llamacpp").unwrap(),
+            BackendType::LlamaCpp
+        );
+        assert_eq!(
+            BackendType::parse("llama-cpp").unwrap(),
+            BackendType::LlamaCpp
+        );
         assert_eq!(BackendType::parse("tgi").unwrap(), BackendType::Tgi);
         assert!(BackendType::parse("unknown").is_err());
         assert_eq!(BackendType::default(), BackendType::Ollama);
@@ -1154,14 +1157,20 @@ mod tests {
         // Ollama: tag-based names
         let ollama = BackendType::Ollama.default_models();
         assert!(!ollama.is_empty());
-        assert!(ollama.contains(&"gemma3:4b"), "Ollama should ship with gemma3:4b");
+        assert!(
+            ollama.contains(&"gemma3:4b"),
+            "Ollama should ship with gemma3:4b"
+        );
         assert!(ollama.contains(&"llama3.3:latest"));
         assert!(ollama.contains(&"deepseek-r1:8b"));
 
         // OpenAI: gpt-* ids
         let openai = BackendType::OpenAi.default_models();
         assert!(!openai.is_empty());
-        assert!(openai.contains(&"gpt-4o-mini"), "OpenAI should ship with gpt-4o-mini");
+        assert!(
+            openai.contains(&"gpt-4o-mini"),
+            "OpenAI should ship with gpt-4o-mini"
+        );
         assert!(openai.contains(&"gpt-4o"));
         assert!(openai.contains(&"gpt-3.5-turbo"));
 
@@ -1284,6 +1293,8 @@ mod tests {
         let parsed: ModelsResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.data.len(), 2);
         assert_eq!(parsed.data[0].id, "gpt-4o");
+        assert_eq!(parsed.data[0].owned_by.as_deref(), Some("openai"));
+        assert_eq!(parsed.data[1].owned_by, None);
     }
 
     #[test]
@@ -1302,7 +1313,8 @@ mod tests {
 
     #[test]
     fn test_llamacpp_props_parse() {
-        let body = r#"{"model_name": "qwen2.5-7b-instruct-q5_k_m", "model_path": "/models/qwen.gguf"}"#;
+        let body =
+            r#"{"model_name": "qwen2.5-7b-instruct-q5_k_m", "model_path": "/models/qwen.gguf"}"#;
         #[derive(Deserialize)]
         struct Props {
             #[serde(default)]
@@ -1311,9 +1323,15 @@ mod tests {
             model_path: Option<String>,
         }
         let parsed: Props = serde_json::from_str(body).unwrap();
-        assert_eq!(parsed.model_name.as_deref(), Some("qwen2.5-7b-instruct-q5_k_m"));
+        assert_eq!(
+            parsed.model_name.as_deref(),
+            Some("qwen2.5-7b-instruct-q5_k_m")
+        );
         // model_name takes precedence over model_path in our code.
-        assert_eq!(parsed.model_name.or(parsed.model_path).unwrap(), "qwen2.5-7b-instruct-q5_k_m");
+        assert_eq!(
+            parsed.model_name.or(parsed.model_path).unwrap(),
+            "qwen2.5-7b-instruct-q5_k_m"
+        );
     }
 
     #[test]
@@ -1342,6 +1360,7 @@ mod tests {
             parsed.model_id.as_deref(),
             Some("meta-llama/Llama-3-8B-Instruct")
         );
+        assert_eq!(parsed.model_device_type.as_deref(), Some("cuda"));
     }
 
     #[test]

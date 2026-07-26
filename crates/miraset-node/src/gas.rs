@@ -83,11 +83,17 @@ pub struct GasBudget {
 impl GasBudget {
     pub fn new(max_gas_amount: u64, gas_price: u64) -> Result<Self, String> {
         if max_gas_amount < MIN_GAS_BUDGET {
-            return Err(format!("Gas budget too low: {} < {}", max_gas_amount, MIN_GAS_BUDGET));
+            return Err(format!(
+                "Gas budget too low: {} < {}",
+                max_gas_amount, MIN_GAS_BUDGET
+            ));
         }
 
         if max_gas_amount > MAX_GAS_BUDGET {
-            return Err(format!("Gas budget too high: {} > {}", max_gas_amount, MAX_GAS_BUDGET));
+            return Err(format!(
+                "Gas budget too high: {} > {}",
+                max_gas_amount, MAX_GAS_BUDGET
+            ));
         }
 
         let total_budget = max_gas_amount.saturating_mul(gas_price);
@@ -137,8 +143,10 @@ pub struct GasBreakdown {
 
 impl GasStatus {
     pub fn new(budget: GasBudget, config: &GasConfig) -> Self {
-        let mut breakdown = GasBreakdown::default();
-        breakdown.base_cost = config.base_fee;
+        let breakdown = GasBreakdown {
+            base_cost: config.base_fee,
+            ..Default::default()
+        };
 
         Self {
             budget,
@@ -171,7 +179,11 @@ impl GasStatus {
     }
 
     /// Charge for writing an object
-    pub fn charge_object_write(&mut self, size_bytes: usize, config: &GasConfig) -> Result<(), String> {
+    pub fn charge_object_write(
+        &mut self,
+        size_bytes: usize,
+        config: &GasConfig,
+    ) -> Result<(), String> {
         self.breakdown.object_writes += 1;
         let size_cost = (size_bytes as u64 / 1024) * config.per_byte_fee;
         let total = config.object_write_cost + size_cost;
@@ -179,7 +191,11 @@ impl GasStatus {
     }
 
     /// Charge for creating an object
-    pub fn charge_object_create(&mut self, size_bytes: usize, config: &GasConfig) -> Result<(), String> {
+    pub fn charge_object_create(
+        &mut self,
+        size_bytes: usize,
+        config: &GasConfig,
+    ) -> Result<(), String> {
         self.breakdown.object_creates += 1;
         let size_cost = (size_bytes as u64 / 1024) * config.storage_price_per_kb;
         let total = config.object_create_cost + size_cost;
@@ -188,7 +204,11 @@ impl GasStatus {
     }
 
     /// Charge for deleting an object (and credit rebate)
-    pub fn charge_object_delete(&mut self, size_bytes: usize, config: &GasConfig) -> Result<(), String> {
+    pub fn charge_object_delete(
+        &mut self,
+        size_bytes: usize,
+        config: &GasConfig,
+    ) -> Result<(), String> {
         self.breakdown.object_deletes += 1;
         let size_cost = (size_bytes as u64 / 1024) * config.storage_price_per_kb;
         let rebate = (size_cost as f64 * config.storage_rebate_rate) as u64;

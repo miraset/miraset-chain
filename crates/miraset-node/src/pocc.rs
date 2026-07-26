@@ -5,13 +5,12 @@
 /// 2. Proof of Compute - Actual inference work performed
 ///
 /// Validators must run LLM models to participate in consensus and earn rewards.
-
-use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
-use miraset_core::{Address, ObjectId, Block};
+use miraset_core::{Address, Block, ObjectId};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Helper module for serializing [u8; 64] signatures
@@ -106,11 +105,11 @@ pub enum ModelCategory {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ValidatorStatus {
-    Active,      // Participating in consensus
-    Standby,     // Qualified but not in active set
-    Jailed,      // Temporarily suspended (poor performance/downtime)
-    Slashed,     // Penalized for malicious behavior
-    Unbonding,   // Withdrawing stake
+    Active,    // Participating in consensus
+    Standby,   // Qualified but not in active set
+    Jailed,    // Temporarily suspended (poor performance/downtime)
+    Slashed,   // Penalized for malicious behavior
+    Unbonding, // Withdrawing stake
 }
 
 impl Validator {
@@ -123,23 +122,40 @@ impl Validator {
     ) -> Result<Self> {
         // Validate minimum requirements
         if stake < MIN_VALIDATOR_STAKE {
-            return Err(anyhow!("Insufficient stake: minimum {} required", MIN_VALIDATOR_STAKE));
+            return Err(anyhow!(
+                "Insufficient stake: minimum {} required",
+                MIN_VALIDATOR_STAKE
+            ));
         }
 
         if gpu_info.vram_total_gib < MIN_VALIDATOR_VRAM_GIB {
-            return Err(anyhow!("Insufficient VRAM: minimum {} GiB required", MIN_VALIDATOR_VRAM_GIB));
+            return Err(anyhow!(
+                "Insufficient VRAM: minimum {} GiB required",
+                MIN_VALIDATOR_VRAM_GIB
+            ));
         }
 
         if models.len() < MIN_MODELS_REQUIRED {
-            return Err(anyhow!("Insufficient models: minimum {} required", MIN_MODELS_REQUIRED));
+            return Err(anyhow!(
+                "Insufficient models: minimum {} required",
+                MIN_MODELS_REQUIRED
+            ));
         }
 
         // Check model requirements
-        let large_models = models.iter().filter(|m| m.category == ModelCategory::Large).count();
-        let medium_models = models.iter().filter(|m| m.category == ModelCategory::Medium).count();
+        let large_models = models
+            .iter()
+            .filter(|m| m.category == ModelCategory::Large)
+            .count();
+        let medium_models = models
+            .iter()
+            .filter(|m| m.category == ModelCategory::Medium)
+            .count();
 
         if large_models < 1 || medium_models < 2 {
-            return Err(anyhow!("Must run at least 1 large (13B+) and 2 medium (7B+) models"));
+            return Err(anyhow!(
+                "Must run at least 1 large (13B+) and 2 medium (7B+) models"
+            ));
         }
 
         Ok(Self {
@@ -179,7 +195,11 @@ impl Validator {
 
         // Check if validator is still healthy
         if vram_available < (MIN_VALIDATOR_VRAM_GIB / 2) {
-            tracing::warn!("Validator {} has low VRAM: {} GiB", self.address, vram_available);
+            tracing::warn!(
+                "Validator {} has low VRAM: {} GiB",
+                self.address,
+                vram_available
+            );
         }
 
         Ok(())
@@ -202,6 +222,12 @@ struct ValidatorSetInner {
     active_validators: Vec<Address>,
     current_epoch: u64,
     total_stake: u64,
+}
+
+impl Default for ValidatorSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ValidatorSet {
@@ -244,14 +270,17 @@ impl ValidatorSet {
         inner.current_epoch = epoch;
 
         // Sort validators by stake (descending) and select top N
-        let mut qualified: Vec<_> = inner.validators.values()
+        let mut qualified: Vec<_> = inner
+            .validators
+            .values()
             .filter(|v| v.meets_requirements() && v.status != ValidatorStatus::Jailed)
             .collect();
 
-        qualified.sort_by(|a, b| b.consensus_weight().cmp(&a.consensus_weight()));
+        qualified.sort_by_key(|b| std::cmp::Reverse(b.consensus_weight()));
 
         // Select top validators up to MAX_ACTIVE_VALIDATORS
-        let new_active: Vec<Address> = qualified.iter()
+        let new_active: Vec<Address> = qualified
+            .iter()
             .take(MAX_ACTIVE_VALIDATORS)
             .map(|v| v.address)
             .collect();
@@ -267,13 +296,18 @@ impl ValidatorSet {
             }
         }
 
-        tracing::info!("Active validator set updated: {} validators", inner.active_validators.len());
+        tracing::info!(
+            "Active validator set updated: {} validators",
+            inner.active_validators.len()
+        );
     }
 
     /// Get active validators
     pub fn get_active_validators(&self) -> Vec<Validator> {
         let inner = self.inner.read();
-        inner.active_validators.iter()
+        inner
+            .active_validators
+            .iter()
             .filter_map(|addr| inner.validators.get(addr).cloned())
             .collect()
     }
@@ -287,7 +321,9 @@ impl ValidatorSet {
     pub fn update_uptime(&self, address: &Address, score: f64) -> Result<()> {
         let mut inner = self.inner.write();
 
-        let validator = inner.validators.get_mut(address)
+        let validator = inner
+            .validators
+            .get_mut(address)
             .ok_or_else(|| anyhow!("Validator not found"))?;
 
         validator.uptime_score = score;
@@ -295,7 +331,11 @@ impl ValidatorSet {
         // Jail validator if uptime is too low
         if score < MIN_VALIDATOR_UPTIME && validator.status == ValidatorStatus::Active {
             validator.status = ValidatorStatus::Jailed;
-            tracing::warn!("Validator {} jailed for low uptime: {:.2}%", address, score * 100.0);
+            tracing::warn!(
+                "Validator {} jailed for low uptime: {:.2}%",
+                address,
+                score * 100.0
+            );
         }
 
         Ok(())
@@ -305,7 +345,9 @@ impl ValidatorSet {
     pub fn record_compute(&self, address: &Address, tokens: u64) -> Result<()> {
         let mut inner = self.inner.write();
 
-        let validator = inner.validators.get_mut(address)
+        let validator = inner
+            .validators
+            .get_mut(address)
             .ok_or_else(|| anyhow!("Validator not found"))?;
 
         validator.record_compute(tokens);
@@ -358,7 +400,9 @@ impl PoccConsensus {
     /// Verify block proposal (simplified - in production would check signatures, etc.)
     pub fn verify_proposal(&self, block: &Block, proposer: &Address) -> Result<bool> {
         // Check if proposer is an active validator
-        let validator = self.validator_set.get_validator(proposer)
+        let validator = self
+            .validator_set
+            .get_validator(proposer)
             .ok_or_else(|| anyhow!("Proposer is not a registered validator"))?;
 
         if validator.status != ValidatorStatus::Active {
@@ -525,14 +569,12 @@ mod tests {
             cuda_cores: Some(16384),
         };
 
-        let models = vec![
-            ModelInfo {
-                name: "llama-2-13b".to_string(),
-                size_parameters: 13_000_000_000,
-                category: ModelCategory::Large,
-                loaded: true,
-            },
-        ];
+        let models = vec![ModelInfo {
+            name: "llama-2-13b".to_string(),
+            size_parameters: 13_000_000_000,
+            category: ModelCategory::Large,
+            loaded: true,
+        }];
 
         let validator = Validator::new(
             kp.address(),
@@ -585,7 +627,8 @@ mod tests {
             MIN_VALIDATOR_STAKE,
             gpu_info,
             models,
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = set.register_validator(validator);
         assert!(result.is_ok());

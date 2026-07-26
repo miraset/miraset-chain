@@ -1,9 +1,8 @@
-/// Transaction executor for native asset and object operations.
-
-use anyhow::{anyhow, Result};
-use miraset_core::{Transaction, Object, ObjectId, Address};
-use crate::gas::{GasConfig, GasBudget, GasStatus};
+use crate::gas::{GasBudget, GasConfig, GasStatus};
 use crate::state::State;
+/// Transaction executor for native asset and object operations.
+use anyhow::{Result, anyhow};
+use miraset_core::{Address, Object, ObjectId, Transaction};
 use std::sync::Arc;
 use tracing::info;
 
@@ -30,22 +29,29 @@ impl ExecutionContext {
         let mut gas_status = GasStatus::new(gas_budget, &self.gas_config);
 
         // Charge base transaction cost
-        gas_status.charge_gas(self.gas_config.base_fee)
+        gas_status
+            .charge_gas(self.gas_config.base_fee)
             .map_err(|e| anyhow!("Failed to charge base fee: {}", e))?;
 
         let effects = match tx {
-            Transaction::Transfer { from, to, amount, .. } => {
-                self.execute_transfer(from, to, amount, &mut gas_status)?
-            }
+            Transaction::Transfer {
+                from, to, amount, ..
+            } => self.execute_transfer(from, to, amount, &mut gas_status)?,
             Transaction::CreateObject { creator, data, .. } => {
                 self.execute_create_object(creator, data, &mut gas_status)?
             }
-            Transaction::MutateObject { object_id, new_data, owner, .. } => {
-                self.execute_mutate_object(object_id, new_data, owner, &mut gas_status)?
-            }
-            Transaction::TransferObject { object_id, from, to, .. } => {
-                self.execute_transfer_object(object_id, from, to, &mut gas_status)?
-            }
+            Transaction::MutateObject {
+                object_id,
+                new_data,
+                owner,
+                ..
+            } => self.execute_mutate_object(object_id, new_data, owner, &mut gas_status)?,
+            Transaction::TransferObject {
+                object_id,
+                from,
+                to,
+                ..
+            } => self.execute_transfer_object(object_id, from, to, &mut gas_status)?,
             _ => {
                 return Err(anyhow!("Transaction type not supported in executor"));
             }
@@ -53,8 +59,10 @@ impl ExecutionContext {
 
         // Finalize gas and deduct from sender
         let gas_cost = gas_status.finalize();
-        info!("Transaction executed: gas_used={}, storage={}, rebate={}",
-            gas_cost.total_gas_used, gas_cost.storage_cost, gas_cost.storage_rebate);
+        info!(
+            "Transaction executed: gas_used={}, storage={}, rebate={}",
+            gas_cost.total_gas_used, gas_cost.storage_cost, gas_cost.storage_rebate
+        );
 
         Ok(effects)
     }
@@ -71,7 +79,8 @@ impl ExecutionContext {
         gas.charge_computation(1000).map_err(|e| anyhow!(e))?;
 
         // Check balance (this is a state read)
-        gas.charge_object_read(&self.gas_config).map_err(|e| anyhow!(e))?;
+        gas.charge_object_read(&self.gas_config)
+            .map_err(|e| anyhow!(e))?;
         let from_balance = self.state.get_balance(&from);
 
         if from_balance < amount {
@@ -79,8 +88,10 @@ impl ExecutionContext {
         }
 
         // Update balances (state writes)
-        gas.charge_object_write(32, &self.gas_config).map_err(|e| anyhow!(e))?;
-        gas.charge_object_write(32, &self.gas_config).map_err(|e| anyhow!(e))?;
+        gas.charge_object_write(32, &self.gas_config)
+            .map_err(|e| anyhow!(e))?;
+        gas.charge_object_write(32, &self.gas_config)
+            .map_err(|e| anyhow!(e))?;
 
         // Apply state changes
         self.state.add_balance(&from, -(amount as i64));
@@ -104,11 +115,12 @@ impl ExecutionContext {
         gas: &mut GasStatus,
     ) -> Result<TransactionEffects> {
         // Serialize object to estimate size
-        let serialized = bincode::serialize(&data)
-            .map_err(|e| anyhow!("Failed to serialize object: {}", e))?;
+        let serialized =
+            bincode::serialize(&data).map_err(|e| anyhow!("Failed to serialize object: {}", e))?;
 
         // Charge for object creation and storage
-        gas.charge_object_create(serialized.len(), &self.gas_config).map_err(|e| anyhow!(e))?;
+        gas.charge_object_create(serialized.len(), &self.gas_config)
+            .map_err(|e| anyhow!(e))?;
         gas.charge_computation(2000).map_err(|e| anyhow!(e))?;
 
         // Create object
@@ -137,8 +149,11 @@ impl ExecutionContext {
         gas: &mut GasStatus,
     ) -> Result<TransactionEffects> {
         // Read existing object
-        gas.charge_object_read(&self.gas_config).map_err(|e| anyhow!(e))?;
-        let mut object = self.state.get_object(&object_id)
+        gas.charge_object_read(&self.gas_config)
+            .map_err(|e| anyhow!(e))?;
+        let mut object = self
+            .state
+            .get_object(&object_id)
             .ok_or_else(|| anyhow!("Object not found"))?;
 
         // Verify ownership
@@ -148,7 +163,8 @@ impl ExecutionContext {
 
         // Charge for mutation
         let serialized = bincode::serialize(&new_data)?;
-        gas.charge_object_write(serialized.len(), &self.gas_config).map_err(|e| anyhow!(e))?;
+        gas.charge_object_write(serialized.len(), &self.gas_config)
+            .map_err(|e| anyhow!(e))?;
         gas.charge_computation(1500).map_err(|e| anyhow!(e))?;
 
         // Update object
@@ -175,8 +191,11 @@ impl ExecutionContext {
         gas: &mut GasStatus,
     ) -> Result<TransactionEffects> {
         // Read object
-        gas.charge_object_read(&self.gas_config).map_err(|e| anyhow!(e))?;
-        let mut object = self.state.get_object(&object_id)
+        gas.charge_object_read(&self.gas_config)
+            .map_err(|e| anyhow!(e))?;
+        let mut object = self
+            .state
+            .get_object(&object_id)
             .ok_or_else(|| anyhow!("Object not found"))?;
 
         // Verify ownership
@@ -185,7 +204,8 @@ impl ExecutionContext {
         }
 
         // Charge for transfer
-        gas.charge_object_write(32, &self.gas_config).map_err(|e| anyhow!(e))?;
+        gas.charge_object_write(32, &self.gas_config)
+            .map_err(|e| anyhow!(e))?;
         gas.charge_computation(500).map_err(|e| anyhow!(e))?;
 
         // Transfer ownership
@@ -202,7 +222,6 @@ impl ExecutionContext {
             events: vec![],
         })
     }
-
 }
 
 /// Transaction execution effects (similar to Sui's TransactionEffects)

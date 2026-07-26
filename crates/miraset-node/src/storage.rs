@@ -1,8 +1,16 @@
-use anyhow::Result;
+use crate::error::StorageError;
 use miraset_core::{Address, Block, Event};
 use sled::Db;
 use std::path::Path;
 use std::sync::Arc;
+
+fn u64_from_le_bytes(key: &str, bytes: &[u8]) -> Result<u64, StorageError> {
+    let fixed: [u8; 8] = bytes.try_into().map_err(|_| StorageError::CorruptValue {
+        key: key.to_string(),
+        details: format!("expected 8 bytes, got {}", bytes.len()),
+    })?;
+    Ok(u64::from_le_bytes(fixed))
+}
 
 /// Persistent storage using Sled (pure Rust embedded database)
 #[derive(Clone)]
@@ -12,25 +20,26 @@ pub struct Storage {
 
 impl Storage {
     /// Open or create a new storage at the given path
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StorageError> {
         let db = sled::open(path)?;
         Ok(Self { db: Arc::new(db) })
     }
 
     /// Save a block
-    pub fn save_block(&self, block: &Block) -> Result<()> {
+    pub fn save_block(&self, block: &Block) -> Result<(), StorageError> {
         let key = format!("block:{}", block.height);
         let value = bincode::serialize(block)?;
         self.db.insert(key.as_bytes(), value)?;
 
         // Also save latest block pointer
-        self.db.insert(b"latest_block", &block.height.to_le_bytes())?;
+        self.db
+            .insert(b"latest_block", &block.height.to_le_bytes())?;
 
         Ok(())
     }
 
     /// Get a block by height
-    pub fn get_block(&self, height: u64) -> Result<Option<Block>> {
+    pub fn get_block(&self, height: u64) -> Result<Option<Block>, StorageError> {
         let key = format!("block:{}", height);
         match self.db.get(key.as_bytes())? {
             Some(bytes) => {
@@ -42,10 +51,10 @@ impl Storage {
     }
 
     /// Get the latest block
-    pub fn get_latest_block(&self) -> Result<Option<Block>> {
+    pub fn get_latest_block(&self) -> Result<Option<Block>, StorageError> {
         match self.db.get(b"latest_block")? {
             Some(bytes) => {
-                let height = u64::from_le_bytes(bytes.as_ref().try_into().unwrap());
+                let height = u64_from_le_bytes("latest_block", &bytes)?;
                 self.get_block(height)
             }
             None => Ok(None),
@@ -53,39 +62,39 @@ impl Storage {
     }
 
     /// Save account balance
-    pub fn save_balance(&self, address: &Address, balance: u64) -> Result<()> {
+    pub fn save_balance(&self, address: &Address, balance: u64) -> Result<(), StorageError> {
         let key = format!("balance:{}", address.to_hex());
         self.db.insert(key.as_bytes(), &balance.to_le_bytes())?;
         Ok(())
     }
 
     /// Get account balance
-    pub fn get_balance(&self, address: &Address) -> Result<u64> {
+    pub fn get_balance(&self, address: &Address) -> Result<u64, StorageError> {
         let key = format!("balance:{}", address.to_hex());
         match self.db.get(key.as_bytes())? {
-            Some(bytes) => Ok(u64::from_le_bytes(bytes.as_ref().try_into().unwrap())),
+            Some(bytes) => Ok(u64_from_le_bytes(&key, &bytes)?),
             None => Ok(0),
         }
     }
 
     /// Save account nonce
-    pub fn save_nonce(&self, address: &Address, nonce: u64) -> Result<()> {
+    pub fn save_nonce(&self, address: &Address, nonce: u64) -> Result<(), StorageError> {
         let key = format!("nonce:{}", address.to_hex());
         self.db.insert(key.as_bytes(), &nonce.to_le_bytes())?;
         Ok(())
     }
 
     /// Get account nonce
-    pub fn get_nonce(&self, address: &Address) -> Result<u64> {
+    pub fn get_nonce(&self, address: &Address) -> Result<u64, StorageError> {
         let key = format!("nonce:{}", address.to_hex());
         match self.db.get(key.as_bytes())? {
-            Some(bytes) => Ok(u64::from_le_bytes(bytes.as_ref().try_into().unwrap())),
+            Some(bytes) => Ok(u64_from_le_bytes(&key, &bytes)?),
             None => Ok(0),
         }
     }
 
     /// Save an event
-    pub fn save_event(&self, index: u64, event: &Event) -> Result<()> {
+    pub fn save_event(&self, index: u64, event: &Event) -> Result<(), StorageError> {
         let key = format!("event:{}", index);
         let value = serde_json::to_vec(event)?; // Use JSON for tagged enums
         self.db.insert(key.as_bytes(), value)?;
@@ -97,7 +106,7 @@ impl Storage {
     }
 
     /// Get events in range
-    pub fn get_events(&self, from: u64, limit: usize) -> Result<Vec<Event>> {
+    pub fn get_events(&self, from: u64, limit: usize) -> Result<Vec<Event>, StorageError> {
         let mut events = Vec::new();
 
         for i in from.. {
@@ -119,15 +128,15 @@ impl Storage {
     }
 
     /// Get total number of events
-    pub fn get_event_count(&self) -> Result<u64> {
+    pub fn get_event_count(&self) -> Result<u64, StorageError> {
         match self.db.get(b"event_count")? {
-            Some(bytes) => Ok(u64::from_le_bytes(bytes.as_ref().try_into().unwrap())),
+            Some(bytes) => Ok(u64_from_le_bytes("event_count", &bytes)?),
             None => Ok(0),
         }
     }
 
     /// Flush all pending writes
-    pub fn flush(&self) -> Result<()> {
+    pub fn flush(&self) -> Result<(), StorageError> {
         self.db.flush()?;
         Ok(())
     }

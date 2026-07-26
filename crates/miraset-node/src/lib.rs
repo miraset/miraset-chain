@@ -1,4 +1,5 @@
 pub mod epoch;
+pub mod error;
 pub mod executor;
 pub mod gas;
 pub mod pocc;
@@ -8,9 +9,11 @@ pub mod state;
 pub mod storage;
 
 pub use epoch::{Epoch, EpochRewards, EpochStatus, WorkerEpochStats};
-pub use executor::{ExecutionContext, TransactionEffects, ExecutionStatus};
-pub use gas::{GasConfig, GasBudget, GasStatus, GasCost, GasCoin};
-pub use pocc::{PoccConsensus, Validator, ValidatorSet, ValidatorStatus, ComputeProof, GpuInfo, ModelInfo};
+pub use executor::{ExecutionContext, ExecutionStatus, TransactionEffects};
+pub use gas::{GasBudget, GasCoin, GasConfig, GasCost, GasStatus};
+pub use pocc::{
+    ComputeProof, GpuInfo, ModelInfo, PoccConsensus, Validator, ValidatorSet, ValidatorStatus,
+};
 pub use pocc_manager::PoccManager;
 pub use rpc::serve_rpc;
 pub use state::State;
@@ -28,12 +31,18 @@ pub async fn run_block_producer(state: State, interval: Duration) {
         // D4: Auto-advance epoch status
         state.update_epoch();
 
-        let block = state.produce_block();
-        tracing::info!(
-            "Produced block #{} with {} txs (epoch {})",
-            block.height,
-            block.transactions.len(),
-            state.get_current_epoch().id,
-        );
+        match state.produce_block() {
+            Ok(block) => {
+                tracing::info!(
+                    "Produced block #{} with {} txs (epoch {})",
+                    block.height,
+                    block.transactions.len(),
+                    state.get_current_epoch().id,
+                );
+            }
+            Err(e) => {
+                tracing::error!("Failed to produce block: {}", e);
+            }
+        }
     }
 }

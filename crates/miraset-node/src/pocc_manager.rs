@@ -1,7 +1,7 @@
+use crate::pocc::{GpuInfo, ModelInfo, PoccConsensus, Validator, ValidatorSet};
+use crate::state::State;
 /// PoCC Manager - Integrates Proof of Compute Contribution
 use anyhow::Result;
-use crate::pocc::{PoccConsensus, Validator, ValidatorSet, GpuInfo, ModelInfo};
-use crate::state::State;
 use miraset_core::{Address, ObjectId};
 use std::sync::Arc;
 pub struct PoccManager {

@@ -78,10 +78,7 @@ pub fn new_object_id(seed: &[u8]) -> ObjectId {
 #[serde(tag = "object_type")]
 pub enum ObjectData {
     /// Account object (for backward compatibility with balances)
-    Account {
-        balance: u64,
-        nonce: u64,
-    },
+    Account { balance: u64, nonce: u64 },
     /// Worker registration
     WorkerRegistration {
         worker_id: ObjectId,
@@ -364,9 +361,9 @@ impl Transaction {
         }
     }
 
-    pub fn hash(&self) -> [u8; 32] {
-        let bytes = bincode::serialize(self).unwrap();
-        blake3::hash(&bytes).into()
+    pub fn hash(&self) -> Result<[u8; 32], bincode::Error> {
+        let bytes = bincode::serialize(self)?;
+        Ok(blake3::hash(&bytes).into())
     }
 }
 
@@ -381,9 +378,9 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn hash(&self) -> [u8; 32] {
-        let bytes = bincode::serialize(self).unwrap();
-        blake3::hash(&bytes).into()
+    pub fn hash(&self) -> Result<[u8; 32], bincode::Error> {
+        let bytes = bincode::serialize(self)?;
+        Ok(blake3::hash(&bytes).into())
     }
 
     pub fn genesis() -> Self {
@@ -619,7 +616,7 @@ mod tests {
             signature: [0; 64],
         };
 
-        assert_eq!(tx1.hash(), tx2.hash());
+        assert_eq!(tx1.hash().unwrap(), tx2.hash().unwrap());
     }
 
     #[test]
@@ -632,8 +629,8 @@ mod tests {
             state_root: [0; 32],
         };
 
-        let hash1 = block1.hash();
-        let hash2 = block1.hash();
+        let hash1 = block1.hash().unwrap();
+        let hash2 = block1.hash().unwrap();
 
         assert_eq!(hash1, hash2);
     }
@@ -645,6 +642,23 @@ mod tests {
         assert_eq!(genesis.height, 0);
         assert_eq!(genesis.prev_hash, [0; 32]);
         assert_eq!(genesis.transactions.len(), 0);
+    }
+
+    #[test]
+    fn test_transaction_hash_determinism() {
+        let kp = KeyPair::from_bytes(&[1u8; 32]);
+        let tx = Transaction::Transfer {
+            from: kp.address(),
+            to: kp.address(),
+            amount: 100,
+            nonce: 0,
+            signature: [0; 64],
+        };
+        let hash = tx.hash().unwrap();
+        let expected =
+            hex::decode("f0866702754919447af8c82a0f50fce9601c9a254e7931b2d4f11a267380ae28")
+                .unwrap();
+        assert_eq!(hash.to_vec(), expected);
     }
 
     #[test]

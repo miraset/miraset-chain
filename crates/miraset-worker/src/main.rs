@@ -1,7 +1,7 @@
 /// Miraset Worker Binary
 use anyhow::Result;
-use miraset_worker::{BackendType, Worker, WorkerConfig};
 use miraset_core::KeyPair;
+use miraset_worker::{BackendType, Worker, WorkerConfig};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -28,7 +28,10 @@ fn backend_type_from_env() -> BackendType {
 fn backend_url_from_env(backend_type: BackendType) -> String {
     match std::env::var("MIRASET_BACKEND_URL") {
         Ok(val) => val,
-        Err(_) => default_backend_url(backend_type, std::env::var("MIRASET_BACKEND_TYPE").ok().as_deref()),
+        Err(_) => default_backend_url(
+            backend_type,
+            std::env::var("MIRASET_BACKEND_TYPE").ok().as_deref(),
+        ),
     }
 }
 
@@ -58,7 +61,9 @@ fn default_backend_url(backend_type: BackendType, preset: Option<&str>) -> Strin
 /// OpenRouter, ...). Read from `MIRASET_BACKEND_API_KEY`. Ignored by
 /// local backends that don't use auth.
 fn backend_api_key_from_env() -> Option<String> {
-    std::env::var("MIRASET_BACKEND_API_KEY").ok().filter(|s| !s.is_empty())
+    std::env::var("MIRASET_BACKEND_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 /// Resolve the set of supported model ids.
@@ -99,7 +104,11 @@ async fn main() -> Result<()> {
         backend_type.as_str(),
         backend_type.description(),
         backend_url,
-        if backend_api_key.is_some() { " (auth enabled)" } else { "" }
+        if backend_api_key.is_some() {
+            " (auth enabled)"
+        } else {
+            ""
+        }
     );
     tracing::info!(
         "Default models for {}: [{}]",
@@ -111,7 +120,7 @@ async fn main() -> Result<()> {
         worker_id: [1u8; 32],
         keypair: KeyPair::generate(),
         endpoint: "127.0.0.1:8080".to_string(),
-        node_url: "http://127.0.0.1:9944".to_string(),  // Node RPC port
+        node_url: "http://127.0.0.1:9944".to_string(), // Node RPC port
         backend_type,
         backend_url,
         backend_api_key,
@@ -125,11 +134,17 @@ async fn main() -> Result<()> {
     // Register worker on-chain
     let registered_worker_id = match worker.register_on_chain().await {
         Ok(worker_id) => {
-            tracing::info!("✓ Worker registered on-chain with ID: {}", hex::encode(worker_id));
+            tracing::info!(
+                "✓ Worker registered on-chain with ID: {}",
+                hex::encode(worker_id)
+            );
             Some(worker_id)
         }
         Err(e) => {
-            tracing::warn!("Failed to register on-chain (node may not be running): {}", e);
+            tracing::warn!(
+                "Failed to register on-chain (node may not be running): {}",
+                e
+            );
             None
         }
     };
@@ -208,10 +223,16 @@ mod tests {
         assert_eq!(BackendType::parse("lmstudio").unwrap(), BackendType::OpenAi);
         assert_eq!(BackendType::parse("vllm").unwrap(), BackendType::OpenAi);
         assert_eq!(BackendType::parse("localai").unwrap(), BackendType::OpenAi);
-        assert_eq!(BackendType::parse("llamacpp").unwrap(), BackendType::LlamaCpp);
+        assert_eq!(
+            BackendType::parse("llamacpp").unwrap(),
+            BackendType::LlamaCpp
+        );
         // Cloud providers
         assert_eq!(BackendType::parse("groq").unwrap(), BackendType::OpenAi);
-        assert_eq!(BackendType::parse("openrouter").unwrap(), BackendType::OpenAi);
+        assert_eq!(
+            BackendType::parse("openrouter").unwrap(),
+            BackendType::OpenAi
+        );
         assert_eq!(BackendType::parse("together").unwrap(), BackendType::OpenAi);
         // OpenLLM
         assert_eq!(BackendType::parse("openllm").unwrap(), BackendType::OpenLlm);
