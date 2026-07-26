@@ -1,4 +1,6 @@
 use miraset_core::ObjectId;
+use rand::rand_core::TryRng;
+use rand::rngs::SysRng;
 
 /// Shared-secret authentication for node->worker job dispatch.
 ///
@@ -12,10 +14,15 @@ pub struct DispatchAuth;
 
 impl DispatchAuth {
     /// Generate a new random 32-byte shared secret.
-    pub fn generate_secret() -> [u8; 32] {
+    ///
+    /// # Errors
+    /// Returns an error if the system RNG cannot provide entropy.
+    pub fn generate_secret() -> anyhow::Result<[u8; 32]> {
         let mut secret = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut secret);
-        secret
+        SysRng
+            .try_fill_bytes(&mut secret)
+            .map_err(|e| anyhow::anyhow!("system RNG failed: {}", e))?;
+        Ok(secret)
     }
 
     /// Canonical input bytes for the dispatch authentication tag.
@@ -207,7 +214,7 @@ mod tests {
 
     #[test]
     fn test_dispatch_auth_roundtrip() {
-        let secret = DispatchAuth::generate_secret();
+        let secret = DispatchAuth::generate_secret().unwrap();
         let job_id = [1u8; 32];
         let worker_id = [2u8; 32];
         let tag = DispatchAuth::sign_dispatch(&secret, &job_id, &worker_id, 7, "model", 128);

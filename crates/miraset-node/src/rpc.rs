@@ -6,13 +6,13 @@ use axum::{
     http::{HeaderValue, Method, StatusCode, header},
     routing::{get, post},
 };
+use axum_governor::{GovernorConfigBuilder, GovernorLayer};
 use chrono::Utc;
 use miraset_core::{Address, Block, Event, ObjectData, ObjectId, Transaction};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tower::ServiceBuilder;
-use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::{
     cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
@@ -90,11 +90,29 @@ pub async fn serve_rpc_with_config(
 
     // M4 (residual): per-IP rate limiting. Defaults are generous; production
     // deployments may tighten via configuration.
+    let rate_per_second = u32::try_from(
+        1_000u64
+            .checked_div(
+                u64::try_from(config.rate_limit_period.as_millis())
+                    .unwrap_or(1_000)
+                    .max(1),
+            )
+            .unwrap_or(1),
+    )
+    .unwrap_or(u32::MAX)
+    .max(1);
+    let non_zero_rate = std::num::NonZeroU32::new(rate_per_second)
+        .ok_or_else(|| anyhow::anyhow!("rate_per_second must be non-zero"))?;
+    let non_zero_burst = std::num::NonZeroU32::new(config.rate_limit_burst.max(1))
+        .ok_or_else(|| anyhow::anyhow!("rate_limit_burst must be non-zero"))?;
     let governor_config = GovernorConfigBuilder::default()
-        .const_period(config.rate_limit_period)
-        .const_burst_size(config.rate_limit_burst)
+        .with_extractor(axum_governor::extractor::PeerIp::default())
+        .expect_connect_info()
+        .quota_default(
+            axum_governor::Quota::requests_per_second(non_zero_rate).burst(non_zero_burst),
+        )
         .finish()
-        .expect("non-zero rate limit burst and period");
+        .map_err(|_| anyhow::anyhow!("invalid rate limit configuration"))?;
 
     let app = Router::new()
         .route("/health", get(get_health))
@@ -115,7 +133,6 @@ pub async fn serve_rpc_with_config(
         .route("/epoch", get(get_epoch))
         .layer(
             ServiceBuilder::new()
-                .layer(GovernorLayer::new(governor_config))
                 .layer(DefaultBodyLimit::max(config.max_body_size))
                 .layer(RequestBodyLimitLayer::new(config.max_body_size))
                 .layer(TimeoutLayer::with_status_code(
@@ -124,6 +141,7 @@ pub async fn serve_rpc_with_config(
                 )),
         )
         .with_state(rpc_state)
+        .layer(GovernorLayer::new(governor_config))
         .layer(cors);
 
     tracing::info!("RPC server listening on {}", addr);

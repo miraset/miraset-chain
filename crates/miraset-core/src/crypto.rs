@@ -1,7 +1,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
+use rand::rand_core::{Rng, UnwrapErr};
+use rand::rngs::SysRng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Public key (address)
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,16 +46,18 @@ impl fmt::Display for Address {
 }
 
 /// Keypair for signing
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Zeroize, ZeroizeOnDrop)]
 pub struct KeyPair {
+    #[zeroize(skip)]
     signing_key: SigningKey,
+    #[zeroize(skip)]
     verifying_key: VerifyingKey,
 }
 
 impl KeyPair {
     pub fn generate() -> Self {
         let mut secret_bytes = [0u8; 32];
-        rand::Rng::fill(&mut OsRng, &mut secret_bytes);
+        UnwrapErr(SysRng).fill_bytes(&mut secret_bytes);
         let signing_key = SigningKey::from_bytes(&secret_bytes);
         let verifying_key = signing_key.verifying_key();
         Self {

@@ -17,6 +17,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use axum_governor::{GovernorConfigBuilder, GovernorLayer};
 use chrono::{DateTime, Utc};
 use miraset_core::{KeyPair, ObjectId};
 use parking_lot::RwLock;
@@ -25,7 +26,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceBuilder;
-use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
 mod auth;
@@ -214,7 +214,7 @@ impl Worker {
     }
 
     /// Create HTTP router
-    pub fn router(self: Arc<Self>) -> Router {
+    pub fn router(self: Arc<Self>) -> anyhow::Result<Router> {
         let accept_worker = Arc::clone(&self);
         let run_worker = Arc::clone(&self);
         let stream_worker = Arc::clone(&self);
@@ -223,13 +223,31 @@ impl Worker {
 
         // M4 (residual): per-IP rate limiting on the worker surface. Defaults
         // are generous for local inference clusters; tighten in production.
+        let rate_per_second = u32::try_from(
+            1_000u64
+                .checked_div(
+                    u64::try_from(self.config.rate_limit_period.as_millis())
+                        .unwrap_or(1_000)
+                        .max(1),
+                )
+                .unwrap_or(1),
+        )
+        .unwrap_or(u32::MAX)
+        .max(1);
+        let non_zero_rate = std::num::NonZeroU32::new(rate_per_second)
+            .ok_or_else(|| anyhow::anyhow!("rate_per_second must be non-zero"))?;
+        let non_zero_burst = std::num::NonZeroU32::new(self.config.rate_limit_burst.max(1))
+            .ok_or_else(|| anyhow::anyhow!("rate_limit_burst must be non-zero"))?;
         let governor_config = GovernorConfigBuilder::default()
-            .const_period(self.config.rate_limit_period)
-            .const_burst_size(self.config.rate_limit_burst)
+            .with_extractor(axum_governor::extractor::PeerIp::default())
+            .expect_connect_info()
+            .quota_default(
+                axum_governor::Quota::requests_per_second(non_zero_rate).burst(non_zero_burst),
+            )
             .finish()
-            .expect("non-zero rate limit burst and period");
+            .map_err(|_| anyhow::anyhow!("invalid rate limit configuration"))?;
 
-        Router::new()
+        let app = Router::new()
             .route("/health", get(health_handler))
             .route("/status", get(health_handler))
             .route("/ping", get(ping_handler))
@@ -376,7 +394,6 @@ impl Worker {
             )
             .layer(
                 ServiceBuilder::new()
-                    .layer(GovernorLayer::new(governor_config))
                     .layer(DefaultBodyLimit::max(self.config.max_body_size))
                     .layer(RequestBodyLimitLayer::new(self.config.max_body_size))
                     .layer(TimeoutLayer::with_status_code(
@@ -384,6 +401,9 @@ impl Worker {
                         self.config.request_timeout,
                     )),
             )
+            .layer(GovernorLayer::new(governor_config));
+
+        Ok(app)
     }
 
     /// Accept a job assignment

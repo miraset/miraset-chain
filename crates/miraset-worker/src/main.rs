@@ -3,6 +3,7 @@ use anyhow::Result;
 use miraset_core::KeyPair;
 use miraset_worker::{BackendType, Worker, WorkerConfig};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 
 /// Resolve the inference backend type from `MIRASET_BACKEND_TYPE`
@@ -205,7 +206,7 @@ async fn main() -> Result<()> {
         Arc::clone(&worker).start_heartbeat_loop(worker_id, 30);
     }
 
-    let app = worker.router();
+    let app = worker.router()?;
 
     tracing::info!("Worker listening on {}", config.endpoint);
     tracing::info!("Connecting to node at {}", config.node_url);

@@ -173,7 +173,7 @@ fn load_or_create_dispatch_secret(
         return Ok(secret);
     }
 
-    let secret = miraset_node::auth::DispatchAuth::generate_secret();
+    let secret = miraset_node::auth::DispatchAuth::generate_secret()?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

@@ -13,7 +13,8 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
 };
 use argon2::Argon2;
-use rand::RngCore;
+use rand::rand_core::TryRng;
+use rand::rngs::SysRng;
 
 /// Salt length for argon2
 const SALT_LEN: usize = 16;
@@ -242,10 +243,14 @@ fn encrypt_wallet_data(data: &WalletData, password: &str) -> Result<EncryptedWal
     let plaintext = serde_json::to_vec(data)?;
 
     let mut salt = [0u8; SALT_LEN];
-    rand::thread_rng().fill_bytes(&mut salt);
+    SysRng
+        .try_fill_bytes(&mut salt)
+        .context("failed to read entropy for wallet salt")?;
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    SysRng
+        .try_fill_bytes(&mut nonce_bytes)
+        .context("failed to read entropy for wallet nonce")?;
 
     let key = derive_key(password, &salt)?;
     let cipher = Aes256Gcm::new_from_slice(&key)
