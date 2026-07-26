@@ -1,0 +1,20 @@
+# Miraset chain clippy configuration
+# Lint levels are set in crate roots and CI because clippy.toml cannot set them.
+
+# Minimum supported Rust version (matches CI toolchain)
+msrv = "1.97.1"
+
+# Be permissive with exported APIs while the project is still evolving
+avoid-breaking-exported-api = false
+
+# Tolerate larger/complex functions while the code is being refactored
+cognitive-complexity-threshold = 50
+too-many-lines-threshold = 200
+too-many-arguments-threshold = 10
+type-complexity-threshold = 500
+
+# Allow unwrap/expect in test helpers and benchmarks
+# Note: this key is a custom clippy config that affects some lints;
+# crate-level #![allow(...)] inside #[cfg(test)] modules is the primary escape hatch.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

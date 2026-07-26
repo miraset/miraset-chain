@@ -58,6 +58,10 @@ Follow all instructions from that file unless overridden below.
 - Every crate root in `crates/` enables `#![warn(clippy::pedantic)]` and `#![deny(clippy::unwrap_used, clippy::expect_used)]`.
 - Tests are allowed to use `unwrap()`/`expect()` via `#![allow(clippy::unwrap_used, clippy::expect_used)]` inside each `#[cfg(test)]` module.
 - CI enforces the safety-critical lint set: `cargo clippy --workspace --all-targets -- -D clippy::unwrap_used -D clippy::expect_used`.
+- `package.json` scripts match CI:
+  - `npm run lint` → `cargo clippy --workspace --all-targets -- -D clippy::unwrap_used -D clippy::expect_used`
+  - `npm run lint:pedantic` → runs with `-W clippy::pedantic` as a non-blocking baseline
+- `clippy.toml` contains project-level clippy configuration (MSRV, thresholds, exported-API tolerance, unwrap-in-tests allowance).
 - `cargo fmt --all -- --check` and `cargo test --workspace` are also CI gates.
 - `Object::new` and `Object::hash` return `Result<_, bincode::Error>`; callers must propagate or handle the error.
 - `State::create_object_from_data` now returns `Result<ObjectId, StateError>`.
