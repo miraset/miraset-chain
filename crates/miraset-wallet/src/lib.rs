@@ -321,7 +321,7 @@ mod tests {
         let (mut wallet, _temp_dir) = create_temp_wallet();
 
         let addr = wallet.create_account("alice".to_string()).unwrap();
-        assert!(addr.to_hex().len() == 64);
+        assert_eq!(addr.to_hex().len(), 64);
 
         let accounts = wallet.list_accounts();
         assert_eq!(accounts.len(), 1);
@@ -361,7 +361,7 @@ mod tests {
             .import_account("imported".to_string(), secret)
             .unwrap();
 
-        assert!(addr.to_hex().len() == 64);
+        assert_eq!(addr.to_hex().len(), 64);
 
         let accounts = wallet.list_accounts();
         assert_eq!(accounts.len(), 1);
