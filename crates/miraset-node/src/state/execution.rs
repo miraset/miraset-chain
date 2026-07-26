@@ -1,17 +1,20 @@
 use crate::epoch::JobResult as EpochJobResult;
 use crate::error::StateError;
-use crate::state::{State, StateInner};
+use crate::state::{StateInner, jobs};
 use chrono::Utc;
 use miraset_core::{
-    Event, JobStatus, Object, ObjectData, Transaction, WorkerStatus, new_object_id,
+    Address, Event, JobStatus, Object, ObjectData, Transaction, WorkerStatus, new_object_id,
 };
 
 /// Execute a single transaction (helper for produce_block).
+///
+/// Balance changes are collected in `balance_updates` so that the caller can
+/// persist them to storage after releasing the state lock.
 pub(crate) fn execute_transaction_inner(
-    state: &State,
     w: &mut StateInner,
     tx: &Transaction,
     height: u64,
+    balance_updates: &mut Vec<(Address, u64)>,
 ) -> Result<(), StateError> {
     let tx_hash = tx.hash()?;
 
@@ -25,10 +28,8 @@ pub(crate) fn execute_transaction_inner(
             let new_to_balance = w.balances.entry(*to).or_insert(0);
             *new_to_balance += amount;
 
-            if let Some(ref storage) = state.storage {
-                let _ = storage.save_balance(from, new_from_balance);
-                let _ = storage.save_balance(to, *new_to_balance);
-            }
+            balance_updates.push((*from, new_from_balance));
+            balance_updates.push((*to, *new_to_balance));
 
             let event = Event::Transferred {
                 from: *from,
@@ -37,7 +38,7 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::ChatSend { from, message, .. } => {
@@ -48,7 +49,7 @@ pub(crate) fn execute_transaction_inner(
                 block_height: height,
                 timestamp: Utc::now(),
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::RegisterWorker {
@@ -92,7 +93,7 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::SubmitResourceSnapshot {
@@ -114,7 +115,7 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::CreateJob {
@@ -129,12 +130,11 @@ pub(crate) fn execute_transaction_inner(
             let new_balance = balance - escrow_amount;
             w.balances.insert(*requester, new_balance);
 
-            if let Some(ref storage) = state.storage {
-                let _ = storage.save_balance(requester, new_balance);
-            }
+            balance_updates.push((*requester, new_balance));
 
-            // Create job object
-            let job_id = new_object_id(&bincode::serialize(&(requester, model_id, Utc::now()))?);
+            // Create job object. The job ID is derived from the transaction
+            // hash so it is deterministic per tx while staying unique.
+            let job_id = new_object_id(&bincode::serialize(&(requester, model_id, tx_hash))?);
             let data = ObjectData::InferenceJob {
                 job_id,
                 epoch_id: w.current_epoch.id,
@@ -162,7 +162,15 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
+
+            // Auto-assign to the first active worker that supports the model.
+            // The assignment happens inside the same block as job creation so
+            // the coordinator path no longer mutates state outside block
+            // boundaries.
+            if let Some(worker_id) = jobs::find_worker_for_model(&w.objects, model_id) {
+                jobs::assign_job_to_worker(w, &job_id, &worker_id, height, tx_hash);
+            }
         }
 
         Transaction::AssignJob {
@@ -188,7 +196,7 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::SubmitJobResult {
@@ -228,7 +236,7 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::AnchorReceipt {
@@ -242,7 +250,7 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::ChallengeJob {
@@ -267,7 +275,7 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::CreateObject { creator, data, .. } => {
@@ -290,7 +298,7 @@ pub(crate) fn execute_transaction_inner(
                 tx_hash,
                 block_height: height,
             };
-            emit_event(state, w, event)?;
+            emit_event(w, event);
         }
 
         Transaction::MutateObject {
@@ -312,7 +320,7 @@ pub(crate) fn execute_transaction_inner(
                     tx_hash,
                     block_height: height,
                 };
-                emit_event(state, w, event)?;
+                emit_event(w, event);
             }
         }
 
@@ -338,7 +346,7 @@ pub(crate) fn execute_transaction_inner(
                     tx_hash,
                     block_height: height,
                 };
-                emit_event(state, w, event)?;
+                emit_event(w, event);
             }
         }
     }
@@ -346,17 +354,9 @@ pub(crate) fn execute_transaction_inner(
 }
 
 /// Helper to emit event.
-pub(crate) fn emit_event(
-    state: &State,
-    w: &mut StateInner,
-    event: Event,
-) -> Result<(), StateError> {
-    let event_index = w.events.len() as u64;
-    w.events.push(event.clone());
-
-    if let Some(ref storage) = state.storage {
-        storage.save_event(event_index, &event)?;
-    }
-
-    Ok(())
+///
+/// Events are kept in memory only; the caller is responsible for persisting
+/// them to storage after releasing the state lock.
+pub(crate) fn emit_event(w: &mut StateInner, event: Event) {
+    w.events.push(event);
 }

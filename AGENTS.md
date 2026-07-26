@@ -8,19 +8,19 @@ Follow all instructions from that file unless overridden below.
 ## Repo quick map
 - Rust workspace root in `Cargo.toml`; main crates: `miraset-core` (types/crypto), `miraset-node` (state+RPC+storage), `miraset-cli` (binary `miraset`), `miraset-worker` (HTTP worker), `miraset-wallet` (key store), `miraset-tui` (terminal UI), `miraset-launcher` (desktop launcher).
 - Desktop wallet is separate in `wallet/` (Next.js + Tauri); packaging scripts live in `tools/launcher/`.
-- `miraset-indexer` is currently a placeholder (`crates/miraset-indexer/src/lib.rs`).
+- `miraset-indexer` provides an in-memory event and block indexer (`crates/miraset-indexer/src/lib.rs`); a durable backend is intended for future iterations.
 - Workspace uses `edition = "2024"` and pins `bincode = "=1.3.3"` (exact version required for deterministic serialization across crates).
 
 ## Big-picture architecture (code-first)
 - On-chain transaction/object model is defined in `crates/miraset-core/src/types.rs` (`Transaction`, `ObjectData`, `Event`).
 - Node runtime keeps in-memory state plus optional Sled persistence: `State::new_with_storage` and block production in `crates/miraset-node/src/state.rs`.
 - RPC boundary is Axum in `crates/miraset-node/src/rpc.rs` (`/balance`, `/nonce`, `/block/*`, `/events`, `/chat/messages`, `/tx/submit`, `/health`, `/status`, `/ping`, `/jobs`, `/jobs/submit`, `/jobs/{id}`, `/workers`, `/epoch`).
-- Job coordinator lives in the node RPC layer: `POST /jobs/submit` creates an on-chain job, auto-assigns to a suitable worker via `State::auto_assign_job`, and dispatches an HTTP call to the worker's `/jobs/accept` endpoint.
+- Job coordinator is integrated into block production: `POST /jobs/submit` accepts a signed `Transaction::CreateJob`, routes it through the transaction pipeline, and block execution auto-assigns the job to a suitable active worker. After the block is produced, the node dispatches an HTTP call to the worker's `/jobs/accept` endpoint.
 - Worker is a separate Axum service in `crates/miraset-worker/src/lib.rs`; it accepts jobs, runs inference via `backend.rs`, generates receipt hashes in `receipt.rs`, and submits chain tx via `node_client.rs`. Worker endpoints: `/health`, `/ping`, `/jobs/accept`, `/jobs/run`, `/jobs/{id}/stream`, `/jobs/{id}/report`, `/jobs/{id}/status`.
 - Epoch management in `crates/miraset-node/src/epoch.rs`: 60-min epochs with submit/challenge windows, worker stats tracking, and reward distribution (70% capacity / 30% compute split).
 - Gas metering system in `crates/miraset-node/src/gas.rs` and executor in `crates/miraset-node/src/executor.rs`: defines `GasConfig`, `GasBudget`, `GasStatus` with per-operation costs. **Note:** gas is currently only enforced in `ExecutionContext::execute_transaction`, NOT in the main `State::produce_block` path.
 - PoCC (Proof of Compute Contribution) consensus scaffolding in `crates/miraset-node/src/pocc.rs` and `crates/miraset-node/src/pocc_manager.rs`: defines `Validator`, `ValidatorSet`, `PoccConsensus` with stake-weighted proposer selection. Not yet wired into block production.
-- Current Move integration is scaffold/placeholder (not full VM execution): see comments and behavior in `crates/miraset-node/src/move_vm.rs` and `crates/miraset-node/src/executor.rs`.
+- Current Move integration is scaffold/placeholder (not full VM execution). `crates/miraset-node/src/move_vm.rs` does not exist. `crates/miraset-node/src/executor.rs` defines a parallel `ExecutionContext` that is currently not invoked from the main `State::produce_block` path; all transaction execution happens in `crates/miraset-node/src/state/execution.rs`.
 
 ## Runtime data flow you should preserve
 - CLI starts node (`miraset node start`), opens `Storage`, seeds a fixed devnet genesis account (`[1u8; 32]` secret key, 1 trillion tokens), spawns block producer, then serves RPC (`crates/miraset-cli/src/main.rs`).

@@ -395,7 +395,7 @@ impl Block {
 }
 
 /// Events emitted by transactions
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event_type")]
 pub enum Event {
     // Legacy events
@@ -676,5 +676,55 @@ mod tests {
         let json = serde_json::to_string(&status).unwrap();
         let status2: JobStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, status2);
+    }
+
+    /// Serialization-stability guard for `Block` bincode.
+    ///
+    /// Any change to `Block` fields or serialization options will break this
+    /// test, which protects the stored block format from accidental drift.
+    #[test]
+    fn test_block_bincode_stability() {
+        let ts = chrono::DateTime::parse_from_rfc3339("2026-07-26T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let block = Block {
+            height: 1,
+            timestamp: ts,
+            prev_hash: [0; 32],
+            transactions: vec![],
+            state_root: [0; 32],
+        };
+
+        let bytes = bincode::serialize(&block).unwrap();
+        let decoded: Block = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(decoded.height, block.height);
+        assert_eq!(decoded.timestamp, block.timestamp);
+
+        // Frozen byte vector for the empty-transaction block above.
+        let expected_hex = "01000000000000001400000000000000323032362d30372d32365430303a30303a30305a000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        assert_eq!(hex::encode(&bytes), expected_hex);
+    }
+
+    /// Serialization-stability guard for `Event` JSON.
+    ///
+    /// Events are stored as JSON in Sled; this test ensures the tagged-enum
+    /// shape remains stable.
+    #[test]
+    fn test_event_json_stability() {
+        let event = Event::WorkerRegistered {
+            worker_id: [1; 32],
+            owner: Address::from_bytes([2; 32]),
+            gpu_model: "RTX-4090".to_string(),
+            vram_gib: 24,
+            tx_hash: [3; 32],
+            block_height: 5,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, event);
+
+        let expected_json = r#"{"event_type":"WorkerRegistered","worker_id":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"owner":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"gpu_model":"RTX-4090","vram_gib":24,"tx_hash":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"block_height":5}"#;
+        assert_eq!(json, expected_json);
     }
 }

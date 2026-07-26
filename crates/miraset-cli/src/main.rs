@@ -403,34 +403,34 @@ async fn get_chat_messages(rpc: &str, limit: usize) -> anyhow::Result<Vec<serde_
 fn sign_transaction(tx: &mut Transaction, kp: &KeyPair) -> anyhow::Result<()> {
     let mut tx_for_hash = tx.clone();
     match &mut tx_for_hash {
-        Transaction::Transfer { signature, .. } => *signature = [0; 64],
-        Transaction::ChatSend { signature, .. } => *signature = [0; 64],
-        Transaction::CreateObject { signature, .. } => *signature = [0; 64],
-        Transaction::MutateObject { signature, .. } => *signature = [0; 64],
-        Transaction::TransferObject { signature, .. } => *signature = [0; 64],
-        Transaction::RegisterWorker { signature, .. } => *signature = [0; 64],
-        Transaction::SubmitResourceSnapshot { signature, .. } => *signature = [0; 64],
-        Transaction::CreateJob { signature, .. } => *signature = [0; 64],
-        Transaction::AssignJob { signature, .. } => *signature = [0; 64],
-        Transaction::SubmitJobResult { signature, .. } => *signature = [0; 64],
-        Transaction::AnchorReceipt { signature, .. } => *signature = [0; 64],
-        Transaction::ChallengeJob { signature, .. } => *signature = [0; 64],
+        Transaction::Transfer { signature, .. }
+        | Transaction::ChatSend { signature, .. }
+        | Transaction::CreateObject { signature, .. }
+        | Transaction::MutateObject { signature, .. }
+        | Transaction::TransferObject { signature, .. }
+        | Transaction::RegisterWorker { signature, .. }
+        | Transaction::SubmitResourceSnapshot { signature, .. }
+        | Transaction::CreateJob { signature, .. }
+        | Transaction::AssignJob { signature, .. }
+        | Transaction::SubmitJobResult { signature, .. }
+        | Transaction::AnchorReceipt { signature, .. }
+        | Transaction::ChallengeJob { signature, .. } => *signature = [0; 64],
     }
     let msg = bincode::serialize(&tx_for_hash)?;
     let sig = kp.sign(&msg);
     match tx {
-        Transaction::Transfer { signature, .. } => *signature = sig,
-        Transaction::ChatSend { signature, .. } => *signature = sig,
-        Transaction::CreateObject { signature, .. } => *signature = sig,
-        Transaction::MutateObject { signature, .. } => *signature = sig,
-        Transaction::TransferObject { signature, .. } => *signature = sig,
-        Transaction::RegisterWorker { signature, .. } => *signature = sig,
-        Transaction::SubmitResourceSnapshot { signature, .. } => *signature = sig,
-        Transaction::CreateJob { signature, .. } => *signature = sig,
-        Transaction::AssignJob { signature, .. } => *signature = sig,
-        Transaction::SubmitJobResult { signature, .. } => *signature = sig,
-        Transaction::AnchorReceipt { signature, .. } => *signature = sig,
-        Transaction::ChallengeJob { signature, .. } => *signature = sig,
+        Transaction::Transfer { signature, .. }
+        | Transaction::ChatSend { signature, .. }
+        | Transaction::CreateObject { signature, .. }
+        | Transaction::MutateObject { signature, .. }
+        | Transaction::TransferObject { signature, .. }
+        | Transaction::RegisterWorker { signature, .. }
+        | Transaction::SubmitResourceSnapshot { signature, .. }
+        | Transaction::CreateJob { signature, .. }
+        | Transaction::AssignJob { signature, .. }
+        | Transaction::SubmitJobResult { signature, .. }
+        | Transaction::AnchorReceipt { signature, .. }
+        | Transaction::ChallengeJob { signature, .. } => *signature = sig,
     }
     Ok(())
 }

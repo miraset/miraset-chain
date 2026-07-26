@@ -190,14 +190,6 @@ struct WorkerView {
     supported_models: Vec<String>,
 }
 
-#[derive(Deserialize)]
-struct SubmitJobRequest {
-    requester: String,
-    model_id: String,
-    max_tokens: u64,
-    escrow_amount: u64,
-}
-
 async fn list_jobs(AxumState(rpc): AxumState<RpcState>) -> Json<Vec<JobView>> {
     let jobs = rpc.state.get_jobs();
     let views: Vec<JobView> = jobs
@@ -268,65 +260,41 @@ async fn get_job(
     }
 }
 
-/// Submit job AND auto-assign to available worker (D1 coordinator)
+/// Submit a signed `Transaction::CreateJob` to the transaction pipeline.
+///
+/// The coordinator no longer mutates state directly. Instead, the job is
+/// enqueued like any other transaction, included in the next block, and
+/// auto-assigned to a worker that supports the requested model during block
+/// execution. The HTTP dispatch to the worker happens after the block is
+/// produced.
 async fn submit_job(
     AxumState(rpc): AxumState<RpcState>,
-    Json(req): Json<SubmitJobRequest>,
-) -> Result<Json<serde_json::Value>, crate::error::StateError> {
-    let requester = Address::from_hex(&req.requester)
-        .map_err(|_| crate::error::StateError::Other("Invalid requester address".to_string()))?;
+    Json(tx): Json<Transaction>,
+) -> Result<Json<serde_json::Value>, crate::error::TxError> {
+    // Ensure only CreateJob transactions are accepted on this endpoint.
+    let tx_hash = tx.hash().map_err(crate::error::TxError::Serialization)?;
 
-    // Create the job on-chain via state
-    let job_id = rpc.state.create_job(
-        &requester,
-        req.model_id.clone(),
-        req.max_tokens,
-        req.escrow_amount,
-    )?;
-
-    // Try to auto-assign to an available worker
-    let assigned_worker = rpc.state.auto_assign_job(&job_id, &req.model_id);
-
-    let mut resp = serde_json::json!({
-        "status": "created",
-        "job_id": hex::encode(job_id),
-    });
-
-    if let Some(worker_id) = assigned_worker {
-        resp["assigned_worker"] = serde_json::json!(hex::encode(worker_id));
-        resp["status"] = serde_json::json!("assigned");
-
-        // Try to dispatch to worker endpoint
-        let worker_endpoint = rpc.state.get_worker_endpoint(&worker_id);
-        if let Some(endpoint) = worker_endpoint {
-            // Fire-and-forget HTTP call to worker
-            let job_id_hex = hex::encode(job_id);
-            let model_id = req.model_id.clone();
-            let max_tokens = req.max_tokens;
-            tokio::spawn(async move {
-                let Ok(client) = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build()
-                else {
-                    return;
-                };
-                let accept_url = format!("{}/jobs/accept", endpoint.trim_end_matches('/'));
-                let _ = client
-                    .post(&accept_url)
-                    .json(&serde_json::json!({
-                        "job_id": job_id_hex,
-                        "epoch_id": 0,
-                        "model_id": model_id,
-                        "max_tokens": max_tokens,
-                        "price_per_token": 10
-                    }))
-                    .send()
-                    .await;
-            });
+    let (requester, model_id) = match &tx {
+        Transaction::CreateJob {
+            requester,
+            model_id,
+            ..
+        } => (*requester, model_id.clone()),
+        _ => {
+            return Err(crate::error::TxError::Other(
+                "only Transaction::CreateJob is accepted on /jobs/submit".to_string(),
+            ));
         }
-    }
+    };
 
-    Ok(Json(resp))
+    rpc.state.submit_transaction(tx)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "accepted",
+        "tx_hash": hex::encode(tx_hash),
+        "requester": requester.to_hex(),
+        "model_id": model_id,
+    })))
 }
 
 async fn list_workers(AxumState(rpc): AxumState<RpcState>) -> Json<Vec<WorkerView>> {

@@ -5,6 +5,11 @@
 /// 2. Proof of Compute - Actual inference work performed
 ///
 /// Validators must run LLM models to participate in consensus and earn rewards.
+///
+/// # Status: scaffolding only
+/// This module is **not wired into the block producer** (`run_block_producer`).
+/// The current network runs in single-author devnet mode, so these types are
+/// exported for future consensus work but are not active in the runtime.
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use miraset_core::{Address, Block, ObjectId};

@@ -484,3 +484,121 @@ fn test_height() {
     state.produce_block().unwrap();
     assert_eq!(state.height().unwrap(), 2);
 }
+
+#[test]
+fn test_create_job_auto_assigns_worker() {
+    let state = State::new();
+    let worker_kp = KeyPair::generate();
+    let requester_kp = KeyPair::generate();
+
+    state.add_balance(&requester_kp.address(), 100_000);
+
+    // Register a worker that supports the requested model.
+    let mut register_tx = Transaction::RegisterWorker {
+        owner: worker_kp.address(),
+        pubkey: worker_kp.address(),
+        endpoints: vec!["http://localhost:8080".to_string()],
+        gpu_model: "NVIDIA RTX 4090".to_string(),
+        vram_total_gib: 24,
+        supported_models: vec!["llama-3-8b".to_string()],
+        stake_bond: 1000,
+        nonce: 0,
+        signature: [0; 64],
+    };
+    {
+        let mut tx_for_hash = register_tx.clone();
+        if let Transaction::RegisterWorker { signature, .. } = &mut tx_for_hash {
+            *signature = [0; 64];
+        }
+        let msg = bincode::serialize(&tx_for_hash).unwrap();
+        let sig = worker_kp.sign(&msg);
+        if let Transaction::RegisterWorker { signature, .. } = &mut register_tx {
+            *signature = sig;
+        }
+    }
+    state.submit_transaction(register_tx).unwrap();
+
+    // Create a job for the supported model.
+    let mut create_tx = Transaction::CreateJob {
+        requester: requester_kp.address(),
+        model_id: "llama-3-8b".to_string(),
+        max_tokens: 1000,
+        escrow_amount: 10_000,
+        nonce: 0,
+        signature: [0; 64],
+    };
+    {
+        let mut tx_for_hash = create_tx.clone();
+        if let Transaction::CreateJob { signature, .. } = &mut tx_for_hash {
+            *signature = [0; 64];
+        }
+        let msg = bincode::serialize(&tx_for_hash).unwrap();
+        let sig = requester_kp.sign(&msg);
+        if let Transaction::CreateJob { signature, .. } = &mut create_tx {
+            *signature = sig;
+        }
+    }
+    state.submit_transaction(create_tx).unwrap();
+
+    // Produce block: execution should create the job and auto-assign it.
+    state.produce_block().unwrap();
+
+    // Three events should be present: worker registration, job creation, and
+    // auto-assignment.
+    let events = state.get_events(0, 10);
+    assert_eq!(events.len(), 3);
+    assert!(matches!(events[0], Event::WorkerRegistered { .. }));
+    assert!(matches!(events[1], Event::JobCreated { .. }));
+    assert!(matches!(events[2], Event::JobAssigned { .. }));
+
+    // Job should be assigned to the registered worker.
+    let jobs = state.get_jobs();
+    assert_eq!(jobs.len(), 1);
+    let (_job_id, job_obj) = &jobs[0];
+    match &job_obj.data {
+        miraset_core::ObjectData::InferenceJob {
+            assigned_worker_id,
+            status,
+            ..
+        } => {
+            assert!(assigned_worker_id.is_some());
+            assert_eq!(*status, miraset_core::JobStatus::Assigned);
+        }
+        _ => panic!("expected inference job"),
+    }
+
+    // Escrow was deducted.
+    assert_eq!(state.get_balance(&requester_kp.address()), 90_000);
+}
+
+#[test]
+fn test_create_job_insufficient_escrow() {
+    let state = State::new();
+    let requester_kp = KeyPair::generate();
+
+    state.add_balance(&requester_kp.address(), 1000);
+
+    let mut create_tx = Transaction::CreateJob {
+        requester: requester_kp.address(),
+        model_id: "llama-3-8b".to_string(),
+        max_tokens: 100,
+        escrow_amount: 10_000,
+        nonce: 0,
+        signature: [0; 64],
+    };
+    {
+        let mut tx_for_hash = create_tx.clone();
+        if let Transaction::CreateJob { signature, .. } = &mut tx_for_hash {
+            *signature = [0; 64];
+        }
+        let msg = bincode::serialize(&tx_for_hash).unwrap();
+        let sig = requester_kp.sign(&msg);
+        if let Transaction::CreateJob { signature, .. } = &mut create_tx {
+            *signature = sig;
+        }
+    }
+
+    let result = state.submit_transaction(create_tx);
+    assert!(result.is_err());
+    assert!(matches!(result.unwrap_err(), TxError::InsufficientEscrow));
+}

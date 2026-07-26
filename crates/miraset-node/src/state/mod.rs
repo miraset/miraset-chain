@@ -206,6 +206,49 @@ impl State {
         Ok(())
     }
 
+    /// Compute a deterministic state root from the current in-memory state.
+    ///
+    /// Hashes sorted balances, nonces, object hashes, and object versions.
+    /// This is a simple commitment suitable for a devnet; it replaces the
+    /// previous placeholder `[0; 32]` state root.
+    fn compute_state_root(w: &StateInner) -> Result<[u8; 32], StateError> {
+        let mut hasher = blake3::Hasher::new();
+
+        // Balances
+        let mut balance_keys: Vec<&Address> = w.balances.keys().collect();
+        balance_keys.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for addr in balance_keys {
+            hasher.update(addr.as_bytes());
+            hasher.update(&w.balances[addr].to_le_bytes());
+        }
+
+        // Nonces
+        let mut nonce_keys: Vec<&Address> = w.nonces.keys().collect();
+        nonce_keys.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        for addr in nonce_keys {
+            hasher.update(addr.as_bytes());
+            hasher.update(&w.nonces[addr].to_le_bytes());
+        }
+
+        // Objects
+        let mut object_keys: Vec<&ObjectId> = w.objects.keys().collect();
+        object_keys.sort();
+        for id in object_keys {
+            hasher.update(id.as_ref());
+            hasher.update(&w.objects[id].hash()?);
+        }
+
+        // Object versions
+        let mut version_keys: Vec<&ObjectId> = w.object_versions.keys().collect();
+        version_keys.sort();
+        for id in version_keys {
+            hasher.update(id.as_ref());
+            hasher.update(&w.object_versions[id].to_le_bytes());
+        }
+
+        Ok(hasher.finalize().into())
+    }
+
     pub fn produce_block(&self) -> Result<Block, StateError> {
         let mut w = self.inner.write();
         let prev = w.blocks.last().ok_or(StateError::NoGenesis)?;
@@ -213,6 +256,9 @@ impl State {
         let prev_hash = prev.hash()?;
 
         let transactions = std::mem::take(&mut w.pending_txs);
+        let event_index_start = w.events.len();
+        let mut nonce_updates: Vec<(Address, u64)> = Vec::with_capacity(transactions.len());
+        let mut balance_updates: Vec<(Address, u64)> = Vec::new();
 
         // Execute transactions
         for tx in &transactions {
@@ -220,31 +266,64 @@ impl State {
             let from = tx.from();
             let new_nonce = w.nonces.entry(*from).or_insert(0);
             *new_nonce += 1;
-
-            // Persist nonce to storage
-            if let Some(ref storage) = self.storage {
-                let _ = storage.save_nonce(from, *new_nonce);
-            }
+            nonce_updates.push((*from, *new_nonce));
 
             // Execute transaction
-            execution::execute_transaction_inner(self, &mut w, tx, height)?;
+            execution::execute_transaction_inner(&mut w, tx, height, &mut balance_updates)?;
         }
+
+        // Compute deterministic state root after all mutations
+        let state_root = Self::compute_state_root(&w)?;
 
         let block = Block {
             height,
             timestamp: chrono::Utc::now(),
             prev_hash,
             transactions,
-            state_root: [0; 32], // Simplified for MVP
+            state_root,
         };
 
         w.blocks.push(block.clone());
+        // Move new events out of the in-memory vec so we can persist them after
+        // dropping the lock. They are restored below once storage I/O completes.
+        let new_events: Vec<Event> = w.events.split_off(event_index_start);
 
-        // Persist block to storage
+        // Release write lock before doing storage I/O
+        drop(w);
+
+        // Persist block, balances, nonces, and events outside the lock
         if let Some(ref storage) = self.storage {
             let _ = storage.save_block(&block);
+            for (addr, balance) in balance_updates {
+                let _ = storage.save_balance(&addr, balance);
+            }
+            for (addr, nonce) in nonce_updates {
+                let _ = storage.save_nonce(&addr, nonce);
+            }
+            for (i, event) in new_events.iter().enumerate() {
+                let event_index = (event_index_start + i) as u64;
+                let _ = storage.save_event(event_index, event);
+            }
             let _ = storage.flush();
         }
+
+        let event_count = new_events.len();
+
+        // Re-append the new events to the in-memory history now that storage I/O
+        // is complete. They were removed with `split_off` above to allow safe
+        // persistence outside the lock.
+        {
+            let mut w = self.inner.write();
+            w.events.extend(new_events);
+        }
+
+        tracing::debug!(
+            height = block.height,
+            txs = block.transactions.len(),
+            events = event_count,
+            state_root = hex::encode(state_root),
+            "produced block",
+        );
 
         Ok(block)
     }
@@ -594,27 +673,14 @@ impl State {
         w.current_epoch.add_job_result(result);
     }
 
-    // ===== Job Coordinator (D1) =====
-
-    /// Create a job directly (coordinator path, no TX needed for demo).
-    pub fn create_job(
-        &self,
-        requester: &Address,
-        model_id: String,
-        max_tokens: u64,
-        escrow_amount: u64,
-    ) -> Result<ObjectId, StateError> {
-        jobs::create_job(self, requester, model_id, max_tokens, escrow_amount)
-    }
-
-    /// Auto-assign a job to the first available worker that supports the model.
-    pub fn auto_assign_job(&self, job_id: &ObjectId, model_id: &str) -> Option<ObjectId> {
-        jobs::auto_assign_job(self, job_id, model_id)
-    }
-
     /// Get the HTTP endpoint of a registered worker.
     pub fn get_worker_endpoint(&self, worker_id: &ObjectId) -> Option<String> {
         jobs::get_worker_endpoint(self, worker_id)
+    }
+
+    /// Dispatch `/jobs/accept` notifications for new job assignments in a block.
+    pub fn dispatch_job_assignments(&self, block_height: u64) {
+        jobs::dispatch_new_job_assignments(self, block_height, crate::epoch::PRICE_PER_TOKEN);
     }
 }
 
