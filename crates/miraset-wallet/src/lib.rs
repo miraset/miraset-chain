@@ -43,8 +43,23 @@ pub struct Wallet {
 }
 
 impl Wallet {
-    /// Open or create a wallet (plaintext, backward-compatible)
+    /// Open or create a wallet.
+    ///
+    /// # Security note
+    /// If `allow_plaintext` is `false` (the default), this method will refuse
+    /// to open an existing plaintext wallet and will warn loudly. This
+    /// prevents accidental loading of an unprotected key file. Pass `true` only
+    /// for explicit backward-compatible or testing scenarios.
     pub fn new(path: PathBuf) -> Result<Self> {
+        Self::new_with_options(path, false)
+    }
+
+    /// Open or create a wallet with explicit plaintext handling.
+    ///
+    /// `allow_plaintext`: if `true`, an existing plaintext wallet file is
+    /// loaded and a warning is emitted; on next save it will be encrypted if
+    /// a password is set. If `false`, loading a plaintext file is an error.
+    pub fn new_with_options(path: PathBuf, allow_plaintext: bool) -> Result<Self> {
         let data = if path.exists() {
             let content = fs::read_to_string(&path).context("Failed to read wallet file")?;
             // Try encrypted format first
@@ -54,6 +69,17 @@ impl Wallet {
                     "Wallet is encrypted. Use Wallet::open_encrypted(path, password) instead."
                 );
             }
+            // Plaintext fallback
+            if !allow_plaintext {
+                anyhow::bail!(
+                    "Refusing to open plaintext wallet at {}. Use an encrypted wallet (Wallet::open_encrypted) or pass allow_plaintext=true if this is intentional.",
+                    path.display()
+                );
+            }
+            tracing::warn!(
+                "Loading plaintext wallet from {}. Keys are unprotected on disk. Consider encrypting with set_password().",
+                path.display()
+            );
             serde_json::from_str(&content).context("Failed to parse wallet file")?
         } else {
             WalletData {
@@ -93,6 +119,10 @@ impl Wallet {
         }
 
         // Fallback: plaintext wallet being upgraded to encrypted
+        tracing::warn!(
+            "Upgrading plaintext wallet at {} to encrypted format. Keys were briefly loaded into memory unprotected.",
+            path.display()
+        );
         let data: WalletData =
             serde_json::from_str(&content).context("Failed to parse wallet file")?;
         let wallet = Self {
@@ -437,7 +467,8 @@ mod tests {
 
         // Load wallet and verify account exists
         {
-            let wallet = Wallet::new(wallet_path.clone()).unwrap();
+            // The file is plaintext; use the explicit opt-in constructor.
+            let wallet = Wallet::new_with_options(wallet_path.clone(), true).unwrap();
             let accounts = wallet.list_accounts();
             assert_eq!(accounts.len(), 1);
             assert_eq!(accounts[0].0, "alice");

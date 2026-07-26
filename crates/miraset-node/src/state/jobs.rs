@@ -1,3 +1,4 @@
+use crate::auth::{DispatchAuth, validate_worker_endpoint};
 use crate::state::State;
 use miraset_core::{JobStatus, ObjectData, ObjectId, WorkerStatus};
 
@@ -61,7 +62,13 @@ pub(crate) fn get_worker_endpoint(state: &State, worker_id: &ObjectId) -> Option
     if let Some(obj) = r.objects.get(worker_id)
         && let ObjectData::WorkerRegistration { endpoints, .. } = &obj.data
     {
-        return endpoints.first().cloned();
+        // M2: validate at dispatch time too in case policy changed.
+        let allow_private = state.allow_private_endpoints;
+        for endpoint in endpoints {
+            if validate_worker_endpoint(endpoint, allow_private).is_ok() {
+                return Some(endpoint.clone());
+            }
+        }
     }
     None
 }
@@ -73,10 +80,12 @@ pub(crate) fn get_worker_endpoint(state: &State, worker_id: &ObjectId) -> Option
 pub(crate) fn dispatch_job_accept(
     endpoint: String,
     job_id: ObjectId,
+    worker_id: ObjectId,
     epoch_id: u64,
     model_id: String,
     max_tokens: u64,
     price_per_token: u64,
+    dispatch_secret: Option<[u8; 32]>,
 ) {
     tokio::spawn(async move {
         let Ok(client) = reqwest::Client::builder()
@@ -88,6 +97,14 @@ pub(crate) fn dispatch_job_accept(
         };
         let accept_url = format!("{}/jobs/accept", endpoint.trim_end_matches('/'));
         let job_id_hex = hex::encode(job_id);
+
+        // H4: include an authentication tag when a dispatch secret is configured.
+        let auth_tag = dispatch_secret.as_ref().map(|secret| {
+            hex::encode(DispatchAuth::sign_dispatch(
+                secret, &job_id, &worker_id, epoch_id, &model_id, max_tokens,
+            ))
+        });
+
         let _ = client
             .post(&accept_url)
             .json(&serde_json::json!({
@@ -95,7 +112,8 @@ pub(crate) fn dispatch_job_accept(
                 "epoch_id": epoch_id,
                 "model_id": model_id,
                 "max_tokens": max_tokens,
-                "price_per_token": price_per_token
+                "price_per_token": price_per_token,
+                "auth_tag": auth_tag,
             }))
             .send()
             .await;
@@ -143,10 +161,12 @@ pub(crate) fn dispatch_new_job_assignments(state: &State, block_height: u64, pri
             dispatch_job_accept(
                 endpoint,
                 job_id,
+                worker_id,
                 epoch_id,
                 model_id,
                 max_tokens,
                 price_per_token,
+                state.dispatch_secret,
             );
         }
     }

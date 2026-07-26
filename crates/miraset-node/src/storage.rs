@@ -135,6 +135,33 @@ impl Storage {
         }
     }
 
+    /// Save the expected genesis block hash.
+    ///
+    /// Stored on first startup so subsequent reloads can detect a corrupted
+    /// or truncated chain.
+    pub fn save_genesis_hash(&self, hash: &[u8; 32]) -> Result<(), StorageError> {
+        self.db.insert(b"genesis_hash", hash.as_ref())?;
+        Ok(())
+    }
+
+    /// Load the persisted genesis block hash, if any.
+    pub fn get_genesis_hash(&self) -> Result<Option<[u8; 32]>, StorageError> {
+        match self.db.get(b"genesis_hash")? {
+            Some(bytes) => {
+                let fixed: [u8; 32] =
+                    bytes
+                        .as_ref()
+                        .try_into()
+                        .map_err(|_| StorageError::CorruptValue {
+                            key: "genesis_hash".to_string(),
+                            details: format!("expected 32 bytes, got {}", bytes.len()),
+                        })?;
+                Ok(Some(fixed))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Flush all pending writes
     pub fn flush(&self) -> Result<(), StorageError> {
         self.db.flush()?;

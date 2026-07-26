@@ -85,6 +85,13 @@ impl KeyPair {
 }
 
 pub fn verify_signature(address: &Address, message: &[u8], signature: &[u8; 64]) -> bool {
+    // L2: explicitly reject the all-zero placeholder signature. ed25519
+    // verification would already fail for it, but rejecting early makes the
+    // intent obvious and avoids depending on that side effect.
+    if signature == &[0u8; 64] {
+        return false;
+    }
+
     let verifying_key = match VerifyingKey::from_bytes(address.as_bytes()) {
         Ok(k) => k,
         Err(_) => return false,
@@ -173,6 +180,14 @@ mod tests {
         assert!(Address::from_hex("invalid").is_err());
         assert!(Address::from_hex("").is_err());
         assert!(Address::from_hex("00").is_err()); // Too short
+    }
+
+    #[test]
+    fn test_zero_signature_rejected() {
+        let kp = KeyPair::generate();
+        let msg = b"test message";
+        let zero_sig = [0u8; 64];
+        assert!(!verify_signature(&kp.address(), msg, &zero_sig));
     }
 
     #[test]

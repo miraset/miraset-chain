@@ -81,19 +81,19 @@ pub struct GasBudget {
 }
 
 impl GasBudget {
-    pub fn new(max_gas_amount: u64, gas_price: u64) -> Result<Self, String> {
+    pub fn new(max_gas_amount: u64, gas_price: u64) -> Result<Self, GasBudgetError> {
         if max_gas_amount < MIN_GAS_BUDGET {
-            return Err(format!(
-                "Gas budget too low: {} < {}",
-                max_gas_amount, MIN_GAS_BUDGET
-            ));
+            return Err(GasBudgetError::BudgetTooLow {
+                got: max_gas_amount,
+                min: MIN_GAS_BUDGET,
+            });
         }
 
         if max_gas_amount > MAX_GAS_BUDGET {
-            return Err(format!(
-                "Gas budget too high: {} > {}",
-                max_gas_amount, MAX_GAS_BUDGET
-            ));
+            return Err(GasBudgetError::BudgetTooHigh {
+                got: max_gas_amount,
+                max: MAX_GAS_BUDGET,
+            });
         }
 
         let total_budget = max_gas_amount.saturating_mul(gas_price);
@@ -159,6 +159,19 @@ impl GasStatus {
             storage_rebate: 0,
             breakdown,
         }
+    }
+
+    /// Construct a meter with an unlimited budget for devnet/testing paths.
+    ///
+    /// # Safety
+    /// This should only be used in tests or in explicitly metered-off modes.
+    pub fn unlimited(config: &GasConfig) -> Self {
+        let budget = GasBudget {
+            max_gas_amount: u64::MAX,
+            gas_price: 1,
+            total_budget: u64::MAX,
+        };
+        Self::new(budget, config)
     }
 
     /// Charge gas for an operation
@@ -313,6 +326,131 @@ impl GasCost {
     }
 }
 
+/// Gas budget validation error.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum GasBudgetError {
+    #[error("gas budget too low: {got} < {min}")]
+    BudgetTooLow { got: u64, min: u64 },
+    #[error("gas budget too high: {got} > {max}")]
+    BudgetTooHigh { got: u64, max: u64 },
+}
+
+/// Estimate the minimum gas units required to execute a transaction.
+///
+/// This is a conservative upper bound used at validation time to reject
+/// transactions that cannot possibly afford execution. The actual gas used is
+/// charged during block execution.
+pub fn estimate_gas_for_transaction(tx: &miraset_core::Transaction, config: &GasConfig) -> u64 {
+    use miraset_core::Transaction;
+
+    let mut gas = config.base_fee;
+
+    // Per-byte cost for the serialized transaction payload.
+    if let Ok(bytes) = bincode::serialize(tx) {
+        gas = gas.saturating_add((bytes.len() as u64).saturating_mul(config.per_byte_fee));
+    }
+
+    match tx {
+        Transaction::Transfer { .. } => {
+            // Two balance reads + two balance writes + small computation.
+            gas = gas
+                .saturating_add(config.object_read_cost.saturating_mul(2))
+                .saturating_add(config.object_write_cost.saturating_mul(2))
+                .saturating_add(1_000);
+        }
+        Transaction::ChatSend { message, .. } => {
+            // Base event emit + per-byte cost of message.
+            gas = gas.saturating_add(config.event_cost);
+            gas = gas.saturating_add((message.len() as u64).saturating_mul(config.per_byte_fee));
+        }
+        Transaction::CreateObject { data, .. } => {
+            // Object creation is the most expensive common operation.
+            if let Ok(size) = bincode::serialize(data).map(|b| b.len()) {
+                gas = gas.saturating_add(config.object_create_cost.saturating_add(
+                    (size as u64 / 1024).saturating_mul(config.storage_price_per_kb),
+                ));
+            }
+            gas = gas.saturating_add(config.event_cost);
+        }
+        Transaction::MutateObject { new_data, .. } => {
+            if let Ok(size) = bincode::serialize(new_data).map(|b| b.len()) {
+                gas = gas.saturating_add(
+                    config
+                        .object_write_cost
+                        .saturating_add((size as u64 / 1024).saturating_mul(config.per_byte_fee)),
+                );
+            }
+            gas = gas.saturating_add(config.object_read_cost);
+            gas = gas.saturating_add(config.event_cost);
+        }
+        Transaction::TransferObject { .. } => {
+            gas = gas
+                .saturating_add(config.object_read_cost)
+                .saturating_add(config.object_write_cost)
+                .saturating_add(config.event_cost)
+                .saturating_add(500);
+        }
+        Transaction::RegisterWorker {
+            supported_models,
+            endpoints,
+            ..
+        } => {
+            // Worker registration creates an object.
+            let text_size = supported_models.iter().map(|s| s.len()).sum::<usize>()
+                + endpoints.iter().map(|s| s.len()).sum::<usize>();
+            gas = gas.saturating_add(config.object_create_cost);
+            gas = gas.saturating_add(
+                (text_size as u64 / 1024).saturating_mul(config.storage_price_per_kb),
+            );
+            gas = gas.saturating_add(config.event_cost);
+        }
+        Transaction::SubmitResourceSnapshot { .. } => {
+            gas = gas.saturating_add(config.object_read_cost);
+            gas = gas.saturating_add(config.event_cost);
+        }
+        Transaction::CreateJob { model_id, .. } => {
+            // Escrow handling + object creation.
+            gas = gas
+                .saturating_add(config.object_read_cost)
+                .saturating_add(config.object_write_cost.saturating_mul(2));
+            gas = gas.saturating_add(config.object_create_cost);
+            gas = gas.saturating_add((model_id.len() as u64).saturating_mul(config.per_byte_fee));
+            gas = gas.saturating_add(config.event_cost);
+            // Auto-assignment read of workers.
+            gas = gas.saturating_add(config.object_read_cost.saturating_mul(2));
+        }
+        Transaction::AssignJob { .. } => {
+            gas = gas
+                .saturating_add(config.object_read_cost)
+                .saturating_add(config.object_write_cost)
+                .saturating_add(config.event_cost);
+        }
+        Transaction::SubmitJobResult { .. } => {
+            gas = gas
+                .saturating_add(config.object_read_cost)
+                .saturating_add(config.object_write_cost)
+                .saturating_add(config.event_cost);
+        }
+        Transaction::AnchorReceipt { .. } => {
+            gas = gas.saturating_add(config.event_cost);
+        }
+        Transaction::ChallengeJob { reason, .. } => {
+            gas = gas
+                .saturating_add(config.object_read_cost)
+                .saturating_add(config.object_write_cost)
+                .saturating_add(config.event_cost);
+            gas = gas.saturating_add((reason.len() as u64).saturating_mul(config.per_byte_fee));
+        }
+    }
+
+    gas
+}
+
+/// Compute the total native-token cost for a transaction given its gas usage.
+pub fn gas_cost_tokens(gas_units: u64, gas_price: u64) -> u64 {
+    gas_units.saturating_mul(gas_price)
+}
+
 /// Gas coin object for paying fees
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GasCoin {
@@ -347,6 +485,12 @@ mod tests {
         let budget = GasBudget::new(10_000_000, GAS_PRICE_UNIT).unwrap();
         assert_eq!(budget.max_gas_amount, 10_000_000);
         assert_eq!(budget.gas_price, GAS_PRICE_UNIT);
+    }
+
+    #[test]
+    fn test_gas_budget_error_is_typed() {
+        let err = GasBudget::new(MIN_GAS_BUDGET - 1, GAS_PRICE_UNIT).unwrap_err();
+        assert!(matches!(err, GasBudgetError::BudgetTooLow { .. }));
     }
 
     #[test]

@@ -3,23 +3,38 @@
 use miraset_core::{Event, KeyPair, Transaction};
 use miraset_node::State;
 use miraset_node::error::TxError;
+use miraset_node::gas::GasConfig;
+
+fn cheap_gas_config() -> GasConfig {
+    GasConfig {
+        base_fee: 1,
+        per_byte_fee: 1,
+        object_read_cost: 1,
+        object_write_cost: 1,
+        object_create_cost: 1,
+        object_delete_cost: 1,
+        event_cost: 1,
+        storage_price_per_kb: 1,
+        storage_rebate_rate: 0.99,
+    }
+}
 
 #[test]
 fn test_state_new() {
-    let state = State::new();
+    let mut state = State::new();
     assert_eq!(state.height().unwrap(), 0);
 }
 
 #[test]
 fn test_get_balance_zero() {
-    let state = State::new();
+    let mut state = State::new();
     let kp = KeyPair::generate();
     assert_eq!(state.get_balance(&kp.address()), 0);
 }
 
 #[test]
 fn test_add_balance() {
-    let state = State::new();
+    let mut state = State::new();
     let kp = KeyPair::generate();
 
     state.add_balance(&kp.address(), 1000);
@@ -31,14 +46,15 @@ fn test_add_balance() {
 
 #[test]
 fn test_get_nonce_initial() {
-    let state = State::new();
+    let mut state = State::new();
     let kp = KeyPair::generate();
     assert_eq!(state.get_nonce(&kp.address()), 0);
 }
 
 #[test]
 fn test_submit_transfer_valid() {
-    let state = State::new();
+    let mut state = State::new();
+    state.set_gas_config(cheap_gas_config());
     let kp = KeyPair::generate();
     let recipient = KeyPair::generate();
 
@@ -52,17 +68,7 @@ fn test_submit_transfer_valid() {
         signature: [0; 64],
     };
 
-    // Sign transaction
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::Transfer { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::Transfer { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     let result = state.submit_transaction(tx);
     assert!(result.is_ok());
@@ -70,7 +76,7 @@ fn test_submit_transfer_valid() {
 
 #[test]
 fn test_submit_transfer_insufficient_balance() {
-    let state = State::new();
+    let mut state = State::new();
     let kp = KeyPair::generate();
     let recipient = KeyPair::generate();
 
@@ -84,17 +90,7 @@ fn test_submit_transfer_insufficient_balance() {
         signature: [0; 64],
     };
 
-    // Sign transaction
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::Transfer { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::Transfer { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     let result = state.submit_transaction(tx);
     assert!(result.is_err());
@@ -103,7 +99,7 @@ fn test_submit_transfer_insufficient_balance() {
 
 #[test]
 fn test_submit_transfer_invalid_nonce() {
-    let state = State::new();
+    let mut state = State::new();
     let kp = KeyPair::generate();
     let recipient = KeyPair::generate();
 
@@ -117,17 +113,7 @@ fn test_submit_transfer_invalid_nonce() {
         signature: [0; 64],
     };
 
-    // Sign transaction
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::Transfer { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::Transfer { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     let result = state.submit_transaction(tx);
     assert!(result.is_err());
@@ -136,7 +122,7 @@ fn test_submit_transfer_invalid_nonce() {
 
 #[test]
 fn test_submit_transfer_invalid_signature() {
-    let state = State::new();
+    let mut state = State::new();
     let kp = KeyPair::generate();
     let recipient = KeyPair::generate();
 
@@ -157,8 +143,10 @@ fn test_submit_transfer_invalid_signature() {
 
 #[test]
 fn test_submit_chat_valid() {
-    let state = State::new();
+    let mut state = State::new();
+    state.set_gas_config(cheap_gas_config());
     let kp = KeyPair::generate();
+    state.add_balance(&kp.address(), 10_000);
 
     let mut tx = Transaction::ChatSend {
         from: kp.address(),
@@ -167,17 +155,7 @@ fn test_submit_chat_valid() {
         signature: [0; 64],
     };
 
-    // Sign transaction
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::ChatSend { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::ChatSend { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     let result = state.submit_transaction(tx);
     assert!(result.is_ok());
@@ -185,7 +163,7 @@ fn test_submit_chat_valid() {
 
 #[test]
 fn test_submit_chat_empty_message() {
-    let state = State::new();
+    let mut state = State::new();
     let kp = KeyPair::generate();
 
     let mut tx = Transaction::ChatSend {
@@ -195,17 +173,7 @@ fn test_submit_chat_empty_message() {
         signature: [0; 64],
     };
 
-    // Sign transaction
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::ChatSend { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::ChatSend { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     let result = state.submit_transaction(tx);
     assert!(result.is_err());
@@ -214,7 +182,7 @@ fn test_submit_chat_empty_message() {
 
 #[test]
 fn test_submit_chat_message_too_long() {
-    let state = State::new();
+    let mut state = State::new();
     let kp = KeyPair::generate();
 
     let long_message = "x".repeat(1001);
@@ -225,17 +193,7 @@ fn test_submit_chat_message_too_long() {
         signature: [0; 64],
     };
 
-    // Sign transaction
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::ChatSend { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::ChatSend { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     let result = state.submit_transaction(tx);
     assert!(result.is_err());
@@ -244,11 +202,12 @@ fn test_submit_chat_message_too_long() {
 
 #[test]
 fn test_produce_block() {
-    let state = State::new();
+    let mut state = State::new();
+    state.set_gas_config(cheap_gas_config());
     let kp = KeyPair::generate();
     let recipient = KeyPair::generate();
 
-    state.add_balance(&kp.address(), 1000);
+    state.add_balance(&kp.address(), 10000);
 
     // Submit transaction
     let mut tx = Transaction::Transfer {
@@ -259,16 +218,7 @@ fn test_produce_block() {
         signature: [0; 64],
     };
 
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::Transfer { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::Transfer { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     state.submit_transaction(tx).unwrap();
 
@@ -278,8 +228,9 @@ fn test_produce_block() {
     assert_eq!(block.height, 1);
     assert_eq!(block.transactions.len(), 1);
 
-    // Check balances updated
-    assert_eq!(state.get_balance(&kp.address()), 700);
+    // Check balances updated (sender also paid a small gas fee)
+    let sender_balance = state.get_balance(&kp.address());
+    assert!(sender_balance <= 9700);
     assert_eq!(state.get_balance(&recipient.address()), 300);
 
     // Check nonce incremented
@@ -288,12 +239,13 @@ fn test_produce_block() {
 
 #[test]
 fn test_produce_block_multiple_transactions() {
-    let state = State::new();
+    let mut state = State::new();
+    state.set_gas_config(cheap_gas_config());
     let kp1 = KeyPair::generate();
     let kp2 = KeyPair::generate();
 
-    state.add_balance(&kp1.address(), 1000);
-    state.add_balance(&kp2.address(), 1000);
+    state.add_balance(&kp1.address(), 10000);
+    state.add_balance(&kp2.address(), 10000);
 
     // Submit two transactions
     for (kp, amount) in [(kp1, 100), (kp2, 200)] {
@@ -304,16 +256,7 @@ fn test_produce_block_multiple_transactions() {
             signature: [0; 64],
         };
 
-        let mut tx_for_hash = tx.clone();
-        if let Transaction::ChatSend { signature, .. } = &mut tx_for_hash {
-            *signature = [0; 64]
-        }
-        let msg = bincode::serialize(&tx_for_hash).unwrap();
-        let sig = kp.sign(&msg);
-
-        if let Transaction::ChatSend { signature, .. } = &mut tx {
-            *signature = sig
-        }
+        miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
         state.submit_transaction(tx).unwrap();
     }
@@ -325,14 +268,14 @@ fn test_produce_block_multiple_transactions() {
 
 #[test]
 fn test_get_latest_block() {
-    let state = State::new();
+    let mut state = State::new();
     let latest = state.get_latest_block().unwrap();
     assert_eq!(latest.height, 0);
 }
 
 #[test]
 fn test_get_block_by_height() {
-    let state = State::new();
+    let mut state = State::new();
 
     let genesis = state.get_block(0);
     assert!(genesis.is_some());
@@ -344,11 +287,12 @@ fn test_get_block_by_height() {
 
 #[test]
 fn test_get_events() {
-    let state = State::new();
+    let mut state = State::new();
+    state.set_gas_config(cheap_gas_config());
     let kp = KeyPair::generate();
     let recipient = KeyPair::generate();
 
-    state.add_balance(&kp.address(), 1000);
+    state.add_balance(&kp.address(), 10000);
 
     // Submit and produce block
     let mut tx = Transaction::Transfer {
@@ -359,16 +303,7 @@ fn test_get_events() {
         signature: [0; 64],
     };
 
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::Transfer { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::Transfer { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     state.submit_transaction(tx).unwrap();
     state.produce_block().unwrap();
@@ -390,8 +325,10 @@ fn test_get_events() {
 
 #[test]
 fn test_get_chat_messages() {
-    let state = State::new();
+    let mut state = State::new();
+    state.set_gas_config(cheap_gas_config());
     let kp = KeyPair::generate();
+    state.add_balance(&kp.address(), 10_000);
 
     // Submit chat messages and produce block after each
     for i in 1..=3 {
@@ -402,16 +339,7 @@ fn test_get_chat_messages() {
             signature: [0; 64],
         };
 
-        let mut tx_for_hash = tx.clone();
-        if let Transaction::ChatSend { signature, .. } = &mut tx_for_hash {
-            *signature = [0; 64]
-        }
-        let msg = bincode::serialize(&tx_for_hash).unwrap();
-        let sig = kp.sign(&msg);
-
-        if let Transaction::ChatSend { signature, .. } = &mut tx {
-            *signature = sig
-        }
+        miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
         state.submit_transaction(tx).unwrap();
         state.produce_block().unwrap(); // Produce block to increment nonce
@@ -426,8 +354,11 @@ fn test_get_chat_messages() {
 
 #[test]
 fn test_worker_register() {
-    let state = State::new();
+    let mut state = State::new();
+    state.set_gas_config(cheap_gas_config());
+    state.set_allow_private_endpoints(true);
     let kp = KeyPair::generate();
+    state.add_balance(&kp.address(), 10_000);
 
     let mut tx = Transaction::RegisterWorker {
         owner: kp.address(),
@@ -441,16 +372,7 @@ fn test_worker_register() {
         signature: [0; 64],
     };
 
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::RegisterWorker { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::RegisterWorker { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     state.submit_transaction(tx).unwrap();
     state.produce_block().unwrap();
@@ -475,7 +397,7 @@ fn test_worker_register() {
 
 #[test]
 fn test_height() {
-    let state = State::new();
+    let mut state = State::new();
     assert_eq!(state.height().unwrap(), 0);
 
     state.produce_block().unwrap();
@@ -487,10 +409,13 @@ fn test_height() {
 
 #[test]
 fn test_create_job_auto_assigns_worker() {
-    let state = State::new();
+    let mut state = State::new();
+    state.set_gas_config(cheap_gas_config());
+    state.set_allow_private_endpoints(true);
     let worker_kp = KeyPair::generate();
     let requester_kp = KeyPair::generate();
 
+    state.add_balance(&worker_kp.address(), 10_000);
     state.add_balance(&requester_kp.address(), 100_000);
 
     // Register a worker that supports the requested model.
@@ -506,15 +431,7 @@ fn test_create_job_auto_assigns_worker() {
         signature: [0; 64],
     };
     {
-        let mut tx_for_hash = register_tx.clone();
-        if let Transaction::RegisterWorker { signature, .. } = &mut tx_for_hash {
-            *signature = [0; 64];
-        }
-        let msg = bincode::serialize(&tx_for_hash).unwrap();
-        let sig = worker_kp.sign(&msg);
-        if let Transaction::RegisterWorker { signature, .. } = &mut register_tx {
-            *signature = sig;
-        }
+        miraset_core::sign_transaction(&mut register_tx, &worker_kp).unwrap();
     }
     state.submit_transaction(register_tx).unwrap();
 
@@ -528,15 +445,7 @@ fn test_create_job_auto_assigns_worker() {
         signature: [0; 64],
     };
     {
-        let mut tx_for_hash = create_tx.clone();
-        if let Transaction::CreateJob { signature, .. } = &mut tx_for_hash {
-            *signature = [0; 64];
-        }
-        let msg = bincode::serialize(&tx_for_hash).unwrap();
-        let sig = requester_kp.sign(&msg);
-        if let Transaction::CreateJob { signature, .. } = &mut create_tx {
-            *signature = sig;
-        }
+        miraset_core::sign_transaction(&mut create_tx, &requester_kp).unwrap();
     }
     state.submit_transaction(create_tx).unwrap();
 
@@ -567,13 +476,15 @@ fn test_create_job_auto_assigns_worker() {
         _ => panic!("expected inference job"),
     }
 
-    // Escrow was deducted.
-    assert_eq!(state.get_balance(&requester_kp.address()), 90_000);
+    // Escrow was deducted (plus small gas fees).
+    let requester_balance = state.get_balance(&requester_kp.address());
+    assert!(requester_balance <= 90_000);
+    assert!(requester_balance > 89_000);
 }
 
 #[test]
 fn test_create_job_insufficient_escrow() {
-    let state = State::new();
+    let mut state = State::new();
     let requester_kp = KeyPair::generate();
 
     state.add_balance(&requester_kp.address(), 1000);
@@ -587,15 +498,7 @@ fn test_create_job_insufficient_escrow() {
         signature: [0; 64],
     };
     {
-        let mut tx_for_hash = create_tx.clone();
-        if let Transaction::CreateJob { signature, .. } = &mut tx_for_hash {
-            *signature = [0; 64];
-        }
-        let msg = bincode::serialize(&tx_for_hash).unwrap();
-        let sig = requester_kp.sign(&msg);
-        if let Transaction::CreateJob { signature, .. } = &mut create_tx {
-            *signature = sig;
-        }
+        miraset_core::sign_transaction(&mut create_tx, &requester_kp).unwrap();
     }
 
     let result = state.submit_transaction(create_tx);

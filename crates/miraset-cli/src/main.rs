@@ -48,6 +48,156 @@ fn default_block_interval() -> u64 {
     300
 }
 
+/// Path for the persisted genesis key inside the node's storage directory.
+fn genesis_key_path(storage_path: &str) -> PathBuf {
+    Path::new(storage_path).join("genesis_key.json")
+}
+
+/// True if the supplied socket address is on a loopback interface.
+fn is_loopback_bind(addr: &str) -> bool {
+    addr.parse::<std::net::SocketAddr>()
+        .map(|s| s.ip().is_loopback())
+        .unwrap_or(false)
+}
+
+/// Load the genesis keypair, generating and persisting a random one if needed.
+///
+/// # Security
+/// * Without `--dev`, a random Ed25519 key is generated and saved to a
+///   permissions-restricted file inside `storage_path`. The secret is never
+///   printed.
+/// * With `--dev`, the fixed devnet key `[1u8; 32]` is used for reproducibility.
+///   `--dev` is rejected unless the RPC bind address is loopback.
+fn load_or_create_genesis_keypair(
+    dev: bool,
+    rpc_addr: &str,
+    storage_path: &str,
+) -> anyhow::Result<KeyPair> {
+    if dev {
+        if !is_loopback_bind(rpc_addr) {
+            anyhow::bail!(
+                "--dev is only allowed when binding to a loopback address (got {})",
+                rpc_addr
+            );
+        }
+        let fixed = [1u8; 32];
+        return Ok(KeyPair::from_bytes(&fixed));
+    }
+
+    let path = genesis_key_path(storage_path);
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)?;
+        let hex_secret = content.trim();
+        let bytes = hex::decode(hex_secret)?;
+        if bytes.len() != 32 {
+            anyhow::bail!("persisted genesis key has wrong length");
+        }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&bytes);
+        return Ok(KeyPair::from_bytes(&secret));
+    }
+
+    // Generate a fresh random key.
+    let kp = KeyPair::generate();
+    let secret_hex = hex::encode(kp.secret_bytes());
+
+    // Ensure the storage directory exists.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Write with restrictive permissions (0600).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        std::io::Write::write_all(&mut file, secret_hex.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, secret_hex)?;
+    }
+
+    Ok(kp)
+}
+
+/// Path for the persisted dispatch secret inside the node's storage directory.
+fn dispatch_secret_path(storage_path: &str) -> PathBuf {
+    Path::new(storage_path).join("dispatch_secret.bin")
+}
+
+/// Load or create the shared secret used for node->worker dispatch auth (H4).
+///
+/// In `--dev` mode a fixed all-zeros secret is used for convenience. In
+/// normal mode a random 32-byte secret is generated and persisted with
+/// restrictive permissions. The secret can also be supplied via the
+/// `MIRASET_DISPATCH_SECRET` environment variable (hex-encoded 32 bytes).
+fn load_or_create_dispatch_secret(
+    dev: bool,
+    rpc_addr: &str,
+    storage_path: &str,
+) -> anyhow::Result<[u8; 32]> {
+    if let Ok(hex_secret) = std::env::var("MIRASET_DISPATCH_SECRET") {
+        let bytes = hex::decode(hex_secret.trim())?;
+        if bytes.len() != 32 {
+            anyhow::bail!("MIRASET_DISPATCH_SECRET must be 32 hex-encoded bytes");
+        }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&bytes);
+        return Ok(secret);
+    }
+
+    if dev {
+        if !is_loopback_bind(rpc_addr) {
+            anyhow::bail!(
+                "dev-mode dispatch secret is only allowed on loopback binds (got {})",
+                rpc_addr
+            );
+        }
+        return Ok([0u8; 32]);
+    }
+
+    let path = dispatch_secret_path(storage_path);
+    if path.exists() {
+        let bytes = std::fs::read(&path)?;
+        if bytes.len() != 32 {
+            anyhow::bail!("persisted dispatch secret has wrong length");
+        }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&bytes);
+        return Ok(secret);
+    }
+
+    let secret = miraset_node::auth::DispatchAuth::generate_secret();
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        std::io::Write::write_all(&mut file, &secret)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, &secret)?;
+    }
+
+    Ok(secret)
+}
+
 /// Load configuration with precedence: CLI flags > Env vars > Config file > Defaults
 fn load_config() -> Config {
     load_config_from_path(Path::new("miraset.toml"))
@@ -126,6 +276,19 @@ enum NodeCommands {
         storage_path: Option<String>,
         #[arg(long)]
         block_interval: Option<u64>,
+        /// Run in devnet mode (default true). This enables the single-author
+        /// block producer without consensus. Production/multi-node operation is
+        /// not supported until PoCC consensus is wired into block production.
+        /// Pass `--dev=false` to opt out; the node will refuse to start.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        dev: bool,
+        /// Allow worker endpoints that resolve to loopback/private addresses.
+        /// This weakens SSRF protections and is only intended for local testing.
+        #[arg(long)]
+        allow_private_endpoints: bool,
+        /// Allow any origin for CORS. Only safe on loopback devnets.
+        #[arg(long)]
+        cors_any: bool,
     },
 }
 
@@ -211,6 +374,9 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             rpc_addr,
             storage_path,
             block_interval,
+            dev,
+            allow_private_endpoints,
+            cors_any,
         } => {
             // Load config with precedence: CLI > Env > File > Defaults
             let mut config = load_config();
@@ -221,25 +387,52 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             let final_storage_path = storage_path.unwrap_or(config.node.storage_path);
             let final_block_interval = block_interval.unwrap_or(config.node.block_interval);
 
+            // H5: devnet gate. Consensus is not wired; production mode is
+            // explicitly unsupported.
+            if !dev {
+                anyhow::bail!(
+                    "Non-dev mode is not supported: PoCC consensus is not yet wired into block production. Use --dev for local devnet only."
+                );
+            }
+
             println!("Starting Miraset devnet node...");
             println!("RPC address: {}", final_rpc_addr);
             println!("Storage path: {}", final_storage_path);
             println!("Block interval: {}s", final_block_interval);
+
+            // H2: secure genesis key handling.
+            let genesis_kp =
+                load_or_create_genesis_keypair(dev, &final_rpc_addr, &final_storage_path)?;
+            println!("Genesis account: {}", genesis_kp.address().to_hex());
+            if dev {
+                tracing::warn!(
+                    "Using fixed devnet genesis key because --dev was set. Never use this on a public network."
+                );
+            } else {
+                tracing::info!("Using persisted random genesis key.");
+            }
+
+            // H4: load or create the shared secret used to authenticate
+            // node->worker job dispatches.
+            let dispatch_secret =
+                load_or_create_dispatch_secret(dev, &final_rpc_addr, &final_storage_path)?;
+            if dev {
+                tracing::warn!(
+                    "A dispatch secret has been generated/loaded. Workers must be started with the same secret to accept job assignments."
+                );
+            }
 
             // Open persistent storage
             let storage = Storage::open(&final_storage_path)?;
             println!("Storage opened at: {}", final_storage_path);
 
             // Initialize state with persistent storage
-            let state = State::new_with_storage(Some(storage.clone()));
+            let mut state = State::new_with_storage(Some(storage.clone()))?;
+            state.set_dispatch_secret(dispatch_secret);
+            state.set_allow_private_endpoints(allow_private_endpoints);
 
-            // Fund genesis account for testing (fixed for devnet)
-            // Using a fixed secret for reproducibility in devnet
-            let genesis_secret = [1u8; 32]; // Fixed devnet genesis key
-            let genesis_kp = KeyPair::from_bytes(&genesis_secret);
+            // Fund genesis account for devnet operation.
             state.add_balance(&genesis_kp.address(), 1_000_000_000_000); // 1 trillion tokens
-            println!("Genesis account: {}", genesis_kp.address().to_hex());
-            println!("Genesis secret: {}", hex::encode(genesis_kp.secret_bytes()));
 
             // Start block producer
             let producer_state = state.clone();
@@ -254,7 +447,11 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             // Start RPC
             let addr: std::net::SocketAddr = final_rpc_addr.parse()?;
             println!("RPC listening on http://{}", addr);
-            miraset_node::serve_rpc(state, addr).await?;
+            let rpc_config = miraset_node::rpc::RpcConfig {
+                cors_any,
+                ..miraset_node::rpc::RpcConfig::default()
+            };
+            miraset_node::serve_rpc_with_config(state, addr, rpc_config).await?;
         }
     }
     Ok(())
@@ -398,40 +595,9 @@ async fn get_chat_messages(rpc: &str, limit: usize) -> anyhow::Result<Vec<serde_
     Ok(resp.json().await?)
 }
 
-/// Zero the signature field, serialize, and sign a transaction using the canonical
-/// hash-then-sign pattern. The signature field is updated in-place.
+/// Sign a transaction in-place using the chain-scoped canonical message.
 fn sign_transaction(tx: &mut Transaction, kp: &KeyPair) -> anyhow::Result<()> {
-    let mut tx_for_hash = tx.clone();
-    match &mut tx_for_hash {
-        Transaction::Transfer { signature, .. }
-        | Transaction::ChatSend { signature, .. }
-        | Transaction::CreateObject { signature, .. }
-        | Transaction::MutateObject { signature, .. }
-        | Transaction::TransferObject { signature, .. }
-        | Transaction::RegisterWorker { signature, .. }
-        | Transaction::SubmitResourceSnapshot { signature, .. }
-        | Transaction::CreateJob { signature, .. }
-        | Transaction::AssignJob { signature, .. }
-        | Transaction::SubmitJobResult { signature, .. }
-        | Transaction::AnchorReceipt { signature, .. }
-        | Transaction::ChallengeJob { signature, .. } => *signature = [0; 64],
-    }
-    let msg = bincode::serialize(&tx_for_hash)?;
-    let sig = kp.sign(&msg);
-    match tx {
-        Transaction::Transfer { signature, .. }
-        | Transaction::ChatSend { signature, .. }
-        | Transaction::CreateObject { signature, .. }
-        | Transaction::MutateObject { signature, .. }
-        | Transaction::TransferObject { signature, .. }
-        | Transaction::RegisterWorker { signature, .. }
-        | Transaction::SubmitResourceSnapshot { signature, .. }
-        | Transaction::CreateJob { signature, .. }
-        | Transaction::AssignJob { signature, .. }
-        | Transaction::SubmitJobResult { signature, .. }
-        | Transaction::AnchorReceipt { signature, .. }
-        | Transaction::ChallengeJob { signature, .. } => *signature = sig,
-    }
+    miraset_core::sign_transaction(tx, kp)?;
     Ok(())
 }
 
@@ -511,16 +677,9 @@ block_interval = 60
         };
 
         sign_transaction(&mut tx, &kp).unwrap();
-        let sig = *tx.signature();
-
-        let mut tx_for_hash = tx.clone();
-        if let Transaction::Transfer { signature, .. } = &mut tx_for_hash {
-            *signature = [0; 64];
-        }
-        let msg = bincode::serialize(&tx_for_hash).unwrap();
         assert!(
-            miraset_core::verify_signature(&kp.address(), &msg, &sig),
-            "signature should verify against the canonical transaction hash"
+            miraset_core::verify_transaction_signature(&tx),
+            "signature should verify against the chain-scoped canonical transaction hash"
         );
     }
 
@@ -535,16 +694,9 @@ block_interval = 60
         };
 
         sign_transaction(&mut tx, &kp).unwrap();
-        let sig = *tx.signature();
-
-        let mut tx_for_hash = tx.clone();
-        if let Transaction::ChatSend { signature, .. } = &mut tx_for_hash {
-            *signature = [0; 64];
-        }
-        let msg = bincode::serialize(&tx_for_hash).unwrap();
         assert!(
-            miraset_core::verify_signature(&kp.address(), &msg, &sig),
-            "signature should verify against the canonical transaction hash"
+            miraset_core::verify_transaction_signature(&tx),
+            "signature should verify against the chain-scoped canonical transaction hash"
         );
     }
 }

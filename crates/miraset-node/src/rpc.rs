@@ -1,15 +1,53 @@
 use crate::state::State;
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     extract::State as AxumState,
-    http::StatusCode,
+    http::{HeaderValue, Method, StatusCode, header},
     routing::{get, post},
 };
 use chrono::Utc;
 use miraset_core::{Address, Block, Event, ObjectData, ObjectId, Transaction};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use tower_http::cors::{Any, CorsLayer};
+use std::time::Duration;
+use tower::ServiceBuilder;
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    limit::RequestBodyLimitLayer,
+    timeout::TimeoutLayer,
+};
+
+/// RPC server configuration.
+#[derive(Debug, Clone)]
+pub struct RpcConfig {
+    /// Max request body size in bytes.
+    pub max_body_size: usize,
+    /// Request timeout.
+    pub request_timeout: Duration,
+    /// CORS allow-origins. `None` means mirror the request origin (default).
+    pub cors_allow_origins: Option<Vec<String>>,
+    /// CORS allow-any override (dev flag).
+    pub cors_any: bool,
+    /// Per-IP rate limit burst size (requests).
+    pub rate_limit_burst: u32,
+    /// Per-IP rate limit replenish interval.
+    pub rate_limit_period: Duration,
+}
+
+impl Default for RpcConfig {
+    fn default() -> Self {
+        Self {
+            max_body_size: 2 * 1024 * 1024, // 2 MiB
+            request_timeout: Duration::from_secs(30),
+            cors_allow_origins: None,
+            cors_any: false,
+            rate_limit_burst: 100,
+            rate_limit_period: Duration::from_secs(1),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct RpcState {
@@ -17,12 +55,46 @@ pub struct RpcState {
 }
 
 pub async fn serve_rpc(state: State, addr: SocketAddr) -> anyhow::Result<()> {
+    serve_rpc_with_config(state, addr, RpcConfig::default()).await
+}
+
+pub async fn serve_rpc_with_config(
+    state: State,
+    addr: SocketAddr,
+    config: RpcConfig,
+) -> anyhow::Result<()> {
     let rpc_state = RpcState { state };
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // M5: default CORS policy. In dev mode (--cors-any) we still allow any
+    // origin; otherwise we mirror the request origin or use an explicit list.
+    let cors = if config.cors_any {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else if let Some(origins) = config.cors_allow_origins {
+        let origins: Vec<HeaderValue> = origins
+            .into_iter()
+            .filter_map(|o| HeaderValue::from_str(&o).ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([header::CONTENT_TYPE])
+    } else {
+        CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([header::CONTENT_TYPE])
+    };
+
+    // M4 (residual): per-IP rate limiting. Defaults are generous; production
+    // deployments may tighten via configuration.
+    let governor_config = GovernorConfigBuilder::default()
+        .const_period(config.rate_limit_period)
+        .const_burst_size(config.rate_limit_burst)
+        .finish()
+        .expect("non-zero rate limit burst and period");
 
     let app = Router::new()
         .route("/health", get(get_health))
@@ -41,12 +113,26 @@ pub async fn serve_rpc(state: State, addr: SocketAddr) -> anyhow::Result<()> {
         .route("/jobs/{id}", get(get_job))
         .route("/workers", get(list_workers))
         .route("/epoch", get(get_epoch))
+        .layer(
+            ServiceBuilder::new()
+                .layer(GovernorLayer::new(governor_config))
+                .layer(DefaultBodyLimit::max(config.max_body_size))
+                .layer(RequestBodyLimitLayer::new(config.max_body_size))
+                .layer(TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    config.request_timeout,
+                )),
+        )
         .with_state(rpc_state)
         .layer(cors);
 
     tracing::info!("RPC server listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

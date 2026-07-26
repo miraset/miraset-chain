@@ -66,6 +66,42 @@ fn backend_api_key_from_env() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Shared secret for verifying node dispatch authentication tags (H4).
+/// Precedence:
+/// 1. `MIRASET_DISPATCH_SECRET` env var (hex-encoded 32 bytes).
+/// 2. A file at the path given by `MIRASET_DISPATCH_SECRET_FILE`.
+fn dispatch_secret_from_env() -> Option<[u8; 32]> {
+    if let Ok(hex_secret) = std::env::var("MIRASET_DISPATCH_SECRET") {
+        let bytes = hex::decode(hex_secret.trim()).ok()?;
+        if bytes.len() != 32 {
+            tracing::warn!("MIRASET_DISPATCH_SECRET must be 32 hex-encoded bytes");
+            return None;
+        }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&bytes);
+        return Some(secret);
+    }
+
+    if let Ok(path) = std::env::var("MIRASET_DISPATCH_SECRET_FILE") {
+        let bytes = std::fs::read(path).ok()?;
+        if bytes.len() == 32 {
+            let mut secret = [0u8; 32];
+            secret.copy_from_slice(&bytes);
+            return Some(secret);
+        }
+        if let Ok(hex) = std::str::from_utf8(&bytes) {
+            let decoded = hex::decode(hex.trim()).ok()?;
+            if decoded.len() == 32 {
+                let mut secret = [0u8; 32];
+                secret.copy_from_slice(&decoded);
+                return Some(secret);
+            }
+        }
+    }
+
+    None
+}
+
 /// Resolve the set of supported model ids.
 ///
 /// Precedence:
@@ -116,6 +152,15 @@ async fn main() -> Result<()> {
         supported_models.join(", ")
     );
 
+    let dispatch_secret = dispatch_secret_from_env();
+    if dispatch_secret.is_some() {
+        tracing::info!("Dispatch auth verification enabled");
+    } else {
+        tracing::warn!(
+            "No MIRASET_DISPATCH_SECRET configured: worker will accept any /jobs/accept request (dev only)"
+        );
+    }
+
     let config = WorkerConfig {
         worker_id: [1u8; 32],
         keypair: KeyPair::generate(),
@@ -127,6 +172,11 @@ async fn main() -> Result<()> {
         gpu_model: "NVIDIA RTX 4090".to_string(),
         vram_total_gib: 24,
         supported_models,
+        dispatch_secret,
+        max_body_size: 2 * 1024 * 1024,
+        request_timeout: Duration::from_secs(30),
+        rate_limit_burst: 100,
+        rate_limit_period: Duration::from_secs(1),
     };
 
     let worker = Worker::new(config.clone());

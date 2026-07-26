@@ -9,7 +9,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize state with storage
     let state = State::new_with_storage(Some(
         miraset_node::Storage::open(".data")?
-    ));
+    ))?;
 
     println!("=== Sui-like Object-Centric Blockchain Demo ===\n");
 
@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
         nonce: 0,
         signature: [0; 64], // Would be signed in production
     };
+    miraset_core::sign_transaction(&mut register_tx, &worker_kp).unwrap();
 
     state.submit_transaction(register_tx)?;
     state.produce_block();
@@ -57,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
         nonce: 1,
         signature: [0; 64],
     };
+    miraset_core::sign_transaction(&mut snapshot_tx, &worker_kp).unwrap();
 
     state.submit_transaction(snapshot_tx)?;
     state.produce_block();
@@ -83,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
         nonce: 0,
         signature: [0; 64],
     };
+    miraset_core::sign_transaction(&mut create_job_tx, &requester_kp).unwrap();
 
     state.submit_transaction(create_job_tx)?;
     state.produce_block();
@@ -100,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         nonce: 1,
         signature: [0; 64],
     };
+    miraset_core::sign_transaction(&mut assign_tx, &requester_kp).unwrap();
 
     state.submit_transaction(assign_tx)?;
     state.produce_block();
@@ -118,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         nonce: 2,
         signature: [0; 64],
     };
+    miraset_core::sign_transaction(&mut result_tx, &worker_kp).unwrap();
 
     state.submit_transaction(result_tx)?;
     state.produce_block();
@@ -141,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
         nonce: 3,
         signature: [0; 64],
     };
+    miraset_core::sign_transaction(&mut anchor_tx, &worker_kp).unwrap();
 
     state.submit_transaction(anchor_tx)?;
     state.produce_block();

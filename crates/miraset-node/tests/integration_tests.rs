@@ -15,6 +15,9 @@ const DEVNET_SECRET: [u8; 32] = [1u8; 32];
 async fn spawn_test_node() -> String {
     let state = State::new();
 
+    // L1: genesis hash is persisted when storage is present. In-memory
+    // tests have no storage, so no verification is needed here.
+
     // Seed the devnet genesis account so the legacy integration assertions
     // (which expect a funded account at this address) still pass.
     let dev_key = KeyPair::from_bytes(&DEVNET_SECRET);
@@ -209,17 +212,7 @@ async fn test_rpc_submit_transaction() {
         signature: [0; 64],
     };
 
-    // Sign transaction
-    let mut tx_for_hash = tx.clone();
-    if let Transaction::Transfer { signature, .. } = &mut tx_for_hash {
-        *signature = [0; 64]
-    }
-    let msg = bincode::serialize(&tx_for_hash).unwrap();
-    let sig = kp.sign(&msg);
-
-    if let Transaction::Transfer { signature, .. } = &mut tx {
-        *signature = sig
-    }
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
 
     let response = client
         .post(format!("{}/tx/submit", url))

@@ -56,7 +56,7 @@ impl NodeClient {
         let owner = self.keypair.address();
         let pubkey = owner; // For simplicity, using same key
 
-        // Build TX with zero signature, serialize, sign, then fill signature
+        // Build TX and sign using the chain-scoped canonical message.
         let mut tx = Transaction::RegisterWorker {
             owner,
             pubkey,
@@ -69,21 +69,12 @@ impl NodeClient {
             signature: [0; 64],
         };
 
-        let msg = bincode::serialize(&tx)?;
-        let signature = self.keypair.sign(&msg);
-
-        if let Transaction::RegisterWorker {
-            signature: ref mut sig,
-            ..
-        } = tx
-        {
-            *sig = signature;
-        }
+        miraset_core::sign_transaction(&mut tx, &self.keypair)?;
 
         self.submit_transaction(tx).await?;
 
-        // Compute worker_id (matches node logic)
-        let worker_id_data = bincode::serialize(&(owner, pubkey))?;
+        // Compute worker_id (matches node logic, now derived from owner only)
+        let worker_id_data = bincode::serialize(&owner)?;
         let worker_id = blake3::hash(&worker_id_data).into();
 
         Ok(worker_id)
@@ -110,16 +101,7 @@ impl NodeClient {
             signature: [0; 64],
         };
 
-        let msg = bincode::serialize(&tx)?;
-        let signature = self.keypair.sign(&msg);
-
-        if let Transaction::SubmitJobResult {
-            signature: ref mut sig,
-            ..
-        } = tx
-        {
-            *sig = signature;
-        }
+        miraset_core::sign_transaction(&mut tx, &self.keypair)?;
 
         self.submit_transaction(tx).await?;
 
@@ -145,16 +127,7 @@ impl NodeClient {
             signature: [0; 64],
         };
 
-        let msg = bincode::serialize(&tx)?;
-        let signature = self.keypair.sign(&msg);
-
-        if let Transaction::AnchorReceipt {
-            signature: ref mut sig,
-            ..
-        } = tx
-        {
-            *sig = signature;
-        }
+        miraset_core::sign_transaction(&mut tx, &self.keypair)?;
 
         self.submit_transaction(tx).await?;
 
@@ -182,16 +155,7 @@ impl NodeClient {
             signature: [0; 64],
         };
 
-        let msg = bincode::serialize(&tx)?;
-        let signature = self.keypair.sign(&msg);
-
-        if let Transaction::SubmitResourceSnapshot {
-            signature: ref mut sig,
-            ..
-        } = tx
-        {
-            *sig = signature;
-        }
+        miraset_core::sign_transaction(&mut tx, &self.keypair)?;
 
         self.submit_transaction(tx).await?;
 

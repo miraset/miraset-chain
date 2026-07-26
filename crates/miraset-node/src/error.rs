@@ -39,6 +39,10 @@ pub enum StateError {
     NotOwner,
     #[error("version mismatch: expected {expected}, got {got}")]
     VersionMismatch { expected: u64, got: u64 },
+    #[error("gas error: {0}")]
+    GasError(String),
+    #[error("arithmetic overflow")]
+    ArithmeticOverflow,
     #[error("{0}")]
     Other(String),
 }
@@ -64,6 +68,12 @@ pub enum TxError {
     ObjectNotFound,
     #[error("escrow exceeds balance")]
     InsufficientEscrow,
+    #[error("gas budget exceeded")]
+    GasBudgetExceeded,
+    #[error("insufficient gas funds")]
+    InsufficientGas,
+    #[error("mempool is full")]
+    MempoolFull,
     #[error("serialization error: {0}")]
     Serialization(#[from] bincode::Error),
     #[error("{0}")]
@@ -76,6 +86,12 @@ impl From<String> for TxError {
     }
 }
 
+impl From<crate::gas::GasBudgetError> for TxError {
+    fn from(e: crate::gas::GasBudgetError) -> Self {
+        Self::Other(e.to_string())
+    }
+}
+
 impl TxError {
     fn status_code(&self) -> StatusCode {
         match self {
@@ -85,6 +101,9 @@ impl TxError {
             | Self::ObjectNotFound
             | Self::InsufficientBalance
             | Self::InsufficientEscrow
+            | Self::GasBudgetExceeded
+            | Self::InsufficientGas
+            | Self::MempoolFull
             | Self::Other(_) => StatusCode::BAD_REQUEST,
             Self::Serialization(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -106,9 +125,11 @@ impl StateError {
             | Self::ObjectNotFound(_)
             | Self::WorkerNotFound(_)
             | Self::JobNotFound(_) => StatusCode::NOT_FOUND,
-            Self::NotOwner | Self::VersionMismatch { .. } | Self::Other(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::NotOwner
+            | Self::VersionMismatch { .. }
+            | Self::Other(_)
+            | Self::GasError(_)
+            | Self::ArithmeticOverflow => StatusCode::BAD_REQUEST,
             Self::Storage(_) | Self::Serialization(_) | Self::NoGenesis => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

@@ -1,5 +1,6 @@
 use crate::epoch::JobResult as EpochJobResult;
 use crate::error::StateError;
+use crate::gas::GasConfig;
 use crate::state::{StateInner, jobs};
 use chrono::Utc;
 use miraset_core::{
@@ -15,21 +16,51 @@ pub(crate) fn execute_transaction_inner(
     tx: &Transaction,
     height: u64,
     balance_updates: &mut Vec<(Address, u64)>,
+    gas_config: &GasConfig,
 ) -> Result<(), StateError> {
     let tx_hash = tx.hash()?;
+    let from = *tx.from();
+
+    // --- Gas metering ---
+    // H1: enforce a deterministic execution fee on every transaction. The fee
+    // is charged up-front from the sender before the tx effect is applied.
+    // Full gas rollback is not implemented (the devnet executor mutates
+    // state directly); therefore the fee is conservative and matches the
+    // validation-time estimate.
+    let gas_units = crate::gas::estimate_gas_for_transaction(tx, gas_config);
+    let gas_price = gas_config.base_fee.max(1);
+    let gas_fee = crate::gas::gas_cost_tokens(gas_units, gas_price);
+    let sender_balance = w.balances.get(&from).copied().unwrap_or(0);
+    if sender_balance < gas_fee {
+        return Err(StateError::GasError(format!(
+            "sender balance {} cannot cover gas fee {}",
+            sender_balance, gas_fee
+        )));
+    }
+    let sender_after_gas = sender_balance - gas_fee;
+    w.balances.insert(from, sender_after_gas);
+    balance_updates.push((from, sender_after_gas));
 
     match tx {
         Transaction::Transfer {
             from, to, amount, ..
         } => {
             let balance = w.balances.get(from).copied().unwrap_or(0);
-            let new_from_balance = balance - amount;
+            let new_from_balance = balance
+                .checked_sub(*amount)
+                .ok_or(StateError::ArithmeticOverflow)?;
+            let new_to_balance = w
+                .balances
+                .get(to)
+                .copied()
+                .unwrap_or(0)
+                .checked_add(*amount)
+                .ok_or(StateError::ArithmeticOverflow)?;
             w.balances.insert(*from, new_from_balance);
-            let new_to_balance = w.balances.entry(*to).or_insert(0);
-            *new_to_balance += amount;
+            w.balances.insert(*to, new_to_balance);
 
             balance_updates.push((*from, new_from_balance));
-            balance_updates.push((*to, *new_to_balance));
+            balance_updates.push((*to, new_to_balance));
 
             let event = Event::Transferred {
                 from: *from,
@@ -62,10 +93,37 @@ pub(crate) fn execute_transaction_inner(
             stake_bond,
             ..
         } => {
+            // M1: worker identity must equal the verified owner/signer.
+            if pubkey != owner {
+                return Err(StateError::Other(
+                    "worker pubkey must equal transaction owner".to_string(),
+                ));
+            }
+
+            // M2: validate worker endpoints at registration time.
+            let allow_private = w.allow_private_endpoints;
+            let validated_endpoints: Vec<String> = endpoints
+                .iter()
+                .filter_map(
+                    |e| match crate::auth::validate_worker_endpoint(e, allow_private) {
+                        Ok(valid) => Some(valid),
+                        Err(err) => {
+                            tracing::warn!("rejecting worker endpoint {}: {}", e, err);
+                            None
+                        }
+                    },
+                )
+                .collect();
+            if validated_endpoints.is_empty() {
+                return Err(StateError::Other(
+                    "no valid worker endpoints provided".to_string(),
+                ));
+            }
+
             let data = ObjectData::WorkerRegistration {
-                worker_id: new_object_id(&bincode::serialize(&(owner, pubkey))?),
-                pubkey: *pubkey,
-                endpoints: endpoints.clone(),
+                worker_id: new_object_id(&bincode::serialize(owner)?),
+                pubkey: *owner,
+                endpoints: validated_endpoints,
                 gpu_model: gpu_model.clone(),
                 vram_total_gib: *vram_total_gib,
                 supported_models: supported_models.clone(),
@@ -126,7 +184,9 @@ pub(crate) fn execute_transaction_inner(
         } => {
             // Deduct escrow from requester
             let balance = w.balances.get(requester).copied().unwrap_or(0);
-            let new_balance = balance - escrow_amount;
+            let new_balance = balance
+                .checked_sub(*escrow_amount)
+                .ok_or(StateError::ArithmeticOverflow)?;
             w.balances.insert(*requester, new_balance);
 
             balance_updates.push((*requester, new_balance));

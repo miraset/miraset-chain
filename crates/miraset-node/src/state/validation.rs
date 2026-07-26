@@ -1,9 +1,11 @@
 use crate::error::TxError;
+use crate::gas::{GasBudget, estimate_gas_for_transaction, gas_cost_tokens};
 use crate::state::State;
 use miraset_core::Transaction;
+use std::sync::Arc;
 
-/// Validate a transaction (signature, nonce, type-specific rules) and enqueue
-/// it into the pending transaction pool.
+/// Validate a transaction (signature, nonce, gas, type-specific rules) and
+/// enqueue it into the pending transaction pool.
 ///
 /// This function is the implementation backing [`State::submit_transaction`].
 /// It is kept in a separate module so that the main `State` facade only
@@ -11,30 +13,11 @@ use miraset_core::Transaction;
 pub(crate) fn submit_transaction(state: &State, tx: Transaction) -> Result<(), TxError> {
     let from = tx.from();
     let nonce = tx.nonce();
-    let signature = tx.signature();
 
-    // D6: Verify signature for ALL transaction types using zero-sig canonical pattern
-    {
-        let mut tx_for_hash = tx.clone();
-        // Zero out signature for canonical hashing
-        match &mut tx_for_hash {
-            Transaction::Transfer { signature, .. }
-            | Transaction::ChatSend { signature, .. }
-            | Transaction::CreateObject { signature, .. }
-            | Transaction::MutateObject { signature, .. }
-            | Transaction::TransferObject { signature, .. }
-            | Transaction::RegisterWorker { signature, .. }
-            | Transaction::SubmitResourceSnapshot { signature, .. }
-            | Transaction::CreateJob { signature, .. }
-            | Transaction::AssignJob { signature, .. }
-            | Transaction::SubmitJobResult { signature, .. }
-            | Transaction::AnchorReceipt { signature, .. }
-            | Transaction::ChallengeJob { signature, .. } => *signature = [0; 64],
-        }
-        let msg = bincode::serialize(&tx_for_hash)?;
-        if !miraset_core::verify_signature(from, &msg, signature) {
-            return Err(TxError::InvalidSignature);
-        }
+    // D6: Verify signature for ALL transaction types using the chain-scoped
+    // canonical message.
+    if !miraset_core::verify_transaction_signature(&tx) {
+        return Err(TxError::InvalidSignature);
     }
 
     let mut w = state.inner.write();
@@ -48,11 +31,30 @@ pub(crate) fn submit_transaction(state: &State, tx: Transaction) -> Result<(), T
         });
     }
 
-    // Type-specific validation
+    // Mempool cap
+    if w.pending_txs.len() >= w.mempool_capacity {
+        return Err(TxError::MempoolFull);
+    }
+
+    // Gas pre-check: reject txs that cannot possibly afford the estimated
+    // execution cost. The tx still needs a gas coin / budget; for the
+    // account-model chain we use the sender's balance as the gas payer.
+    let gas_config = Arc::clone(&state.gas_config);
+    let estimated_gas = estimate_gas_for_transaction(&tx, &gas_config);
+    let min_budget = GasBudget::default_budget();
+    if estimated_gas > min_budget.max_gas_amount {
+        return Err(TxError::GasBudgetExceeded);
+    }
+
+    // Type-specific validation (including gas funds)
     match &tx {
         Transaction::Transfer { amount, .. } => {
             let balance = w.balances.get(from).copied().unwrap_or(0);
-            if balance < *amount {
+            let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
+            let total = amount
+                .checked_add(gas_cost)
+                .ok_or(TxError::InsufficientBalance)?;
+            if balance < total {
                 return Err(TxError::InsufficientBalance);
             }
         }
@@ -60,20 +62,38 @@ pub(crate) fn submit_transaction(state: &State, tx: Transaction) -> Result<(), T
             if message.is_empty() || message.len() > 1000 {
                 return Err(TxError::InvalidMessageLength);
             }
+            let balance = w.balances.get(from).copied().unwrap_or(0);
+            let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
+            if balance < gas_cost {
+                return Err(TxError::InsufficientGas);
+            }
         }
         Transaction::MutateObject { object_id, .. } => {
             if !w.objects.contains_key(object_id) {
                 return Err(TxError::ObjectNotFound);
             }
+            let balance = w.balances.get(from).copied().unwrap_or(0);
+            let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
+            if balance < gas_cost {
+                return Err(TxError::InsufficientGas);
+            }
         }
         Transaction::CreateJob { escrow_amount, .. } => {
             let balance = w.balances.get(from).copied().unwrap_or(0);
-            if balance < *escrow_amount {
+            let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
+            let total = escrow_amount
+                .checked_add(gas_cost)
+                .ok_or(TxError::InsufficientEscrow)?;
+            if balance < total {
                 return Err(TxError::InsufficientEscrow);
             }
         }
         _ => {
-            // Other transactions validated during execution
+            let balance = w.balances.get(from).copied().unwrap_or(0);
+            let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
+            if balance < gas_cost {
+                return Err(TxError::InsufficientGas);
+            }
         }
     }
 

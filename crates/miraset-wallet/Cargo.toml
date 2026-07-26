@@ -12,6 +12,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 hex.workspace = true
 rand.workspace = true
+tracing.workspace = true
 
 # D9: Wallet encryption
 aes-gcm = "0.10"

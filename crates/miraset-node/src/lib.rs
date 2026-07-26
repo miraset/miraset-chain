@@ -1,6 +1,7 @@
 #![warn(clippy::pedantic)]
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+pub mod auth;
 pub mod epoch;
 pub mod error;
 pub mod executor;
@@ -10,6 +11,7 @@ pub mod pocc_manager;
 pub mod rpc;
 pub mod state;
 pub mod storage;
+pub mod util;
 
 pub use epoch::{Epoch, EpochRewards, EpochStatus, WorkerEpochStats};
 pub use executor::{ExecutionContext, ExecutionStatus, TransactionEffects};
@@ -19,7 +21,7 @@ pub use pocc::{
     ComputeProof, GpuInfo, ModelInfo, PoccConsensus, Validator, ValidatorSet, ValidatorStatus,
 };
 pub use pocc_manager::PoccManager;
-pub use rpc::serve_rpc;
+pub use rpc::{RpcConfig, serve_rpc, serve_rpc_with_config};
 pub use state::State;
 pub use storage::Storage;
 

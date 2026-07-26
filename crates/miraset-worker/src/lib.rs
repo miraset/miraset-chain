@@ -11,6 +11,7 @@
 use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     extract::Path,
     http::StatusCode,
     response::IntoResponse,
@@ -22,7 +23,12 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
+use tower::ServiceBuilder;
+use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
+use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
+mod auth;
 mod backend;
 mod node_client;
 mod receipt;
@@ -48,12 +54,23 @@ pub struct WorkerConfig {
     /// for OpenAI cloud, `https://api.groq.com/openai/v1` for Groq).
     pub backend_url: String,
     /// Optional API key (Bearer auth). Required for cloud OpenAI-compatible
-    /// providers (OpenAI, Groq, OpenRouter, Together, ...); ignored by local
+    /// providers (OpenAI, Groq, OpenRouter, ...); ignored by local
     /// backends that don't use auth (Ollama, llama.cpp, TGI).
     pub backend_api_key: Option<String>,
     pub gpu_model: String,
     pub vram_total_gib: u32,
     pub supported_models: Vec<String>,
+    /// Shared secret for verifying node dispatch auth tags (hex-encoded 32 bytes).
+    /// When set, `/jobs/accept` rejects requests without a valid tag (H4).
+    pub dispatch_secret: Option<[u8; 32]>,
+    /// Max request body size in bytes.
+    pub max_body_size: usize,
+    /// Request timeout.
+    pub request_timeout: Duration,
+    /// Per-IP rate limit burst size (requests).
+    pub rate_limit_burst: u32,
+    /// Per-IP rate limit replenish interval.
+    pub rate_limit_period: Duration,
 }
 
 /// Worker state
@@ -96,6 +113,8 @@ pub struct AcceptJobRequest {
     pub model_id: String,
     pub max_tokens: u64,
     pub price_per_token: u64,
+    /// Authentication tag from the node when dispatch auth is configured.
+    pub auth_tag: Option<String>,
 }
 
 /// Job execution request
@@ -165,6 +184,35 @@ impl Worker {
         })
     }
 
+    /// Verify a dispatch authentication tag against the configured secret.
+    fn verify_dispatch_tag(&self, job_id: ObjectId, req: &AcceptJobRequest) -> Result<()> {
+        if let Some(secret) = self.config.dispatch_secret {
+            let tag_hex = req
+                .auth_tag
+                .as_ref()
+                .ok_or_else(|| anyhow!("missing dispatch auth tag"))?;
+            let tag = hex::decode(tag_hex)?;
+            if tag.len() != 32 {
+                return Err(anyhow!("invalid dispatch auth tag length"));
+            }
+            let mut tag_arr = [0u8; 32];
+            tag_arr.copy_from_slice(&tag);
+
+            let expected = auth::DispatchAuth::sign_dispatch(
+                &secret,
+                &job_id,
+                &self.config.worker_id,
+                req.epoch_id,
+                &req.model_id,
+                req.max_tokens,
+            );
+            if !auth::constant_time_eq(&expected, &tag_arr) {
+                return Err(anyhow!("invalid dispatch auth tag"));
+            }
+        }
+        Ok(())
+    }
+
     /// Create HTTP router
     pub fn router(self: Arc<Self>) -> Router {
         let accept_worker = Arc::clone(&self);
@@ -172,6 +220,14 @@ impl Worker {
         let stream_worker = Arc::clone(&self);
         let report_worker = Arc::clone(&self);
         let status_worker = Arc::clone(&self);
+
+        // M4 (residual): per-IP rate limiting on the worker surface. Defaults
+        // are generous for local inference clusters; tighten in production.
+        let governor_config = GovernorConfigBuilder::default()
+            .const_period(self.config.rate_limit_period)
+            .const_burst_size(self.config.rate_limit_burst)
+            .finish()
+            .expect("non-zero rate limit burst and period");
 
         Router::new()
             .route("/health", get(health_handler))
@@ -318,12 +374,25 @@ impl Worker {
                     }
                 }),
             )
+            .layer(
+                ServiceBuilder::new()
+                    .layer(GovernorLayer::new(governor_config))
+                    .layer(DefaultBodyLimit::max(self.config.max_body_size))
+                    .layer(RequestBodyLimitLayer::new(self.config.max_body_size))
+                    .layer(TimeoutLayer::with_status_code(
+                        StatusCode::REQUEST_TIMEOUT,
+                        self.config.request_timeout,
+                    )),
+            )
     }
 
     /// Accept a job assignment
     pub fn accept_job(&self, req: AcceptJobRequest) -> Result<()> {
         // Parse hex job_id
         let job_id = parse_object_id(&req.job_id)?;
+
+        // H4: verify dispatch authentication tag when a secret is configured.
+        self.verify_dispatch_tag(job_id, &req)?;
 
         let mut jobs = self.jobs.write();
 
@@ -590,6 +659,11 @@ mod tests {
             gpu_model: "NVIDIA RTX 4090".to_string(),
             vram_total_gib: 24,
             supported_models: vec!["llama2".to_string(), "mistral".to_string()],
+            dispatch_secret: None,
+            max_body_size: 2 * 1024 * 1024,
+            request_timeout: Duration::from_secs(30),
+            rate_limit_burst: 100,
+            rate_limit_period: Duration::from_secs(1),
         };
 
         let worker = Worker::new(config);
@@ -609,6 +683,11 @@ mod tests {
             gpu_model: "NVIDIA RTX 4090".to_string(),
             vram_total_gib: 24,
             supported_models: vec!["llama2".to_string()],
+            dispatch_secret: None,
+            max_body_size: 2 * 1024 * 1024,
+            request_timeout: Duration::from_secs(30),
+            rate_limit_burst: 100,
+            rate_limit_period: Duration::from_secs(1),
         };
 
         let worker = Worker::new(config);
@@ -619,6 +698,7 @@ mod tests {
             model_id: "llama2".to_string(),
             max_tokens: 1000,
             price_per_token: 10,
+            auth_tag: None,
         };
 
         let result = worker.accept_job(req);

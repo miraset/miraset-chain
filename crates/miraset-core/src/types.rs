@@ -68,6 +68,17 @@ pub type ObjectId = [u8; 32];
 /// Object version for optimistic concurrency control
 pub type Version = u64;
 
+/// Chain identifier used for replay protection.
+///
+/// Included in the canonical signing message for every transaction so that
+/// signatures are not reusable across different Miraset chains (I4).
+///
+/// This value is the BLAKE3 hash of `b"miraset-chain-devnet-1"`.
+pub const MIRASET_CHAIN_ID: [u8; 32] = [
+    0xf2, 0x28, 0xff, 0xdd, 0x8a, 0x6a, 0x45, 0x1f, 0x6b, 0xfe, 0x66, 0xb5, 0x4d, 0xce, 0x0b, 0x18,
+    0x6b, 0xf5, 0x3f, 0xbd, 0xb5, 0xcc, 0x9f, 0x3b, 0x8d, 0xeb, 0x38, 0x5e, 0xab, 0x60, 0x6d, 0x0c,
+];
+
 /// Generate a new unique ObjectId
 pub fn new_object_id(seed: &[u8]) -> ObjectId {
     blake3::hash(seed).into()
@@ -229,6 +240,10 @@ pub enum Transaction {
         signature: [u8; 64],
     },
     /// Register worker (creates WorkerRegistration object)
+    ///
+    /// The worker identity is the transaction signer (`owner`). The separate
+    /// `pubkey` field is retained for forwards compatibility but must equal
+    /// `owner`; nodes reject registrations where `pubkey != owner`.
     RegisterWorker {
         owner: Address,
         pubkey: Address,
@@ -365,6 +380,60 @@ impl Transaction {
         let bytes = bincode::serialize(self)?;
         Ok(blake3::hash(&bytes).into())
     }
+
+    /// Canonical signing bytes for this transaction.
+    ///
+    /// The signature field is zeroed, the chain id is prepended, and the
+    /// bincode-serialized transaction is appended. This is the message that
+    /// must be signed by the sender's Ed25519 key.
+    pub fn signing_bytes(&self) -> Result<Vec<u8>, bincode::Error> {
+        let mut tx_for_hash = self.clone();
+        tx_for_hash.set_signature([0; 64]);
+        let tx_bytes = bincode::serialize(&tx_for_hash)?;
+
+        let mut msg = MIRASET_CHAIN_ID.to_vec();
+        msg.extend_from_slice(&tx_bytes);
+        Ok(msg)
+    }
+
+    /// Replace the transaction signature in-place.
+    ///
+    /// Used by signers to zero out the signature field before computing the
+    /// canonical message hash, then to inject the final signature.
+    pub fn set_signature(&mut self, signature: [u8; 64]) {
+        match self {
+            Self::Transfer { signature: s, .. }
+            | Self::CreateObject { signature: s, .. }
+            | Self::MutateObject { signature: s, .. }
+            | Self::TransferObject { signature: s, .. }
+            | Self::RegisterWorker { signature: s, .. }
+            | Self::SubmitResourceSnapshot { signature: s, .. }
+            | Self::CreateJob { signature: s, .. }
+            | Self::AssignJob { signature: s, .. }
+            | Self::SubmitJobResult { signature: s, .. }
+            | Self::AnchorReceipt { signature: s, .. }
+            | Self::ChallengeJob { signature: s, .. }
+            | Self::ChatSend { signature: s, .. } => *s = signature,
+        }
+    }
+}
+
+/// Sign a transaction in-place using the canonical chain-scoped signing message.
+pub fn sign_transaction(
+    tx: &mut Transaction,
+    kp: &crate::crypto::KeyPair,
+) -> Result<(), bincode::Error> {
+    let msg = tx.signing_bytes()?;
+    tx.set_signature(kp.sign(&msg));
+    Ok(())
+}
+
+/// Verify a transaction's signature using the canonical chain-scoped message.
+pub fn verify_transaction_signature(tx: &Transaction) -> bool {
+    let Ok(msg) = tx.signing_bytes() else {
+        return false;
+    };
+    crate::crypto::verify_signature(tx.from(), &msg, tx.signature())
 }
 
 /// Block
@@ -726,5 +795,58 @@ mod tests {
 
         let expected_json = r#"{"event_type":"WorkerRegistered","worker_id":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"owner":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"gpu_model":"RTX-4090","vram_gib":24,"tx_hash":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"block_height":5}"#;
         assert_eq!(json, expected_json);
+    }
+
+    /// Serialization-stability guard for `Transaction` bincode.
+    ///
+    /// Transactions are both signed and persisted via bincode. Any layout
+    /// change must be a deliberate consensus-breaking event.
+    ///
+    /// Note: `Transaction` is an internally tagged enum, which bincode cannot
+    /// deserialize. We therefore freeze the canonical byte vector rather than
+    /// round-tripping through bincode.
+    #[test]
+    fn test_transaction_bincode_stability() {
+        let kp = KeyPair::from_bytes(&[1u8; 32]);
+        let tx = Transaction::Transfer {
+            from: kp.address(),
+            to: Address::from_bytes([2u8; 32]),
+            amount: 100,
+            nonce: 5,
+            signature: [0; 64],
+        };
+
+        let bytes = bincode::serialize(&tx).unwrap();
+
+        // Frozen byte vector for the transfer above. Update intentionally
+        // only when making a deliberate consensus-breaking layout change.
+        // Note: bincode serializes the serde-tagged enum discriminant as a
+        // length-prefixed UTF-8 string, and the signature as a 128-char hex
+        // string (64 bytes -> 128 nibbles).
+        let expected_hex = "08000000000000005472616e736665728a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c02020202020202020202020202020202020202020202020202020202020202026400000000000000050000000000000080000000000000003030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030";
+        assert_eq!(hex::encode(&bytes), expected_hex);
+    }
+
+    /// Serialization-stability guard for `ObjectData` bincode.
+    ///
+    /// Object data determines object IDs and on-chain hashes; layout changes
+    /// are consensus-breaking.
+    ///
+    /// Note: `ObjectData` is an internally tagged enum, which bincode cannot
+    /// deserialize. We therefore freeze the canonical byte vector rather than
+    /// round-tripping through bincode.
+    #[test]
+    fn test_objectdata_bincode_stability() {
+        let data = ObjectData::Account {
+            balance: 1234,
+            nonce: 7,
+        };
+
+        let bytes = bincode::serialize(&data).unwrap();
+
+        // Frozen byte vector for the Account variant above. The serde tag is
+        // serialized as a length-prefixed UTF-8 string before the fields.
+        let expected_hex = "07000000000000004163636f756e74d2040000000000000700000000000000";
+        assert_eq!(hex::encode(&bytes), expected_hex);
     }
 }

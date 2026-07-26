@@ -35,6 +35,8 @@ pub struct State {
     pub(crate) inner: Arc<RwLock<StateInner>>,
     pub(crate) storage: Option<Storage>,
     pub(crate) gas_config: Arc<GasConfig>,
+    pub(crate) dispatch_secret: Option<[u8; 32]>,
+    pub(crate) allow_private_endpoints: bool,
 }
 
 pub(crate) struct StateInner {
@@ -55,19 +57,71 @@ pub(crate) struct StateInner {
     // Epoch management
     pub(crate) current_epoch: Epoch,
     pub(crate) past_epochs: Vec<Epoch>,
+
+    // Mempool cap
+    pub(crate) mempool_capacity: usize,
+
+    // M2: allow loopback/private worker endpoints (default false)
+    pub(crate) allow_private_endpoints: bool,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self::new_with_storage(None)
+        let genesis = Block::genesis();
+        let now = Utc::now();
+        Self {
+            inner: Arc::new(RwLock::new(StateInner {
+                objects: HashMap::new(),
+                object_versions: HashMap::new(),
+                owned_objects: HashMap::new(),
+                balances: HashMap::new(),
+                nonces: HashMap::new(),
+                blocks: vec![genesis],
+                pending_txs: Vec::new(),
+                events: Vec::new(),
+                current_epoch: Epoch::new(0, now),
+                past_epochs: Vec::new(),
+                mempool_capacity: 10_000,
+                allow_private_endpoints: false,
+            })),
+            storage: None,
+            gas_config: Arc::new(GasConfig::default()),
+            dispatch_secret: None,
+            allow_private_endpoints: false,
+        }
     }
 
-    pub fn new_with_storage(storage: Option<Storage>) -> Self {
+    pub fn new_with_storage(storage: Option<Storage>) -> Result<Self, StateError> {
         let genesis = Block::genesis();
+        let genesis_hash = genesis.hash().unwrap_or([0; 32]);
         let now = Utc::now();
 
         // Try to load state from storage if available
         let (blocks, balances, nonces, events) = if let Some(ref store) = storage {
+            // L1: verify persisted genesis hash on reload.
+            match store.get_genesis_hash() {
+                Ok(Some(persisted)) if persisted != genesis_hash => {
+                    // Existing chain with a mismatched genesis is a serious
+                    // integrity issue; fail loudly rather than silently
+                    // continuing with a different genesis.
+                    return Err(StateError::Other(
+                        "genesis hash mismatch: storage chain was initialized with a different genesis".to_string(),
+                    ));
+                }
+                Ok(Some(_)) => {
+                    tracing::debug!("genesis hash verified against storage");
+                }
+                Ok(None) => {
+                    // First run with this storage: persist the genesis hash.
+                    if let Err(e) = store.save_genesis_hash(&genesis_hash) {
+                        tracing::warn!("failed to save genesis hash: {}", e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("failed to load genesis hash: {}", e);
+                }
+            }
+
             // Load latest block or use genesis
             let blocks = if let Ok(Some(latest)) = store.get_latest_block() {
                 // Load all blocks from 0 to latest height
@@ -93,7 +147,7 @@ impl State {
             (vec![genesis], HashMap::new(), HashMap::new(), Vec::new())
         };
 
-        Self {
+        Ok(Self {
             inner: Arc::new(RwLock::new(StateInner {
                 objects: HashMap::new(),
                 object_versions: HashMap::new(),
@@ -105,9 +159,29 @@ impl State {
                 events,
                 current_epoch: Epoch::new(0, now),
                 past_epochs: Vec::new(),
+                mempool_capacity: 10_000,
+                allow_private_endpoints: false,
             })),
             storage,
             gas_config: Arc::new(GasConfig::default()),
+            dispatch_secret: None,
+            allow_private_endpoints: false,
+        })
+    }
+
+    /// Configure the shared secret used to authenticate node->worker job
+    /// dispatches (H4). When set, the node signs every `/jobs/accept` call
+    /// and the worker should verify the tag.
+    pub fn set_dispatch_secret(&mut self, secret: [u8; 32]) {
+        self.dispatch_secret = Some(secret);
+    }
+
+    /// Allow worker endpoints that resolve to loopback/private addresses.
+    /// Default is false (M2).
+    pub fn set_allow_private_endpoints(&mut self, allow: bool) {
+        self.allow_private_endpoints = allow;
+        if let Some(mut w) = self.inner.try_write() {
+            w.allow_private_endpoints = allow;
         }
     }
 
@@ -209,6 +283,9 @@ impl State {
         let mut nonce_updates: Vec<(Address, u64)> = Vec::with_capacity(transactions.len());
         let mut balance_updates: Vec<(Address, u64)> = Vec::new();
 
+        // Snapshot gas configuration for this block.
+        let gas_config = Arc::clone(&self.gas_config);
+
         // Execute transactions
         for tx in &transactions {
             // Update nonce
@@ -217,8 +294,14 @@ impl State {
             *new_nonce += 1;
             nonce_updates.push((*from, *new_nonce));
 
-            // Execute transaction
-            execution::execute_transaction_inner(&mut w, tx, height, &mut balance_updates)?;
+            // Execute transaction with gas metering
+            execution::execute_transaction_inner(
+                &mut w,
+                tx,
+                height,
+                &mut balance_updates,
+                &gas_config,
+            )?;
         }
 
         // Compute deterministic state root after all mutations
