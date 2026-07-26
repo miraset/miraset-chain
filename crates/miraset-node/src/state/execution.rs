@@ -100,7 +100,6 @@ pub(crate) fn execute_transaction_inner(
             worker_id,
             epoch_id,
             vram_avail_gib,
-            owner: _,
             ..
         } => {
             // Add VRAM snapshot to epoch stats

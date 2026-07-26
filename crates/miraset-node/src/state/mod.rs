@@ -1,7 +1,9 @@
+mod epoch_hooks;
 mod execution;
 mod jobs;
+mod validation;
 
-use crate::epoch::{Epoch, EpochStatus, JobResult as EpochJobResult, WorkerEpochStats};
+use crate::epoch::Epoch;
 use crate::error::{StateError, TxError};
 use crate::gas::GasConfig;
 use crate::storage::Storage;
@@ -11,6 +13,23 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Shared, lock-protected node state.
+///
+/// # Concurrency contract
+/// All reads and writes to the in-memory [`StateInner`] go through an
+/// `Arc<RwLock<StateInner>>` using `parking_lot::RwLock`. Methods on `State`
+/// acquire the lock for the shortest time possible:
+///
+/// * Read-only queries use `self.inner.read()`.
+/// * Mutations use `self.inner.write()`.
+/// * `produce_block` builds the block under the write lock, then **drops the
+///   lock** before performing Sled persistence, and finally reacquires a brief
+///   write lock to restore events to the in-memory history.
+///
+/// Axum handlers are async but call these synchronous locks, which will block
+/// the Tokio worker thread under contention. This is acceptable for the
+/// single-node devnet but would need `tokio::sync::RwLock` or blocking tasks
+/// if scaled beyond one process.
 #[derive(Clone)]
 pub struct State {
     pub(crate) inner: Arc<RwLock<StateInner>>,
@@ -133,77 +152,7 @@ impl State {
     }
 
     pub fn submit_transaction(&self, tx: Transaction) -> Result<(), TxError> {
-        // Basic validation
-        let from = tx.from();
-        let nonce = tx.nonce();
-        let signature = tx.signature();
-
-        // D6: Verify signature for ALL transaction types using zero-sig canonical pattern
-        {
-            let mut tx_for_hash = tx.clone();
-            // Zero out signature for canonical hashing
-            match &mut tx_for_hash {
-                Transaction::Transfer { signature, .. } => *signature = [0; 64],
-                Transaction::ChatSend { signature, .. } => *signature = [0; 64],
-                Transaction::CreateObject { signature, .. } => *signature = [0; 64],
-                Transaction::MutateObject { signature, .. } => *signature = [0; 64],
-                Transaction::TransferObject { signature, .. } => *signature = [0; 64],
-                Transaction::RegisterWorker { signature, .. } => *signature = [0; 64],
-                Transaction::SubmitResourceSnapshot { signature, .. } => *signature = [0; 64],
-                Transaction::CreateJob { signature, .. } => *signature = [0; 64],
-                Transaction::AssignJob { signature, .. } => *signature = [0; 64],
-                Transaction::SubmitJobResult { signature, .. } => *signature = [0; 64],
-                Transaction::AnchorReceipt { signature, .. } => *signature = [0; 64],
-                Transaction::ChallengeJob { signature, .. } => *signature = [0; 64],
-            }
-            let msg = bincode::serialize(&tx_for_hash)?;
-            if !miraset_core::verify_signature(from, &msg, signature) {
-                return Err(TxError::InvalidSignature);
-            }
-        }
-
-        let mut w = self.inner.write();
-
-        // Check nonce
-        let current_nonce = w.nonces.get(from).copied().unwrap_or(0);
-        if nonce != current_nonce {
-            return Err(TxError::InvalidNonce {
-                expected: current_nonce,
-                got: nonce,
-            });
-        }
-
-        // Type-specific validation
-        match &tx {
-            Transaction::Transfer { amount, .. } => {
-                let balance = w.balances.get(from).copied().unwrap_or(0);
-                if balance < *amount {
-                    return Err(TxError::InsufficientBalance);
-                }
-            }
-            Transaction::ChatSend { message, .. } => {
-                if message.is_empty() || message.len() > 1000 {
-                    return Err(TxError::InvalidMessageLength);
-                }
-            }
-            Transaction::MutateObject { object_id, .. } => {
-                if !w.objects.contains_key(object_id) {
-                    return Err(TxError::ObjectNotFound);
-                }
-            }
-            Transaction::CreateJob { escrow_amount, .. } => {
-                let balance = w.balances.get(from).copied().unwrap_or(0);
-                if balance < *escrow_amount {
-                    return Err(TxError::InsufficientEscrow);
-                }
-            }
-            _ => {
-                // Other transactions validated during execution
-            }
-        }
-
-        w.pending_txs.push(tx);
-        Ok(())
+        validation::submit_transaction(self, tx)
     }
 
     /// Compute a deterministic state root from the current in-memory state.
@@ -588,68 +537,22 @@ impl State {
         self.inner.read().current_epoch.clone()
     }
 
-    /// Update epoch state
+    /// Update epoch state.
     pub fn update_epoch(&self) {
-        let now = Utc::now();
-        let mut w = self.inner.write();
-
-        let old_status = w.current_epoch.status.clone();
-        w.current_epoch.update_status(now);
-
-        // If epoch is settled, start new epoch
-        if w.current_epoch.status == EpochStatus::Settled && old_status != EpochStatus::Settled {
-            tracing::info!("Epoch {} settled, starting new epoch", w.current_epoch.id);
-
-            // Calculate and distribute rewards
-            let rewards = w.current_epoch.calculate_rewards();
-            for (_, reward) in rewards.worker_rewards {
-                let balance = w.balances.entry(reward.owner).or_insert(0);
-                *balance += reward.total_reward;
-
-                // Persist to storage
-                if let Some(ref storage) = self.storage {
-                    let _ = storage.save_balance(&reward.owner, *balance);
-                }
-            }
-
-            // Archive current epoch and start new one
-            let next_epoch_id = w.current_epoch.id + 1;
-            let finished_epoch =
-                std::mem::replace(&mut w.current_epoch, Epoch::new(next_epoch_id, now));
-            w.past_epochs.push(finished_epoch);
-        }
+        epoch_hooks::update_epoch(self);
     }
 
-    /// Record worker heartbeat
+    /// Record worker heartbeat.
     pub fn record_worker_heartbeat(&self, worker_id: &ObjectId, success: bool) {
-        let mut w = self.inner.write();
-
-        // Get worker owner from object
-        let owner = if let Some(obj) = w.objects.get(worker_id) {
-            obj.owner
-        } else {
-            return;
-        };
-
-        let stats = w
-            .current_epoch
-            .worker_stats
-            .entry(*worker_id)
-            .or_insert_with(|| WorkerEpochStats::new(*worker_id, owner));
-
-        stats.record_heartbeat(success);
+        epoch_hooks::record_worker_heartbeat(self, worker_id, success);
     }
 
-    /// Add VRAM snapshot for worker
+    /// Add VRAM snapshot for worker.
     pub fn add_vram_snapshot(&self, worker_id: &ObjectId, vram_gib: f64) {
-        let mut w = self.inner.write();
-
-        if let Some(stats) = w.current_epoch.worker_stats.get_mut(worker_id) {
-            stats.add_vram_snapshot(vram_gib);
-        }
+        epoch_hooks::add_vram_snapshot(self, worker_id, vram_gib);
     }
 
-    /// Record job completion for epoch settlement
+    /// Record job completion for epoch settlement.
     pub fn record_job_completion(
         &self,
         job_id: &ObjectId,
@@ -658,19 +561,14 @@ impl State {
         output_tokens: u64,
         receipt_hash: [u8; 32],
     ) {
-        let mut w = self.inner.write();
-
-        let cost = output_tokens * crate::epoch::PRICE_PER_TOKEN;
-        let result = EpochJobResult {
-            job_id: *job_id,
-            worker_id: *worker_id,
-            requester: *requester,
+        epoch_hooks::record_job_completion(
+            self,
+            job_id,
+            worker_id,
+            requester,
             output_tokens,
             receipt_hash,
-            cost,
-        };
-
-        w.current_epoch.add_job_result(result);
+        );
     }
 
     /// Get the HTTP endpoint of a registered worker.
