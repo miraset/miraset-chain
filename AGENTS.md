@@ -62,6 +62,7 @@ Follow all instructions from that file unless overridden below.
   - `npm run lint` → `cargo clippy --workspace --all-targets -- -D clippy::unwrap_used -D clippy::expect_used`
   - `npm run lint:pedantic` → runs with `-W clippy::pedantic` as a non-blocking baseline
 - `clippy.toml` contains project-level clippy configuration (MSRV, thresholds, exported-API tolerance, unwrap-in-tests allowance).
+- `rust-toolchain.toml` pins the toolchain to `1.97.1` with `rustfmt` and `clippy` components.
 - `cargo fmt --all -- --check` and `cargo test --workspace` are also CI gates.
 - `Object::new` and `Object::hash` return `Result<_, bincode::Error>`; callers must propagate or handle the error.
 - `State::create_object_from_data` now returns `Result<ObjectId, StateError>`.
