@@ -54,6 +54,14 @@ Follow all instructions from that file unless overridden below.
 - External AI backend is selected via `MIRASET_BACKEND_TYPE` (default `ollama`). Implementations in `crates/miraset-worker/src/backend.rs`: `OllamaBackend` (`/api/generate`, `/api/tags`), `OpenAiCompatibleBackend` (`/v1/chat/completions`, `/v1/models`; covers LM Studio, vLLM, LocalAI, llama.cpp OpenAI shim, TGI OpenAI shim, and cloud OpenAI/Groq/OpenRouter/Together — cloud requires `MIRASET_BACKEND_API_KEY`), `OpenLlmBackend` (BentoML OpenLLM `/v1/chat/completions`, `/v1/models`), `LlamaCppBackend` (native llama.cpp `/completion`, `/props`, `/health`; one model per server, ignores per-request `model`), `TgiBackend` (HuggingFace TGI `/generate`, `/info`; one model per instance). All backends share a deterministic mock-fallback when the engine is unreachable. Per-backend default model sets are exposed by `BackendType::default_models()`.
 - Multi-node Docker dev setup is defined in `docker-compose.yml` (ports 9944-9947). Single-node test setup in `docker-compose.test.yml`.
 
+## Code quality / linting policy
+- Every crate root in `crates/` enables `#![warn(clippy::pedantic)]` and `#![deny(clippy::unwrap_used, clippy::expect_used)]`.
+- Tests are allowed to use `unwrap()`/`expect()` via `#![allow(clippy::unwrap_used, clippy::expect_used)]` inside each `#[cfg(test)]` module.
+- CI enforces the safety-critical lint set: `cargo clippy --workspace --all-targets -- -D clippy::unwrap_used -D clippy::expect_used`.
+- `cargo fmt --all -- --check` and `cargo test --workspace` are also CI gates.
+- `Object::new` and `Object::hash` return `Result<_, bincode::Error>`; callers must propagate or handle the error.
+- `State::create_object_from_data` now returns `Result<ObjectId, StateError>`.
+
 ## Existing agent-instruction sources scanned
 - `README.md`, `wallet/README.md`, `wallet/src-tauri/README.md`, `tools/launcher/README.md`, `crates/miraset-launcher/README.md`, `crates/miraset-worker/README.md`.
 - No dedicated repo-level AI rules file was found in the scanned patterns (`AGENT.md`, `CLAUDE.md`, `.cursorrules`, etc.).

@@ -1,3 +1,6 @@
+#![warn(clippy::pedantic)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 use clap::{Parser, Subcommand};
 use miraset_core::{Address, KeyPair, Transaction};
 use miraset_node::{State, Storage};
@@ -434,6 +437,7 @@ fn sign_transaction(tx: &mut Transaction, kp: &KeyPair) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::collections::HashMap;
     use std::io::Write;

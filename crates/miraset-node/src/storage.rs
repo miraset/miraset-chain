@@ -144,6 +144,7 @@ impl Storage {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use miraset_core::KeyPair;
     use tempfile::TempDir;

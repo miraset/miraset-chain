@@ -1,5 +1,6 @@
 // Integration tests for Miraset Chain
 // Boots an in-process node so these tests run without an external server.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use miraset_core::{KeyPair, Transaction};
 use miraset_node::{State, serve_rpc};
 use reqwest::Client;

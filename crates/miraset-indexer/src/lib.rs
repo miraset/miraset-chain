@@ -1,3 +1,6 @@
+#![warn(clippy::pedantic)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 // Placeholder for indexer - will be expanded in future iterations
 // This crate will consume events from the chain and store them in Postgres
 

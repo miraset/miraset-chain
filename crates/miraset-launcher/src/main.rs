@@ -1,3 +1,6 @@
+#![warn(clippy::pedantic)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 use std::io;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

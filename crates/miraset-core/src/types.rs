@@ -171,19 +171,19 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn new(owner: Address, data: ObjectData) -> Self {
-        let id = new_object_id(&bincode::serialize(&data).unwrap());
-        Self {
+    pub fn new(owner: Address, data: ObjectData) -> Result<Self, bincode::Error> {
+        let id = new_object_id(&bincode::serialize(&data)?);
+        Ok(Self {
             id,
             version: 0,
             owner,
             data,
-        }
+        })
     }
 
-    pub fn hash(&self) -> [u8; 32] {
-        let bytes = bincode::serialize(self).unwrap();
-        blake3::hash(&bytes).into()
+    pub fn hash(&self) -> Result<[u8; 32], bincode::Error> {
+        let bytes = bincode::serialize(self)?;
+        Ok(blake3::hash(&bytes).into())
     }
 }
 
@@ -508,6 +508,7 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::crypto::KeyPair;
 
@@ -529,7 +530,7 @@ mod tests {
             nonce: 0,
         };
 
-        let obj = Object::new(kp.address(), data);
+        let obj = Object::new(kp.address(), data).unwrap();
         assert_eq!(obj.version, 0);
         assert_eq!(obj.owner, kp.address());
     }

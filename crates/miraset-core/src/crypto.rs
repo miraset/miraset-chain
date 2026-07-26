@@ -95,6 +95,7 @@ pub fn verify_signature(address: &Address, message: &[u8], signature: &[u8; 64])
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

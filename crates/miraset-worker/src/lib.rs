@@ -1,3 +1,6 @@
+#![warn(clippy::pedantic)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 /// Miraset Worker Runtime
 ///
 /// Ollama-like HTTP server that:
@@ -418,8 +421,9 @@ impl Worker {
             job.prompt.clone(),
             job.response.clone(),
             job.output_tokens,
-            job.started_at.unwrap(),
-            job.completed_at.unwrap(),
+            job.started_at.ok_or_else(|| anyhow!("Job not started"))?,
+            job.completed_at
+                .ok_or_else(|| anyhow!("Job not completed"))?,
         )?;
 
         // Compute canonical hash
@@ -570,6 +574,7 @@ fn parse_object_id(hex: &str) -> Result<ObjectId> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

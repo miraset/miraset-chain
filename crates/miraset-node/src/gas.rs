@@ -106,7 +106,11 @@ impl GasBudget {
     }
 
     pub fn default_budget() -> Self {
-        Self::new(10_000_000, GAS_PRICE_UNIT).unwrap()
+        Self {
+            max_gas_amount: 10_000_000,
+            gas_price: GAS_PRICE_UNIT,
+            total_budget: 10_000_000_u64.saturating_mul(GAS_PRICE_UNIT),
+        }
     }
 }
 
@@ -335,6 +339,7 @@ impl GasCoin {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

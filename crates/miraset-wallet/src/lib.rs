@@ -1,3 +1,6 @@
+#![warn(clippy::pedantic)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 use anyhow::{Context, Result};
 use miraset_core::{Address, KeyPair};
 use serde::{Deserialize, Serialize};
@@ -260,6 +263,7 @@ fn decrypt_wallet_data(envelope: &EncryptedWallet, password: &str) -> Result<Wal
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::fs;
     use tempfile::TempDir;

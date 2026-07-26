@@ -124,7 +124,7 @@ impl ExecutionContext {
         gas.charge_computation(2000).map_err(|e| anyhow!(e))?;
 
         // Create object
-        let object = Object::new(creator, data);
+        let object = Object::new(creator, data)?;
         let object_id = object.id;
 
         // Store object
@@ -250,6 +250,7 @@ pub struct Event {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
