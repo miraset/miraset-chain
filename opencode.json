@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "node_modules/@daochild/agents-config/AGENTS.md",
+    "AGENTS.md"
+  ],
+  "skills": {
+    "paths": [
+      ".agents/skills",
+      ".opencode/skill",
+      ".opencode/skills",
+      ".claude/skills"
+    ]
+  }
+}

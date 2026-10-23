@@ -1,6 +1,6 @@
 {
   "name": "@miraset/miraset-chain",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Decentralized GPU compute marketplace for AI inference. Sui-like object-centric chain with Proof of Compute & Capacity (PoCC), epoch-based settlement, and pluggable inference backends (Ollama, LM Studio, vLLM, LocalAI, llama.cpp, OpenLLM, TGI, plus cloud OpenAI-compatible providers).",
   "license": "GPL-3.0",
   "private": true,
@@ -45,6 +45,7 @@
     "worker:start": "cargo run --bin miraset-worker"
   },
   "devDependencies": {
-    "@daochild/agents-config": "^1.0.5"
+    "@daochild/agents-config": "^1.2.1",
+    "opencode-ai": "^1.19.4"
   }
 }
