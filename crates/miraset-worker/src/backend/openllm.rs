@@ -3,12 +3,12 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// BentoML OpenLLM backend.
+/// `BentoML` `OpenLLM` backend.
 ///
-/// OpenLLM exposes a BentoML-style HTTP API alongside an OpenAI-compatible
-/// surface. This backend uses the **native** BentoML endpoints so we get
-/// exact token counts and per-request model selection (OpenLLM supports
-/// `adapter_name` for LoRA and `model_id` for runtime model swap on
+/// `OpenLLM` exposes a BentoML-style HTTP API alongside an OpenAI-compatible
+/// surface. This backend uses the **native** `BentoML` endpoints so we get
+/// exact token counts and per-request model selection (`OpenLLM` supports
+/// `adapter_name` for `LoRA` and `model_id` for runtime model swap on
 /// multi-model deployments).
 ///
 /// Endpoints used:
@@ -25,6 +25,7 @@ pub struct OpenLlmBackend {
 }
 
 impl OpenLlmBackend {
+    #[must_use]
     pub fn new(base_url: String) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -131,7 +132,10 @@ impl InferenceBackend for OpenLlmBackend {
             .and_then(|u| u.completion_tokens)
             .unwrap_or_else(|| text.split_whitespace().count() as u64);
 
-        let tokens: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
+        let tokens: Vec<String> = text
+            .split_whitespace()
+            .map(std::string::ToString::to_string)
+            .collect();
 
         Ok(GenerationResponse {
             text,

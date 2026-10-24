@@ -15,6 +15,7 @@ pub struct LlamaCppBackend {
 }
 
 impl LlamaCppBackend {
+    #[must_use]
     pub fn new(url: String) -> Self {
         Self {
             url: url.trim_end_matches('/').to_string(),
@@ -117,7 +118,7 @@ impl InferenceBackend for LlamaCppBackend {
         let tokens: Vec<String> = lcpp_response
             .content
             .split_whitespace()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let token_count = lcpp_response
             .tokens_predicted

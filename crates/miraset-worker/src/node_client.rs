@@ -10,6 +10,7 @@ pub struct NodeClient {
 }
 
 impl NodeClient {
+    #[must_use]
     pub fn new(base_url: String, keypair: KeyPair) -> Self {
         Self {
             base_url,
@@ -37,7 +38,7 @@ impl NodeClient {
 
         if !response.status().is_success() {
             let error_text = response.text().await?;
-            anyhow::bail!("Failed to submit transaction: {}", error_text);
+            anyhow::bail!("Failed to submit transaction: {error_text}");
         }
 
         Ok(())

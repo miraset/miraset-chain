@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 /// - `GET  {base_url}/v1/models`
 ///
 /// `base_url` should be the origin (e.g. `http://localhost:1234/v1` for LM
-/// Studio, `https://api.openai.com/v1` for OpenAI, `https://api.groq.com/openai/v1`
-/// for Groq, `https://openrouter.ai/api/v1` for OpenRouter). When `api_key` is
+/// Studio, `https://api.openai.com/v1` for `OpenAI`, `https://api.groq.com/openai/v1`
+/// for Groq, `https://openrouter.ai/api/v1` for `OpenRouter`). When `api_key` is
 /// set, requests carry `Authorization: Bearer <key>`.
 pub struct OpenAiCompatibleBackend {
     base_url: String,
@@ -20,6 +20,7 @@ pub struct OpenAiCompatibleBackend {
 }
 
 impl OpenAiCompatibleBackend {
+    #[must_use]
     pub fn new(base_url: String, api_key: Option<String>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -139,7 +140,10 @@ impl InferenceBackend for OpenAiCompatibleBackend {
             .and_then(|u| u.completion_tokens)
             .unwrap_or_else(|| text.split_whitespace().count() as u64);
 
-        let tokens: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
+        let tokens: Vec<String> = text
+            .split_whitespace()
+            .map(std::string::ToString::to_string)
+            .collect();
 
         Ok(GenerationResponse {
             text,

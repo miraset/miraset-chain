@@ -51,10 +51,10 @@ pub struct WorkerConfig {
     pub backend_type: BackendType,
     /// Base URL of the inference backend (e.g. `http://localhost:11434` for
     /// Ollama, `http://localhost:1234/v1` for LM Studio, `https://api.openai.com/v1`
-    /// for OpenAI cloud, `https://api.groq.com/openai/v1` for Groq).
+    /// for `OpenAI` cloud, `https://api.groq.com/openai/v1` for Groq).
     pub backend_url: String,
     /// Optional API key (Bearer auth). Required for cloud OpenAI-compatible
-    /// providers (OpenAI, Groq, OpenRouter, ...); ignored by local
+    /// providers (`OpenAI`, Groq, `OpenRouter`, ...); ignored by local
     /// backends that don't use auth (Ollama, llama.cpp, TGI).
     pub backend_api_key: Option<String>,
     pub gpu_model: String,
@@ -163,6 +163,7 @@ mod signature_serde {
 }
 
 impl Worker {
+    #[must_use]
     pub fn new(config: WorkerConfig) -> Arc<Self> {
         let backend: Arc<dyn InferenceBackend> = match config.backend_type {
             BackendType::Ollama => Arc::new(OllamaBackend::new(config.backend_url.clone())),
@@ -257,7 +258,7 @@ impl Worker {
                     let worker = Arc::clone(&accept_worker);
                     async move {
                         match worker.accept_job(req) {
-                            Ok(_) => (
+                            Ok(()) => (
                                 StatusCode::OK,
                                 Json(serde_json::json!({ "status": "accepted" })),
                             )
@@ -285,7 +286,7 @@ impl Worker {
                     };
 
                         match worker.run_job(job_id, req).await {
-                            Ok(_) => (
+                            Ok(()) => (
                                 StatusCode::OK,
                                 Json(serde_json::json!({ "status": "completed" })),
                             )
@@ -568,15 +569,17 @@ impl Worker {
     }
 
     /// Get worker config (for heartbeat loop)
+    #[must_use]
     pub fn worker_id(&self) -> ObjectId {
         self.config.worker_id
     }
 
+    #[must_use]
     pub fn vram_total_gib(&self) -> u32 {
         self.config.vram_total_gib
     }
 
-    /// Start heartbeat loop — sends ResourceSnapshot TX every `interval` seconds
+    /// Start heartbeat loop — sends `ResourceSnapshot` TX every `interval` seconds
     pub fn start_heartbeat_loop(self: Arc<Self>, worker_id: ObjectId, interval_secs: u64) {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
@@ -584,14 +587,11 @@ impl Worker {
                 ticker.tick().await;
 
                 // Ping node to check connectivity
-                match self.node_client.ping().await {
-                    Ok(true) => {
-                        tracing::debug!("Heartbeat: node is reachable");
-                    }
-                    _ => {
-                        tracing::warn!("Heartbeat: node is unreachable, skipping snapshot");
-                        continue;
-                    }
+                if let Ok(true) = self.node_client.ping().await {
+                    tracing::debug!("Heartbeat: node is reachable");
+                } else {
+                    tracing::warn!("Heartbeat: node is unreachable, skipping snapshot");
+                    continue;
                 }
 
                 // Get current epoch id from node
@@ -619,7 +619,7 @@ impl Worker {
                     .submit_resource_snapshot(worker_id, epoch_id, vram_avail)
                     .await
                 {
-                    Ok(_) => {
+                    Ok(()) => {
                         tracing::info!(
                             "♥ Heartbeat sent: epoch={}, vram_avail={}GiB",
                             epoch_id,
@@ -650,7 +650,7 @@ async fn ping_handler() -> impl IntoResponse {
     }))
 }
 
-/// Parse ObjectId from hex string
+/// Parse `ObjectId` from hex string
 fn parse_object_id(hex: &str) -> Result<ObjectId> {
     let bytes = hex::decode(hex)?;
     if bytes.len() != 32 {

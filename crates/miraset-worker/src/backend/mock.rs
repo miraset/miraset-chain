@@ -8,6 +8,7 @@ pub struct MockBackend {
 }
 
 impl MockBackend {
+    #[must_use]
     pub fn new(models: Vec<String>) -> Self {
         Self { models }
     }
@@ -23,8 +24,11 @@ impl InferenceBackend for MockBackend {
         _temperature: Option<f32>,
         _top_p: Option<f32>,
     ) -> Result<GenerationResponse> {
-        let text = format!("Mock response to: {}", prompt);
-        let tokens: Vec<String> = text.split_whitespace().map(|s| s.to_string()).collect();
+        let text = format!("Mock response to: {prompt}");
+        let tokens: Vec<String> = text
+            .split_whitespace()
+            .map(std::string::ToString::to_string)
+            .collect();
         let token_count = tokens.len().min(max_tokens as usize) as u64;
 
         Ok(GenerationResponse {

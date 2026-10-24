@@ -10,6 +10,7 @@ pub struct OllamaBackend {
 }
 
 impl OllamaBackend {
+    #[must_use]
     pub fn new(url: String) -> Self {
         Self {
             url,
@@ -85,7 +86,7 @@ impl InferenceBackend for OllamaBackend {
         let tokens: Vec<String> = ollama_response
             .response
             .split_whitespace()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let token_count = tokens.len() as u64;
 

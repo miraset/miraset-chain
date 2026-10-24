@@ -3,7 +3,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-/// HuggingFace text-generation-inference (TGI) backend.
+/// `HuggingFace` text-generation-inference (TGI) backend.
 ///
 /// Endpoint shapes:
 /// - `POST {url}/generate` — `{inputs, parameters:{max_new_tokens,...}}`
@@ -17,6 +17,7 @@ pub struct TgiBackend {
 }
 
 impl TgiBackend {
+    #[must_use]
     pub fn new(url: String) -> Self {
         Self {
             url: url.trim_end_matches('/').to_string(),
@@ -109,7 +110,7 @@ impl InferenceBackend for TgiBackend {
         let tokens: Vec<String> = tgi_response
             .generated_text
             .split_whitespace()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         let token_count = tokens.len() as u64;
 
@@ -123,16 +124,13 @@ impl InferenceBackend for TgiBackend {
 
     async fn is_model_loaded(&self, model: &str) -> Result<bool> {
         // TGI serves one model per instance; `/info` exposes its id.
-        match self.info_model_id().await {
-            Some(id) => {
-                Ok(id.eq_ignore_ascii_case(model) || id.contains(model) || model.contains(&id))
-            }
-            None => {
-                // Couldn't read /info — probe a bare GET on /info for health.
-                let url = format!("{}/info", self.url);
-                let resp = self.client.get(&url).send().await;
-                Ok(matches!(resp, Ok(r) if r.status().is_success()))
-            }
+        if let Some(id) = self.info_model_id().await {
+            Ok(id.eq_ignore_ascii_case(model) || id.contains(model) || model.contains(&id))
+        } else {
+            // Couldn't read /info — probe a bare GET on /info for health.
+            let url = format!("{}/info", self.url);
+            let resp = self.client.get(&url).send().await;
+            Ok(matches!(resp, Ok(r) if r.status().is_success()))
         }
     }
 

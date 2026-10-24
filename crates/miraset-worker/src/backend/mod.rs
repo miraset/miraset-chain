@@ -3,10 +3,10 @@
 /// Supports multiple backends:
 /// - `OllamaBackend` (local Ollama, native `/api/generate` + `/api/tags`)
 /// - `OpenAiCompatibleBackend` (any OpenAI-compatible endpoint: LM Studio, vLLM,
-///   LocalAI, llama.cpp OpenAI shim, TGI OpenAI shim, and cloud providers like
-///   OpenAI, Groq, OpenRouter, Together — requires `api_key` for cloud)
+///   `LocalAI`, llama.cpp `OpenAI` shim, TGI `OpenAI` shim, and cloud providers like
+///   `OpenAI`, Groq, `OpenRouter`, Together — requires `api_key` for cloud)
 /// - `LlamaCppBackend` (native llama.cpp server `/completion` + `/props`)
-/// - `TgiBackend` (HuggingFace text-generation-inference `/generate` + `/info`)
+/// - `TgiBackend` (`HuggingFace` text-generation-inference `/generate` + `/info`)
 /// - `MockBackend` (deterministic testing backend)
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -67,10 +67,10 @@ pub struct ModelInfo {
 ///
 /// Variants:
 /// - `Ollama` — value `ollama` (default)
-/// - `OpenAi` — value `openai` (OpenAI-compatible: LM Studio, vLLM, OpenAI, Groq, ...)
-/// - `OpenLlm` — value `openllm` (BentoML OpenLLM native `/v1/generate`)
+/// - `OpenAi` — value `openai` (OpenAI-compatible: LM Studio, vLLM, `OpenAI`, Groq, ...)
+/// - `OpenLlm` — value `openllm` (`BentoML` `OpenLLM` native `/v1/generate`)
 /// - `LlamaCpp` — value `llamacpp` (native llama.cpp server)
-/// - `Tgi` — value `tgi` (HuggingFace text-generation-inference)
+/// - `Tgi` — value `tgi` (`HuggingFace` text-generation-inference)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackendType {
     #[default]
@@ -99,12 +99,12 @@ impl BackendType {
             // TGI
             "tgi" | "text-generation-inference" => Ok(Self::Tgi),
             other => Err(anyhow!(
-                "unknown backend type '{}' (expected: ollama, openai [lmstudio/vllm/localai/groq/openrouter/...], openllm, llamacpp, tgi)",
-                other
+                "unknown backend type '{other}' (expected: ollama, openai [lmstudio/vllm/localai/groq/openrouter/...], openllm, llamacpp, tgi)"
             )),
         }
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Ollama => "ollama",
@@ -122,12 +122,13 @@ impl BackendType {
     /// These are the canonical names used by each engine's API:
     /// - Ollama: tag-based model names pulled from the Ollama library
     ///   (e.g. `gemma3:4b`).
-    /// - OpenAI: model ids used by the OpenAI Chat Completions API
-    ///   (and the OpenAI-compatible adapters: Groq, OpenRouter, Together,
-    ///   LM Studio, vLLM, LocalAI, llama.cpp OpenAI shim, TGI OpenAI shim).
-    /// - Llama.cpp: HuggingFace repo names commonly served via llama.cpp's
+    /// - `OpenAI`: model ids used by the `OpenAI` Chat Completions API
+    ///   (and the OpenAI-compatible adapters: Groq, `OpenRouter`, Together,
+    ///   LM Studio, vLLM, `LocalAI`, llama.cpp `OpenAI` shim, TGI `OpenAI` shim).
+    /// - Llama.cpp: `HuggingFace` repo names commonly served via llama.cpp's
     ///   GGUF loader.
-    /// - TGI: HuggingFace repo names typically deployed with TGI.
+    /// - TGI: `HuggingFace` repo names typically deployed with TGI.
+    #[must_use]
     pub fn default_models(&self) -> &'static [&'static str] {
         match self {
             Self::Ollama => &[
@@ -164,6 +165,7 @@ impl BackendType {
     }
 
     /// Human-readable description of the backend (used in startup logs).
+    #[must_use]
     pub fn description(&self) -> &'static str {
         match self {
             Self::Ollama => "Ollama (local, /api/generate + /api/tags)",
@@ -195,7 +197,7 @@ pub(crate) fn mock_generate(
     let tokens: Vec<String> = mock_text
         .split_whitespace()
         .take(max_tokens as usize)
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let token_count = tokens.len() as u64;
 
