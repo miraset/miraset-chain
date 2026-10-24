@@ -1,23 +1,60 @@
-version: '3.8'
-
 services:
-  node1:
+  node:
     build: .
-    container_name: miraset-node1
+    container_name: miraset-test-node
     ports:
       - "9944:9944"
-    volumes:
-      - node1-data:/data
     environment:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
+      - MIRASET_STORAGE_PATH=/data
+      - MIRASET_DISPATCH_SECRET=${MIRASET_DISPATCH_SECRET:?Set a random 32-byte hex value in MIRASET_DISPATCH_SECRET}
     networks:
-      - miraset-net
-    command: ["sh", "-c", "miraset node start --rpc-addr 0.0.0.0:9944 2>&1"]
+      - miraset-test-net
+    volumes:
+      - node-data:/data
+    command:
+      - miraset
+      - node
+      - start
+      - --rpc-addr
+      - 0.0.0.0:9944
+      - --block-interval
+      - "1"
+      - --allow-private-endpoints
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9944/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  worker:
+    build: .
+    container_name: miraset-test-worker
+    depends_on:
+      node:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - RUST_LOG=info
+      - MIRASET_NODE_URL=http://node:9944
+      - MIRASET_WORKER_BIND_ADDR=0.0.0.0:8080
+      - MIRASET_WORKER_ENDPOINT=worker:8080
+      - MIRASET_BACKEND_TYPE=ollama
+      - MIRASET_BACKEND_URL=${MIRASET_BACKEND_URL:-http://host.docker.internal:11434}
+      - MIRASET_ALLOW_MOCK_FALLBACK=false
+      - MIRASET_SUPPORTED_MODELS=${MIRASET_SUPPORTED_MODELS:-gemma3:4b}
+      - MIRASET_GPU_MODEL=${MIRASET_GPU_MODEL:-Ollama host}
+      - MIRASET_VRAM_TOTAL_GIB=${MIRASET_VRAM_TOTAL_GIB:-0}
+      - MIRASET_DISPATCH_SECRET=${MIRASET_DISPATCH_SECRET:?Set a random 32-byte hex value in MIRASET_DISPATCH_SECRET}
+    networks:
+      - miraset-test-net
+    command: ["miraset-worker"]
 
 networks:
-  miraset-net:
+  miraset-test-net:
     driver: bridge
 
 volumes:
-  node1-data:
+  node-data:

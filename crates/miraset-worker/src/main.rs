@@ -71,36 +71,55 @@ fn backend_api_key_from_env() -> Option<String> {
 /// Precedence:
 /// 1. `MIRASET_DISPATCH_SECRET` env var (hex-encoded 32 bytes).
 /// 2. A file at the path given by `MIRASET_DISPATCH_SECRET_FILE`.
-fn dispatch_secret_from_env() -> Option<[u8; 32]> {
+fn dispatch_secret_from_env() -> Result<Option<[u8; 32]>> {
     if let Ok(hex_secret) = std::env::var("MIRASET_DISPATCH_SECRET") {
-        let bytes = hex::decode(hex_secret.trim()).ok()?;
+        let bytes = hex::decode(hex_secret.trim())?;
         if bytes.len() != 32 {
-            tracing::warn!("MIRASET_DISPATCH_SECRET must be 32 hex-encoded bytes");
-            return None;
+            anyhow::bail!("MIRASET_DISPATCH_SECRET must be 32 hex-encoded bytes");
         }
         let mut secret = [0u8; 32];
         secret.copy_from_slice(&bytes);
-        return Some(secret);
+        return Ok(Some(secret));
     }
 
     if let Ok(path) = std::env::var("MIRASET_DISPATCH_SECRET_FILE") {
-        let bytes = std::fs::read(path).ok()?;
+        let bytes = std::fs::read(path)?;
         if bytes.len() == 32 {
             let mut secret = [0u8; 32];
             secret.copy_from_slice(&bytes);
-            return Some(secret);
+            return Ok(Some(secret));
         }
-        if let Ok(hex) = std::str::from_utf8(&bytes) {
-            let decoded = hex::decode(hex.trim()).ok()?;
-            if decoded.len() == 32 {
-                let mut secret = [0u8; 32];
-                secret.copy_from_slice(&decoded);
-                return Some(secret);
-            }
+        let encoded = std::str::from_utf8(&bytes)?;
+        let decoded = hex::decode(encoded.trim())?;
+        if decoded.len() != 32 {
+            anyhow::bail!("dispatch secret file must contain 32 raw or hex-encoded bytes");
         }
+        let mut secret = [0u8; 32];
+        secret.copy_from_slice(&decoded);
+        return Ok(Some(secret));
     }
 
-    None
+    Ok(None)
+}
+
+fn bool_from_env(name: &str, default: bool) -> Result<bool> {
+    match std::env::var(name) {
+        Ok(value) if value.eq_ignore_ascii_case("true") || value == "1" => Ok(true),
+        Ok(value) if value.eq_ignore_ascii_case("false") || value == "0" => Ok(false),
+        Ok(value) => anyhow::bail!("{name} must be true, false, 1, or 0; got {value}"),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn u32_from_env(name: &str, default: u32) -> Result<u32> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map_err(|error| anyhow::anyhow!("invalid {name} value '{value}': {error}")),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Resolve the set of supported model ids.
@@ -135,6 +154,15 @@ async fn main() -> Result<()> {
     let backend_url = backend_url_from_env(backend_type);
     let backend_api_key = backend_api_key_from_env();
     let supported_models = supported_models_from_env(backend_type);
+    let allow_ollama_mock_fallback = bool_from_env("MIRASET_ALLOW_MOCK_FALLBACK", true)?;
+    tracing::info!(
+        "Ollama mock fallback: {}",
+        if allow_ollama_mock_fallback {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 
     tracing::info!(
         "Inference backend: {} ({}) at {}{}",
@@ -153,7 +181,7 @@ async fn main() -> Result<()> {
         supported_models.join(", ")
     );
 
-    let dispatch_secret = dispatch_secret_from_env();
+    let dispatch_secret = dispatch_secret_from_env()?;
     if dispatch_secret.is_some() {
         tracing::info!("Dispatch auth verification enabled");
     } else {
@@ -162,18 +190,30 @@ async fn main() -> Result<()> {
         );
     }
 
+    let keypair = KeyPair::generate();
+    let worker_id = blake3::hash(&bincode::serialize(&keypair.address())?).into();
+    let bind_addr =
+        std::env::var("MIRASET_WORKER_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let endpoint =
+        std::env::var("MIRASET_WORKER_ENDPOINT").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+    let node_url =
+        std::env::var("MIRASET_NODE_URL").unwrap_or_else(|_| "http://127.0.0.1:9944".to_string());
+    let gpu_model = std::env::var("MIRASET_GPU_MODEL")
+        .unwrap_or_else(|_| "Ollama host (hardware unspecified)".to_string());
+    let vram_total_gib = u32_from_env("MIRASET_VRAM_TOTAL_GIB", 0)?;
     let config = WorkerConfig {
-        worker_id: [1u8; 32],
-        keypair: KeyPair::generate(),
-        endpoint: "127.0.0.1:8080".to_string(),
-        node_url: "http://127.0.0.1:9944".to_string(), // Node RPC port
+        worker_id,
+        keypair,
+        endpoint,
+        node_url,
         backend_type,
         backend_url,
         backend_api_key,
-        gpu_model: "NVIDIA RTX 4090".to_string(),
-        vram_total_gib: 24,
+        gpu_model,
+        vram_total_gib,
         supported_models,
         dispatch_secret,
+        ollama_mock_fallback: allow_ollama_mock_fallback,
         max_body_size: 2 * 1024 * 1024,
         request_timeout: Duration::from_secs(30),
         rate_limit_burst: 100,
@@ -208,10 +248,10 @@ async fn main() -> Result<()> {
 
     let app = worker.router()?;
 
-    tracing::info!("Worker listening on {}", config.endpoint);
+    tracing::info!("Worker listening on {}", bind_addr);
     tracing::info!("Connecting to node at {}", config.node_url);
 
-    let listener = TcpListener::bind(&config.endpoint).await?;
+    let listener = TcpListener::bind(&bind_addr).await?;
     axum::serve(listener, app).await?;
 
     Ok(())

@@ -40,9 +40,17 @@ Request body:
   "epoch_id": 1,
   "model_id": "llama2",
   "max_tokens": 100,
-  "price_per_token": 10
+  "price_per_token": 10,
+  "prompt": "Hello",
+  "auth_tag": "<dispatch-auth-tag>"
 }
 ```
+
+The node includes `prompt` for jobs submitted through
+`POST /jobs/submit-with-input`. When present, the worker starts inference after
+acceptance and submits its result and receipt hash to the node. The prompt is
+optional for legacy assignments; those jobs can still be run manually with
+`POST /jobs/run`.
 
 ### `POST /jobs/run`
 Run an accepted job.
@@ -78,8 +86,8 @@ curl -X POST http://127.0.0.1:8080/jobs/accept \
 ## Backend configuration
 
 The worker talks to a pluggable inference backend (local or cloud) selected via
-environment variables. The chain protocol, receipts, and job API are identical
-regardless of backend — only the inference engine differs.
+environment variables. The chain transaction format, receipts, and job API
+are identical regardless of backend — only the inference engine differs.
 
 ### Environment variables
 
@@ -89,6 +97,14 @@ regardless of backend — only the inference engine differs.
 | `MIRASET_BACKEND_URL` | (per backend) | Base URL of the inference backend. See defaults below. |
 | `MIRASET_BACKEND_API_KEY` | _(unset)_ | Optional Bearer auth key. Required for cloud OpenAI-compatible providers; ignored by local backends without auth. |
 | `MIRASET_SUPPORTED_MODELS` | (per backend defaults) | Comma-separated list of model ids this worker accepts. Overrides per-backend defaults. |
+| `MIRASET_NODE_URL` | `http://127.0.0.1:9944` | Node RPC base URL. |
+| `MIRASET_WORKER_BIND_ADDR` | `127.0.0.1:8080` | Worker listener address. |
+| `MIRASET_WORKER_ENDPOINT` | `127.0.0.1:8080` | Hostname and port advertised to the node (without scheme). |
+| `MIRASET_GPU_MODEL` | `Ollama host (hardware unspecified)` | Self-reported hardware label. |
+| `MIRASET_VRAM_TOTAL_GIB` | `0` | Self-reported VRAM; not automatically detected. |
+| `MIRASET_ALLOW_MOCK_FALLBACK` | `true` | For Ollama, whether backend failures may return a synthetic response. Disable for real-inference tests. |
+| `MIRASET_DISPATCH_SECRET` | _(unset)_ | Shared 32-byte hex secret for verifying node dispatch authentication. |
+| `MIRASET_DISPATCH_SECRET_FILE` | _(unset)_ | Path to a file containing the 32-byte dispatch secret. |
 
 ### Default `MIRASET_BACKEND_URL` per backend
 
@@ -228,4 +244,3 @@ When the configured backend is unreachable or returns an error, the worker
 falls back to a deterministic mock response (matching the pre-existing
 Ollama behavior). This keeps the worker operational for devnet/testing even
 when no inference server is running.
-

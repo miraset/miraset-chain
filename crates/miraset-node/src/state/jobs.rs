@@ -90,6 +90,7 @@ pub(crate) fn dispatch_job_accept(
     epoch_id: u64,
     model_id: String,
     max_tokens: u64,
+    prompt: Option<String>,
     price_per_token: u64,
     dispatch_secret: Option<[u8; 32]>,
 ) {
@@ -107,11 +108,17 @@ pub(crate) fn dispatch_job_accept(
         // H4: include an authentication tag when a dispatch secret is configured.
         let auth_tag = dispatch_secret.as_ref().map(|secret| {
             hex::encode(DispatchAuth::sign_dispatch(
-                secret, &job_id, &worker_id, epoch_id, &model_id, max_tokens,
+                secret,
+                &job_id,
+                &worker_id,
+                epoch_id,
+                &model_id,
+                max_tokens,
+                prompt.as_deref(),
             ))
         });
 
-        let _ = client
+        let response = client
             .post(&accept_url)
             .json(&serde_json::json!({
                 "job_id": job_id_hex,
@@ -119,10 +126,22 @@ pub(crate) fn dispatch_job_accept(
                 "model_id": model_id,
                 "max_tokens": max_tokens,
                 "price_per_token": price_per_token,
+                "prompt": prompt,
                 "auth_tag": auth_tag,
             }))
             .send()
             .await;
+        match response {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => tracing::warn!(
+                "worker rejected job dispatch for {}: {}",
+                job_id_hex,
+                response.status()
+            ),
+            Err(error) => {
+                tracing::warn!("failed to dispatch job {} to worker: {}", job_id_hex, error)
+            }
+        }
     });
 }
 
@@ -132,7 +151,7 @@ pub(crate) fn dispatch_job_accept(
 /// This is called by the block producer after the block has been persisted,
 /// so it runs outside the state lock.
 pub(crate) fn dispatch_new_job_assignments(state: &State, block_height: u64, price_per_token: u64) {
-    let assignments: Vec<(ObjectId, ObjectId, u64, String, u64)> = {
+    let assignments: Vec<(ObjectId, ObjectId, u64, String, u64, Option<String>)> = {
         let r = state.inner.read();
         r.events
             .iter()
@@ -140,6 +159,7 @@ pub(crate) fn dispatch_new_job_assignments(state: &State, block_height: u64, pri
                 miraset_core::Event::JobAssigned {
                     job_id,
                     worker_id,
+                    tx_hash: _,
                     block_height: h,
                     ..
                 } if *h == block_height => r.objects.get(job_id).and_then(|obj| match &obj.data {
@@ -154,6 +174,7 @@ pub(crate) fn dispatch_new_job_assignments(state: &State, block_height: u64, pri
                         *epoch_id,
                         model_id.clone(),
                         *max_tokens,
+                        r.job_prompts.get(job_id).cloned(),
                     )),
                     _ => None,
                 }),
@@ -162,7 +183,7 @@ pub(crate) fn dispatch_new_job_assignments(state: &State, block_height: u64, pri
             .collect()
     };
 
-    for (job_id, worker_id, epoch_id, model_id, max_tokens) in assignments {
+    for (job_id, worker_id, epoch_id, model_id, max_tokens, prompt) in assignments {
         if let Some(endpoint) = get_worker_endpoint(state, &worker_id) {
             dispatch_job_accept(
                 endpoint,
@@ -171,6 +192,7 @@ pub(crate) fn dispatch_new_job_assignments(state: &State, block_height: u64, pri
                 epoch_id,
                 model_id,
                 max_tokens,
+                prompt,
                 price_per_token,
                 state.dispatch_secret,
             );

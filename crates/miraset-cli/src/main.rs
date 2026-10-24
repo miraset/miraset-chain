@@ -2,7 +2,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
 use clap::{Parser, Subcommand};
-use miraset_core::{Address, KeyPair, Transaction};
+use miraset_core::{Address, KeyPair, Transaction, job_input_signing_bytes};
 use miraset_node::{State, Storage};
 use miraset_wallet::Wallet;
 use serde::{Deserialize, Serialize};
@@ -367,6 +367,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: ChatCommands,
     },
+    /// Inference job operations
+    Job {
+        #[command(subcommand)]
+        cmd: JobCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -465,6 +470,29 @@ enum ChatCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum JobCommands {
+    /// Submit a signed inference job and wait for its result.
+    Submit {
+        /// Wallet account name
+        account: String,
+        /// Model id registered by a worker
+        #[arg(long)]
+        model: String,
+        /// Inference prompt (kept off-chain)
+        #[arg(long)]
+        prompt: String,
+        #[arg(long, default_value_t = 128)]
+        max_tokens: u64,
+        #[arg(long, default_value_t = 10_000)]
+        escrow: u64,
+        #[arg(long, default_value = "http://127.0.0.1:9944")]
+        rpc: String,
+        #[arg(long, default_value_t = 300)]
+        timeout_secs: u64,
+    },
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -475,6 +503,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Node { cmd } => handle_node(cmd).await?,
         Commands::Wallet { cmd } => handle_wallet(cmd).await?,
         Commands::Chat { cmd } => handle_chat(cmd).await?,
+        Commands::Job { cmd } => handle_job(cmd).await?,
     }
 
     Ok(())
@@ -703,6 +732,100 @@ async fn handle_chat(cmd: ChatCommands) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn handle_job(cmd: JobCommands) -> anyhow::Result<()> {
+    match cmd {
+        JobCommands::Submit {
+            account,
+            model,
+            prompt,
+            max_tokens,
+            escrow,
+            rpc,
+            timeout_secs,
+        } => {
+            let wallet = Wallet::new(get_wallet_path())?;
+            let keypair = wallet.get_keypair(&account)?;
+            let requester = keypair.address();
+            let nonce = get_nonce(&rpc, &requester).await?;
+            let mut transaction = Transaction::CreateJob {
+                requester,
+                model_id: model,
+                max_tokens,
+                escrow_amount: escrow,
+                nonce,
+                signature: [0; 64],
+            };
+            sign_transaction(&mut transaction, &keypair)?;
+            let tx_hash = transaction.hash()?;
+            let input_signature =
+                hex::encode(keypair.sign(&job_input_signing_bytes(&tx_hash, &prompt)));
+
+            let client = reqwest::Client::new();
+            let response = client
+                .post(format!(
+                    "{}/jobs/submit-with-input",
+                    rpc.trim_end_matches('/')
+                ))
+                .json(&serde_json::json!({
+                    "transaction": transaction,
+                    "prompt": prompt,
+                    "input_signature": input_signature,
+                }))
+                .send()
+                .await?;
+            if !response.status().is_success() {
+                anyhow::bail!("job submission failed: {}", response.text().await?);
+            }
+            let accepted: serde_json::Value = response.json().await?;
+            let job_id = accepted["job_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("node response is missing job_id"))?
+                .to_string();
+            println!("Accepted job {job_id}; waiting for completion...");
+
+            let result = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+                loop {
+                    let response = client
+                        .get(format!("{}/jobs/{}", rpc.trim_end_matches('/'), job_id))
+                        .send()
+                        .await?;
+                    if response.status().is_success() {
+                        let job: serde_json::Value = response.json().await?;
+                        match job["status"].as_str() {
+                            Some("Completed") => {
+                                let response = client
+                                    .get(format!(
+                                        "{}/jobs/{}/result",
+                                        rpc.trim_end_matches('/'),
+                                        job_id
+                                    ))
+                                    .send()
+                                    .await?;
+                                if !response.status().is_success() {
+                                    anyhow::bail!(
+                                        "job completed but result retrieval failed: {}",
+                                        response.text().await?
+                                    );
+                                }
+                                return Ok::<serde_json::Value, anyhow::Error>(
+                                    response.json().await?,
+                                );
+                            }
+                            Some("Failed") => anyhow::bail!("worker reported job failure"),
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out waiting for job {job_id}"))??;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+    }
     Ok(())
 }
 

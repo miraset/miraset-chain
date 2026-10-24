@@ -1,7 +1,7 @@
 // Integration tests for Miraset Chain
 // Boots an in-process node so these tests run without an external server.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use miraset_core::{KeyPair, Transaction};
+use miraset_core::{KeyPair, Transaction, job_input_signing_bytes};
 use miraset_node::{State, serve_rpc};
 use reqwest::Client;
 use std::net::SocketAddr;
@@ -238,4 +238,59 @@ async fn test_rpc_submit_transaction() {
         let balance: u64 = resp.json().await.unwrap();
         assert_eq!(balance, 100, "Recipient should receive the transfer");
     }
+}
+
+#[tokio::test]
+async fn test_rpc_submit_job_with_off_chain_input() {
+    let url = spawn_test_node().await;
+    let client = Client::new();
+    let requester = KeyPair::from_bytes(&DEVNET_SECRET);
+    let prompt = "signed prompt kept outside the block";
+    let mut transaction = Transaction::CreateJob {
+        requester: requester.address(),
+        model_id: "gemma3:4b".to_string(),
+        max_tokens: 16,
+        escrow_amount: 10_000,
+        nonce: 0,
+        signature: [0; 64],
+    };
+    miraset_core::sign_transaction(&mut transaction, &requester).unwrap();
+    let tx_hash = transaction.hash().unwrap();
+    let input_signature = hex::encode(requester.sign(&job_input_signing_bytes(&tx_hash, prompt)));
+
+    let response = client
+        .post(format!("{url}/jobs/submit-with-input"))
+        .json(&serde_json::json!({
+            "transaction": transaction,
+            "prompt": prompt,
+            "input_signature": input_signature,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let accepted: serde_json::Value = response.json().await.unwrap();
+    let job_id = accepted["job_id"].as_str().unwrap();
+
+    let tampered = client
+        .post(format!("{url}/jobs/submit-with-input"))
+        .json(&serde_json::json!({
+            "transaction": transaction,
+            "prompt": "changed prompt",
+            "input_signature": input_signature,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tampered.status(), 400);
+
+    wait_for_block().await;
+    let job = client
+        .get(format!("{url}/jobs/{job_id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(job.status(), 200);
+    let job: serde_json::Value = job.json().await.unwrap();
+    assert_eq!(job["status"], "Created");
 }

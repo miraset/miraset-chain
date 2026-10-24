@@ -83,7 +83,9 @@ Response: array of `JobView`
 ```
 
 ### `POST /jobs/submit`
-Submit a signed `Transaction::CreateJob` to the transaction pipeline. The job is included in the next produced block and auto-assigned to a suitable active worker during block execution. An HTTP `/jobs/accept` notification is dispatched to the worker after the block is produced.
+Submit a signed `Transaction::CreateJob` without an inference prompt. The job
+is included in the next produced block and auto-assigned to a suitable active
+worker. This legacy route does not start inference by itself.
 
 Request body: a signed `Transaction::CreateJob` JSON object (`miraset_core::Transaction`).
 ```json
@@ -108,10 +110,55 @@ Response:
 }
 ```
 
-The actual `job_id` and `assigned_worker` are only known once the block is produced. Poll `GET /jobs` or `GET /jobs/{id}` (filtering by requester) to check status.
+The response includes the transaction hash. Poll `GET /jobs` to find the job
+after block production.
 
 ### `GET /jobs/{id}`
 Get a single job by hex job ID.
+
+### `POST /jobs/submit-with-input`
+Submit a signed `CreateJob` transaction and a separately signed prompt. The
+prompt is delivered to the assigned worker out-of-band and is not included in
+the transaction or block. The prompt signature uses
+`miraset_core::job_input_signing_bytes(tx_hash, prompt)` and the requester's
+Ed25519 key. Prompts must be non-empty and no larger than 64 KiB.
+
+Request:
+```json
+{
+  "transaction": {
+    "type": "CreateJob",
+    "requester": "<hex-address>",
+    "model_id": "gemma3:4b",
+    "max_tokens": 128,
+    "escrow_amount": 10000,
+    "nonce": 0,
+    "signature": "<hex-64-byte-signature>"
+  },
+  "prompt": "Explain what a blockchain node does.",
+  "input_signature": "<hex-64-byte-signature>"
+}
+```
+
+The node verifies both signatures, queues the transaction and prompt together,
+and returns the deterministic job ID:
+```json
+{
+  "status": "accepted",
+  "tx_hash": "...",
+  "job_id": "...",
+  "requester": "<hex-address>",
+  "model_id": "gemma3:4b"
+}
+```
+
+The prompt is held in node memory only until job completion; a node restart
+before dispatch loses it. The local test uses a shared node-worker dispatch
+secret, which also authenticates the prompt digest during assignment.
+
+### `GET /jobs/{id}/result`
+Returns the completed worker response through the node RPC. Returns `409` if
+the job is not yet complete and `502` if the worker result cannot be reached.
 
 ## Workers
 
@@ -124,8 +171,8 @@ Response: array of `WorkerView`
   {
     "worker_id": "...",
     "owner": "...",
-    "gpu_model": "NVIDIA RTX 4090",
-    "vram_gib": 24,
+    "gpu_model": "Ollama host (hardware unspecified)",
+    "vram_gib": 0,
     "status": "Active",
     "endpoints": ["http://localhost:8080"],
     "supported_models": ["llama-3-8b"]
@@ -155,6 +202,7 @@ Response:
 
 - This node is a single-author devnet: no consensus, no validator set, and block production is local only.
 - The `/jobs/submit` endpoint now requires a signed `Transaction::CreateJob` and routes through the same `/tx/submit` pipeline as all other state-mutating operations.
+- The test-only Docker configuration enables private worker endpoints. Do not expose it as a public deployment; the node RPC does not provide production-grade client authentication.
 
 ## Examples
 
@@ -166,4 +214,3 @@ curl http://127.0.0.1:9944/jobs
 curl http://127.0.0.1:9944/workers
 curl http://127.0.0.1:9944/epoch
 ```
-

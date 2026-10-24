@@ -8,7 +8,10 @@ use axum::{
 };
 use axum_governor::{GovernorConfigBuilder, GovernorLayer};
 use chrono::Utc;
-use miraset_core::{Address, Block, Event, ObjectData, ObjectId, Transaction};
+use miraset_core::{
+    Address, Block, Event, JobStatus, ObjectData, ObjectId, Transaction, job_input_signing_bytes,
+    new_object_id, verify_signature,
+};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -128,7 +131,9 @@ pub async fn serve_rpc_with_config(
         // Job coordinator endpoints (D1)
         .route("/jobs", get(list_jobs))
         .route("/jobs/submit", post(submit_job))
+        .route("/jobs/submit-with-input", post(submit_job_with_input))
         .route("/jobs/{id}", get(get_job))
+        .route("/jobs/{id}/result", get(get_job_result))
         .route("/workers", get(list_workers))
         .route("/epoch", get(get_epoch))
         .layer(
@@ -362,6 +367,102 @@ async fn get_job(
     } else {
         Err(StatusCode::NOT_FOUND)
     }
+}
+
+async fn get_job_result(
+    axum::extract::Path(job_id_hex): axum::extract::Path<String>,
+    AxumState(rpc): AxumState<RpcState>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let job_id = parse_object_id(&job_id_hex).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let obj = rpc.state.get_object(&job_id).ok_or(StatusCode::NOT_FOUND)?;
+    let worker_id = match &obj.data {
+        ObjectData::InferenceJob {
+            assigned_worker_id: Some(worker_id),
+            status: JobStatus::Completed,
+            ..
+        } => worker_id,
+        ObjectData::InferenceJob { .. } => return Err(StatusCode::CONFLICT),
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    let endpoint = rpc
+        .state
+        .get_worker_endpoint(worker_id)
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let response = client
+        .get(format!(
+            "{}/jobs/{}/stream",
+            endpoint.trim_end_matches('/'),
+            job_id_hex
+        ))
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    if !response.status().is_success() {
+        return Err(StatusCode::BAD_GATEWAY);
+    }
+    let result = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+struct SubmitJobWithInputRequest {
+    transaction: Transaction,
+    prompt: String,
+    input_signature: String,
+}
+
+/// Submit a signed job and an independently signed, off-chain prompt.
+async fn submit_job_with_input(
+    AxumState(rpc): AxumState<RpcState>,
+    Json(request): Json<SubmitJobWithInputRequest>,
+) -> Result<Json<serde_json::Value>, crate::error::TxError> {
+    let tx_hash = request
+        .transaction
+        .hash()
+        .map_err(crate::error::TxError::Serialization)?;
+    let (requester, model_id) = match &request.transaction {
+        Transaction::CreateJob {
+            requester,
+            model_id,
+            ..
+        } => (*requester, model_id.clone()),
+        _ => {
+            return Err(crate::error::TxError::Other(
+                "only Transaction::CreateJob is accepted on /jobs/submit-with-input".to_string(),
+            ));
+        }
+    };
+    let signature_bytes = hex::decode(&request.input_signature)
+        .map_err(|error| crate::error::TxError::Other(error.to_string()))?;
+    let input_signature: [u8; 64] = signature_bytes.try_into().map_err(|_| {
+        crate::error::TxError::Other("input_signature must be 64 bytes".to_string())
+    })?;
+    let signing_bytes = job_input_signing_bytes(&tx_hash, &request.prompt);
+    if !verify_signature(&requester, &signing_bytes, &input_signature) {
+        return Err(crate::error::TxError::InvalidSignature);
+    }
+
+    let job_id = new_object_id(
+        &bincode::serialize(&(&requester, &model_id, tx_hash))
+            .map_err(crate::error::TxError::Serialization)?,
+    );
+    rpc.state
+        .submit_job_with_prompt(request.transaction, request.prompt)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "accepted",
+        "tx_hash": hex::encode(tx_hash),
+        "job_id": hex::encode(job_id),
+        "requester": requester.to_hex(),
+        "model_id": model_id,
+    })))
 }
 
 /// Submit a signed `Transaction::CreateJob` to the transaction pipeline.

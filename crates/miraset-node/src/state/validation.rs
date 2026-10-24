@@ -11,6 +11,33 @@ use std::sync::Arc;
 /// It is kept in a separate module so that the main `State` facade only
 /// handles lock acquisition and delegation.
 pub(crate) fn submit_transaction(state: &State, tx: Transaction) -> Result<(), TxError> {
+    submit_transaction_inner(state, tx, None)
+}
+
+pub(crate) fn submit_job_with_prompt(
+    state: &State,
+    tx: Transaction,
+    prompt: String,
+) -> Result<(), TxError> {
+    if !matches!(tx, Transaction::CreateJob { .. }) {
+        return Err(TxError::Other(
+            "only Transaction::CreateJob accepts an off-chain prompt".to_string(),
+        ));
+    }
+    if prompt.trim().is_empty() || prompt.len() > super::MAX_JOB_PROMPT_BYTES {
+        return Err(TxError::Other(format!(
+            "job prompt must be non-empty and at most {} bytes",
+            super::MAX_JOB_PROMPT_BYTES
+        )));
+    }
+    submit_transaction_inner(state, tx, Some(prompt))
+}
+
+fn submit_transaction_inner(
+    state: &State,
+    tx: Transaction,
+    prompt: Option<String>,
+) -> Result<(), TxError> {
     let from = tx.from();
     let nonce = tx.nonce();
 
@@ -19,6 +46,12 @@ pub(crate) fn submit_transaction(state: &State, tx: Transaction) -> Result<(), T
     if !miraset_core::verify_transaction_signature(&tx) {
         return Err(TxError::InvalidSignature);
     }
+
+    let tx_hash = if prompt.is_some() {
+        Some(tx.hash().map_err(TxError::Serialization)?)
+    } else {
+        None
+    };
 
     let mut w = state.inner.write();
 
@@ -97,6 +130,9 @@ pub(crate) fn submit_transaction(state: &State, tx: Transaction) -> Result<(), T
         }
     }
 
+    if let (Some(prompt), Some(tx_hash)) = (prompt, tx_hash) {
+        w.pending_job_prompts.insert(tx_hash, prompt);
+    }
     w.pending_txs.push(tx);
     Ok(())
 }

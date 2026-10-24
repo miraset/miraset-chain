@@ -1,5 +1,5 @@
-# Use Rust official image for building (latest stable)
-FROM rust:latest AS builder
+# Use the workspace-pinned Rust toolchain.
+FROM rust:1.97.1 AS builder
 
 WORKDIR /app
 
@@ -8,7 +8,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
 # Build release binary
-RUN cargo build --release --bin miraset
+RUN cargo build --release --bin miraset --bin miraset-worker
 
 # Runtime image
 FROM debian:trixie-slim
@@ -17,10 +17,12 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/miraset /usr/local/bin/miraset
+COPY --from=builder /app/target/release/miraset-worker /usr/local/bin/miraset-worker
 
 # Create data directory
 RUN mkdir -p /data

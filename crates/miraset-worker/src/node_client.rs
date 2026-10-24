@@ -88,7 +88,7 @@ impl NodeClient {
         worker_id: ObjectId,
         output_tokens: u64,
         receipt_hash: [u8; 32],
-    ) -> Result<()> {
+    ) -> Result<u64> {
         let nonce = self.get_nonce().await?;
         let worker = self.keypair.address();
 
@@ -112,7 +112,23 @@ impl NodeClient {
             output_tokens
         );
 
-        Ok(())
+        nonce
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("worker nonce overflow"))
+    }
+
+    /// Wait until a submitted transaction has been included in a produced block.
+    pub async fn wait_for_nonce(&self, expected_nonce: u64) -> Result<()> {
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                if self.get_nonce().await? >= expected_nonce {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for transaction inclusion"))?
     }
 
     /// Anchor receipt hash on-chain

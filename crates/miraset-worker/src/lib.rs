@@ -63,6 +63,8 @@ pub struct WorkerConfig {
     /// Shared secret for verifying node dispatch auth tags (hex-encoded 32 bytes).
     /// When set, `/jobs/accept` rejects requests without a valid tag (H4).
     pub dispatch_secret: Option<[u8; 32]>,
+    /// Whether Ollama failures may fall back to a synthetic response.
+    pub ollama_mock_fallback: bool,
     /// Max request body size in bytes.
     pub max_body_size: usize,
     /// Request timeout.
@@ -113,6 +115,8 @@ pub struct AcceptJobRequest {
     pub model_id: String,
     pub max_tokens: u64,
     pub price_per_token: u64,
+    #[serde(default)]
+    pub prompt: Option<String>,
     /// Authentication tag from the node when dispatch auth is configured.
     pub auth_tag: Option<String>,
 }
@@ -166,7 +170,10 @@ impl Worker {
     #[must_use]
     pub fn new(config: WorkerConfig) -> Arc<Self> {
         let backend: Arc<dyn InferenceBackend> = match config.backend_type {
-            BackendType::Ollama => Arc::new(OllamaBackend::new(config.backend_url.clone())),
+            BackendType::Ollama => Arc::new(OllamaBackend::with_mock_fallback(
+                config.backend_url.clone(),
+                config.ollama_mock_fallback,
+            )),
             BackendType::OpenAi => Arc::new(OpenAiCompatibleBackend::new(
                 config.backend_url.clone(),
                 config.backend_api_key.clone(),
@@ -206,6 +213,7 @@ impl Worker {
                 req.epoch_id,
                 &req.model_id,
                 req.max_tokens,
+                req.prompt.as_deref(),
             );
             if !auth::constant_time_eq(&expected, &tag_arr) {
                 return Err(anyhow!("invalid dispatch auth tag"));
@@ -257,12 +265,33 @@ impl Worker {
                 post(move |Json(req): Json<AcceptJobRequest>| {
                     let worker = Arc::clone(&accept_worker);
                     async move {
+                        let prompt = req.prompt.clone();
                         match worker.accept_job(req) {
-                            Ok(()) => (
-                                StatusCode::OK,
-                                Json(serde_json::json!({ "status": "accepted" })),
-                            )
-                                .into_response(),
+                            Ok(job_id) => {
+                                if let Some(prompt) = prompt {
+                                    let runner = Arc::clone(&worker);
+                                    tokio::spawn(async move {
+                                        let request = RunJobRequest {
+                                            job_id: hex::encode(job_id),
+                                            prompt,
+                                            temperature: None,
+                                            top_p: None,
+                                        };
+                                        if let Err(error) = runner.run_job(job_id, request).await {
+                                            tracing::error!(
+                                                "job {} execution failed: {}",
+                                                hex::encode(job_id),
+                                                error
+                                            );
+                                        }
+                                    });
+                                }
+                                (
+                                    StatusCode::OK,
+                                    Json(serde_json::json!({ "status": "accepted" })),
+                                )
+                                    .into_response()
+                            }
                             Err(e) => (
                                 StatusCode::BAD_REQUEST,
                                 Json(serde_json::json!({ "error": e.to_string() })),
@@ -408,7 +437,7 @@ impl Worker {
     }
 
     /// Accept a job assignment
-    pub fn accept_job(&self, req: AcceptJobRequest) -> Result<()> {
+    pub fn accept_job(&self, req: AcceptJobRequest) -> Result<ObjectId> {
         // Parse hex job_id
         let job_id = parse_object_id(&req.job_id)?;
 
@@ -444,7 +473,7 @@ impl Worker {
 
         tracing::info!("Accepted job: {}", hex::encode(job_id));
 
-        Ok(())
+        Ok(job_id)
     }
 
     /// Execute a job
@@ -468,27 +497,40 @@ impl Worker {
         };
 
         // Execute inference via backend
-        let response = self
+        let response = match self
             .backend
             .generate(&model_id, &prompt, max_tokens, req.temperature, req.top_p)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(job) = self.jobs.write().get_mut(&job_id) {
+                    job.status = JobStatus::Failed;
+                }
+                return Err(error);
+            }
+        };
 
         // Update job with results
-        let mut jobs = self.jobs.write();
-        let job = jobs
-            .get_mut(&job_id)
-            .ok_or_else(|| anyhow!("Job disappeared"))?;
+        {
+            let mut jobs = self.jobs.write();
+            let job = jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| anyhow!("Job disappeared"))?;
 
-        job.response = response.tokens.clone();
-        job.output_tokens = response.token_count;
-        job.status = JobStatus::Completed;
-        job.completed_at = Some(Utc::now());
+            job.response = response.tokens.clone();
+            job.output_tokens = response.token_count;
+            job.status = JobStatus::Completed;
+            job.completed_at = Some(Utc::now());
 
-        tracing::info!(
-            "Completed job: {:?}, tokens: {}",
-            job_id,
-            response.token_count
-        );
+            tracing::info!(
+                "Completed job: {:?}, tokens: {}",
+                job_id,
+                response.token_count
+            );
+        }
+
+        self.submit_result_to_chain(job_id).await?;
 
         Ok(())
     }
@@ -536,7 +578,8 @@ impl Worker {
         let report = self.generate_receipt(job_id)?;
 
         // Submit to chain
-        self.node_client
+        let expected_nonce = self
+            .node_client
             .submit_job_result(
                 report.job_id,
                 self.config.worker_id,
@@ -544,6 +587,7 @@ impl Worker {
                 report.receipt_hash,
             )
             .await?;
+        self.node_client.wait_for_nonce(expected_nonce).await?;
 
         // Optionally anchor the full receipt
         self.node_client
@@ -680,6 +724,7 @@ mod tests {
             vram_total_gib: 24,
             supported_models: vec!["llama2".to_string(), "mistral".to_string()],
             dispatch_secret: None,
+            ollama_mock_fallback: true,
             max_body_size: 2 * 1024 * 1024,
             request_timeout: Duration::from_secs(30),
             rate_limit_burst: 100,
@@ -704,6 +749,7 @@ mod tests {
             vram_total_gib: 24,
             supported_models: vec!["llama2".to_string()],
             dispatch_secret: None,
+            ollama_mock_fallback: true,
             max_body_size: 2 * 1024 * 1024,
             request_timeout: Duration::from_secs(30),
             rate_limit_burst: 100,
@@ -718,6 +764,7 @@ mod tests {
             model_id: "llama2".to_string(),
             max_tokens: 1000,
             price_per_token: 10,
+            prompt: None,
             auth_tag: None,
         };
 

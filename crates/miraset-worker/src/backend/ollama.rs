@@ -7,14 +7,21 @@ use serde::{Deserialize, Serialize};
 pub struct OllamaBackend {
     url: String,
     client: reqwest::Client,
+    allow_mock_fallback: bool,
 }
 
 impl OllamaBackend {
     #[must_use]
     pub fn new(url: String) -> Self {
+        Self::with_mock_fallback(url, true)
+    }
+
+    #[must_use]
+    pub fn with_mock_fallback(url: String, allow_mock_fallback: bool) -> Self {
         Self {
             url,
             client: reqwest::Client::new(),
+            allow_mock_fallback,
         }
     }
 }
@@ -68,6 +75,12 @@ impl InferenceBackend for OllamaBackend {
         let ollama_response: OllamaResponse = match response {
             Ok(resp) if resp.status().is_success() => resp.json().await?,
             Ok(resp) => {
+                if !self.allow_mock_fallback {
+                    return Err(anyhow!(
+                        "Ollama returned unsuccessful status {}",
+                        resp.status()
+                    ));
+                }
                 tracing::warn!(
                     "Ollama request failed: {} - falling back to mock inference",
                     resp.status()
@@ -75,6 +88,9 @@ impl InferenceBackend for OllamaBackend {
                 return mock_generate(model, prompt, max_tokens);
             }
             Err(e) => {
+                if !self.allow_mock_fallback {
+                    return Err(anyhow!("Ollama request failed: {e}"));
+                }
                 tracing::warn!(
                     "Ollama connection failed: {} - falling back to mock inference",
                     e
@@ -143,5 +159,19 @@ impl InferenceBackend for OllamaBackend {
             .collect();
 
         Ok(models)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OllamaBackend;
+    use crate::backend::InferenceBackend;
+
+    #[tokio::test]
+    async fn disabled_mock_fallback_returns_ollama_connection_error() {
+        let backend = OllamaBackend::with_mock_fallback("http://127.0.0.1:1".to_string(), false);
+        let result = backend.generate("model", "prompt", 8, None, None).await;
+
+        assert!(result.is_err());
     }
 }

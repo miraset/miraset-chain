@@ -32,13 +32,23 @@ impl DispatchAuth {
         epoch_id: u64,
         model_id: &str,
         max_tokens: u64,
+        prompt: Option<&str>,
     ) -> Vec<u8> {
         let mut input = Vec::new();
+        input.extend_from_slice(b"miraset-worker-dispatch-v1");
         input.extend_from_slice(job_id.as_ref());
         input.extend_from_slice(worker_id.as_ref());
         input.extend_from_slice(&epoch_id.to_le_bytes());
+        input.extend_from_slice(&(model_id.len() as u64).to_le_bytes());
         input.extend_from_slice(model_id.as_bytes());
         input.extend_from_slice(&max_tokens.to_le_bytes());
+        match prompt {
+            Some(prompt) => {
+                input.push(1);
+                input.extend_from_slice(blake3::hash(prompt.as_bytes()).as_bytes());
+            }
+            None => input.push(0),
+        }
         input
     }
 
@@ -50,8 +60,9 @@ impl DispatchAuth {
         epoch_id: u64,
         model_id: &str,
         max_tokens: u64,
+        prompt: Option<&str>,
     ) -> [u8; 32] {
-        let input = Self::tag_input(job_id, worker_id, epoch_id, model_id, max_tokens);
+        let input = Self::tag_input(job_id, worker_id, epoch_id, model_id, max_tokens, prompt);
         blake3::keyed_hash(secret, &input).into()
     }
 
@@ -63,10 +74,12 @@ impl DispatchAuth {
         epoch_id: u64,
         model_id: &str,
         max_tokens: u64,
+        prompt: Option<&str>,
         tag: &[u8; 32],
     ) -> bool {
-        let expected =
-            Self::sign_dispatch(secret, job_id, worker_id, epoch_id, model_id, max_tokens);
+        let expected = Self::sign_dispatch(
+            secret, job_id, worker_id, epoch_id, model_id, max_tokens, prompt,
+        );
         crate::util::constant_time_eq(&expected, tag)
     }
 }
@@ -217,12 +230,22 @@ mod tests {
         let secret = DispatchAuth::generate_secret().unwrap();
         let job_id = [1u8; 32];
         let worker_id = [2u8; 32];
-        let tag = DispatchAuth::sign_dispatch(&secret, &job_id, &worker_id, 7, "model", 128);
+        let tag = DispatchAuth::sign_dispatch(&secret, &job_id, &worker_id, 7, "model", 128, None);
         assert!(DispatchAuth::verify_dispatch(
-            &secret, &job_id, &worker_id, 7, "model", 128, &tag
+            &secret, &job_id, &worker_id, 7, "model", 128, None, &tag
         ));
         assert!(!DispatchAuth::verify_dispatch(
-            &secret, &job_id, &worker_id, 8, "model", 128, &tag
+            &secret, &job_id, &worker_id, 8, "model", 128, None, &tag
+        ));
+        assert!(!DispatchAuth::verify_dispatch(
+            &secret,
+            &job_id,
+            &worker_id,
+            7,
+            "model",
+            128,
+            Some("different prompt"),
+            &tag
         ));
     }
 

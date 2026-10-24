@@ -195,6 +195,9 @@ pub(crate) fn execute_transaction_inner(
             // Create job object. The job ID is derived from the transaction
             // hash so it is deterministic per tx while staying unique.
             let job_id = new_object_id(&bincode::serialize(&(requester, model_id, tx_hash))?);
+            if let Some(prompt) = w.pending_job_prompts.remove(&tx_hash) {
+                w.job_prompts.insert(job_id, prompt);
+            }
             let data = ObjectData::InferenceJob {
                 job_id,
                 epoch_id: w.current_epoch.id,
@@ -266,6 +269,7 @@ pub(crate) fn execute_transaction_inner(
             receipt_hash,
             ..
         } => {
+            w.job_prompts.remove(job_id);
             // Update job status to completed
             if let Some(obj) = w.objects.get_mut(job_id)
                 && let ObjectData::InferenceJob {

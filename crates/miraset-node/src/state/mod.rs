@@ -13,6 +13,8 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub const MAX_JOB_PROMPT_BYTES: usize = 64 * 1024;
+
 /// Shared, lock-protected node state.
 ///
 /// # Concurrency contract
@@ -62,6 +64,10 @@ pub(crate) struct StateInner {
     // Mempool cap
     pub(crate) mempool_capacity: usize,
 
+    // Local-only prompt data, deliberately excluded from transaction/block state.
+    pub(crate) pending_job_prompts: HashMap<[u8; 32], String>,
+    pub(crate) job_prompts: HashMap<ObjectId, String>,
+
     // M2: allow loopback/private worker endpoints (default false)
     pub(crate) allow_private_endpoints: bool,
 }
@@ -83,6 +89,8 @@ impl State {
                 current_epoch: Epoch::new(0, now),
                 past_epochs: Vec::new(),
                 mempool_capacity: 10_000,
+                pending_job_prompts: HashMap::new(),
+                job_prompts: HashMap::new(),
                 allow_private_endpoints: false,
             })),
             storage: None,
@@ -161,6 +169,8 @@ impl State {
                 current_epoch: Epoch::new(0, now),
                 past_epochs: Vec::new(),
                 mempool_capacity: 10_000,
+                pending_job_prompts: HashMap::new(),
+                job_prompts: HashMap::new(),
                 allow_private_endpoints: false,
             })),
             storage,
@@ -228,6 +238,12 @@ impl State {
 
     pub fn submit_transaction(&self, tx: Transaction) -> Result<(), TxError> {
         validation::submit_transaction(self, tx)
+    }
+
+    /// Submit a signed job transaction with its separately signed off-chain
+    /// prompt. Prompt data is held in memory until worker dispatch.
+    pub fn submit_job_with_prompt(&self, tx: Transaction, prompt: String) -> Result<(), TxError> {
+        validation::submit_job_with_prompt(self, tx, prompt)
     }
 
     /// Compute a deterministic state root from the current in-memory state.
@@ -793,5 +809,47 @@ mod tests {
         assert_eq!(blocks[0].hash().unwrap(), blocks[1].hash().unwrap());
         assert_eq!(states[0].get_balance(&recipient.address()), 100);
         assert_eq!(states[1].get_balance(&recipient.address()), 100);
+    }
+
+    #[test]
+    fn job_prompt_stays_off_chain_until_worker_dispatch() {
+        let requester = KeyPair::from_bytes(&[11; 32]);
+        let prompt = "local prompt that must not enter the block";
+        let state = State::new();
+        state.add_balance(&requester.address(), 1_000_000_000_000);
+
+        let mut tx = Transaction::CreateJob {
+            requester: requester.address(),
+            model_id: "test-model".to_string(),
+            max_tokens: 16,
+            escrow_amount: 1_000,
+            nonce: 0,
+            signature: [0; 64],
+        };
+        sign_transaction(&mut tx, &requester).unwrap();
+        let tx_hash = tx.hash().unwrap();
+
+        state
+            .submit_job_with_prompt(tx, prompt.to_string())
+            .unwrap();
+        assert_eq!(
+            state.inner.read().pending_job_prompts.get(&tx_hash),
+            Some(&prompt.to_string())
+        );
+
+        let block = state.produce_block().unwrap();
+        let serialized_block = bincode::serialize(&block).unwrap();
+        assert!(
+            !serialized_block
+                .windows(prompt.len())
+                .any(|window| window == prompt.as_bytes())
+        );
+
+        let jobs = state.get_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            state.inner.read().job_prompts.get(&jobs[0].0),
+            Some(&prompt.to_string())
+        );
     }
 }

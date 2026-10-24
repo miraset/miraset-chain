@@ -436,6 +436,20 @@ pub fn verify_transaction_signature(tx: &Transaction) -> bool {
     crate::crypto::verify_signature(tx.from(), &msg, tx.signature())
 }
 
+/// Canonical message for signing a prompt carried outside the transaction.
+///
+/// The job transaction hash binds the prompt to its paid on-chain request
+/// without adding prompt contents to transaction or block serialization.
+#[must_use]
+pub fn job_input_signing_bytes(tx_hash: &[u8; 32], prompt: &str) -> Vec<u8> {
+    let prompt_hash = blake3::hash(prompt.as_bytes());
+    let mut message = Vec::with_capacity(64);
+    message.extend_from_slice(b"miraset-job-input-v1");
+    message.extend_from_slice(tx_hash);
+    message.extend_from_slice(prompt_hash.as_bytes());
+    message
+}
+
 /// Block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Block {
@@ -580,6 +594,25 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::crypto::KeyPair;
+
+    #[test]
+    fn job_input_signature_binds_prompt_to_transaction() {
+        let keypair = KeyPair::from_bytes(&[9; 32]);
+        let tx_hash = [7; 32];
+        let prompt = "hello";
+        let signature = keypair.sign(&job_input_signing_bytes(&tx_hash, prompt));
+
+        assert!(crate::crypto::verify_signature(
+            &keypair.address(),
+            &job_input_signing_bytes(&tx_hash, prompt),
+            &signature
+        ));
+        assert!(!crate::crypto::verify_signature(
+            &keypair.address(),
+            &job_input_signing_bytes(&tx_hash, "changed"),
+            &signature
+        ));
+    }
 
     #[test]
     fn test_object_id_generation() {
