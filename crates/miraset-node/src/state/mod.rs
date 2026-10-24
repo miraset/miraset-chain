@@ -10,7 +10,7 @@ use crate::storage::Storage;
 use chrono::Utc;
 use miraset_core::{Address, Block, Event, Object, ObjectData, ObjectId, Transaction, Version};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Shared, lock-protected node state.
@@ -39,6 +39,7 @@ pub struct State {
     pub(crate) allow_private_endpoints: bool,
 }
 
+#[derive(Clone)]
 pub(crate) struct StateInner {
     // Object storage (Sui-like)
     pub(crate) objects: HashMap<ObjectId, Object>,
@@ -68,7 +69,7 @@ pub(crate) struct StateInner {
 impl State {
     pub fn new() -> Self {
         let genesis = Block::genesis();
-        let now = Utc::now();
+        let now = chrono::DateTime::<Utc>::UNIX_EPOCH;
         Self {
             inner: Arc::new(RwLock::new(StateInner {
                 objects: HashMap::new(),
@@ -94,7 +95,7 @@ impl State {
     pub fn new_with_storage(storage: Option<Storage>) -> Result<Self, StateError> {
         let genesis = Block::genesis();
         let genesis_hash = genesis.hash().unwrap_or([0; 32]);
-        let now = Utc::now();
+        let now = chrono::DateTime::<Utc>::UNIX_EPOCH;
 
         // Try to load state from storage if available
         let (blocks, balances, nonces, events) = if let Some(ref store) = storage {
@@ -273,12 +274,58 @@ impl State {
     }
 
     pub fn produce_block(&self) -> Result<Block, StateError> {
+        self.produce_block_inner(None, Utc::now())
+    }
+
+    /// Apply the exact transaction batch and timestamp agreed by consensus.
+    ///
+    /// Unlike [`produce_block`], this does not read or clear the local mempool.
+    /// The caller must only invoke it for a committed consensus proposal.
+    pub fn produce_block_with_transactions(
+        &self,
+        transactions: Vec<Transaction>,
+        timestamp: chrono::DateTime<Utc>,
+    ) -> Result<Block, StateError> {
+        self.produce_block_inner(Some(transactions), timestamp)
+    }
+
+    fn produce_block_inner(
+        &self,
+        committed_transactions: Option<Vec<Transaction>>,
+        timestamp: chrono::DateTime<Utc>,
+    ) -> Result<Block, StateError> {
         let mut w = self.inner.write();
         let prev = w.blocks.last().ok_or(StateError::NoGenesis)?;
         let height = prev.height + 1;
         let prev_hash = prev.hash()?;
 
-        let transactions = std::mem::take(&mut w.pending_txs);
+        let is_committed_batch = committed_transactions.is_some();
+        let transactions =
+            committed_transactions.unwrap_or_else(|| std::mem::take(&mut w.pending_txs));
+        if is_committed_batch {
+            let mut expected_nonces = HashMap::new();
+            for tx in &transactions {
+                if !miraset_core::verify_transaction_signature(tx) {
+                    return Err(StateError::Other(
+                        "consensus batch contains an invalid transaction signature".to_string(),
+                    ));
+                }
+
+                let expected = expected_nonces
+                    .entry(*tx.from())
+                    .or_insert_with(|| w.nonces.get(tx.from()).copied().unwrap_or(0));
+                if tx.nonce() != *expected {
+                    return Err(StateError::Other(format!(
+                        "consensus batch has invalid nonce: expected {}, got {}",
+                        expected,
+                        tx.nonce()
+                    )));
+                }
+                *expected = expected
+                    .checked_add(1)
+                    .ok_or(StateError::ArithmeticOverflow)?;
+            }
+        }
         let event_index_start = w.events.len();
         let mut nonce_updates: Vec<(Address, u64)> = Vec::with_capacity(transactions.len());
         let mut balance_updates: Vec<(Address, u64)> = Vec::new();
@@ -299,6 +346,7 @@ impl State {
                 &mut w,
                 tx,
                 height,
+                timestamp,
                 &mut balance_updates,
                 &gas_config,
             )?;
@@ -309,7 +357,7 @@ impl State {
 
         let block = Block {
             height,
-            timestamp: chrono::Utc::now(),
+            timestamp,
             prev_hash,
             transactions,
             state_root,
@@ -367,6 +415,41 @@ impl State {
             .last()
             .cloned()
             .ok_or(StateError::NoGenesis)
+    }
+
+    pub(crate) fn pending_transactions(&self) -> Vec<Transaction> {
+        self.inner.read().pending_txs.clone()
+    }
+
+    pub(crate) fn preview_state(&self) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(self.inner.read().clone())),
+            storage: None,
+            gas_config: Arc::clone(&self.gas_config),
+            dispatch_secret: self.dispatch_secret,
+            allow_private_endpoints: self.allow_private_endpoints,
+        }
+    }
+
+    pub(crate) fn remove_committed_transactions(
+        &self,
+        transactions: &[Transaction],
+    ) -> Result<(), StateError> {
+        let committed_hashes: HashSet<_> = transactions
+            .iter()
+            .map(Transaction::hash)
+            .collect::<Result<_, _>>()?;
+        self.inner
+            .write()
+            .pending_txs
+            .retain(|pending| match pending.hash() {
+                Ok(hash) => !committed_hashes.contains(&hash),
+                Err(error) => {
+                    tracing::error!(%error, "failed to hash pending transaction while removing committed batch");
+                    true
+                }
+            });
+        Ok(())
     }
 
     pub fn get_block(&self, height: u64) -> Option<Block> {
@@ -668,5 +751,47 @@ impl State {
 impl Default for State {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::State;
+    use chrono::{DateTime, Utc};
+    use miraset_core::{KeyPair, Transaction, sign_transaction};
+
+    #[test]
+    fn committed_transaction_batch_replays_identically() {
+        let sender = KeyPair::from_bytes(&[7; 32]);
+        let recipient = KeyPair::from_bytes(&[8; 32]);
+        let mut transaction = Transaction::Transfer {
+            from: sender.address(),
+            to: recipient.address(),
+            amount: 100,
+            nonce: 0,
+            signature: [0; 64],
+        };
+        sign_transaction(&mut transaction, &sender).unwrap();
+
+        let timestamp = DateTime::<Utc>::UNIX_EPOCH;
+        let mut states = [State::new(), State::new()];
+        for state in &mut states {
+            state.add_balance(&sender.address(), 100_000_000);
+        }
+
+        let blocks: Vec<_> = states
+            .iter()
+            .map(|state| {
+                state
+                    .produce_block_with_transactions(vec![transaction.clone()], timestamp)
+                    .unwrap()
+            })
+            .collect();
+
+        assert_eq!(blocks[0].hash().unwrap(), blocks[1].hash().unwrap());
+        assert_eq!(states[0].get_balance(&recipient.address()), 100);
+        assert_eq!(states[1].get_balance(&recipient.address()), 100);
     }
 }

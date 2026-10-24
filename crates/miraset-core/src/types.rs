@@ -455,7 +455,7 @@ impl Block {
     pub fn genesis() -> Self {
         Self {
             height: 0,
-            timestamp: Utc::now(),
+            timestamp: DateTime::<Utc>::UNIX_EPOCH,
             prev_hash: [0; 32],
             transactions: vec![],
             state_root: [0; 32],

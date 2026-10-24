@@ -2,7 +2,7 @@ use crate::epoch::JobResult as EpochJobResult;
 use crate::error::StateError;
 use crate::gas::GasConfig;
 use crate::state::{StateInner, jobs};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use miraset_core::{
     Address, Event, JobStatus, Object, ObjectData, Transaction, WorkerStatus, new_object_id,
 };
@@ -15,6 +15,7 @@ pub(crate) fn execute_transaction_inner(
     w: &mut StateInner,
     tx: &Transaction,
     height: u64,
+    timestamp: DateTime<Utc>,
     balance_updates: &mut Vec<(Address, u64)>,
     gas_config: &GasConfig,
 ) -> Result<(), StateError> {
@@ -78,7 +79,7 @@ pub(crate) fn execute_transaction_inner(
                 message: message.clone(),
                 tx_hash,
                 block_height: height,
-                timestamp: Utc::now(),
+                timestamp,
             };
             emit_event(w, event);
         }
@@ -204,7 +205,7 @@ pub(crate) fn execute_transaction_inner(
                 fixed_price_per_token: crate::epoch::PRICE_PER_TOKEN,
                 escrow_amount: *escrow_amount,
                 status: JobStatus::Created,
-                created_at: Utc::now(),
+                created_at: timestamp,
             };
 
             let obj = Object::new(*requester, data)?;

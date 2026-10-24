@@ -6,64 +6,84 @@ services:
     container_name: miraset-node1
     ports:
       - "9944:9944"
+      - "9948:9948"
     volumes:
       - node1-data:/data
     environment:
       - NODE_ID=1
       - RUST_LOG=info
-      - RPC_ADDR=0.0.0.0:9944
+      - MIRASET_STORAGE_PATH=/data
+      - MIRASET_HOTSTUFF=true
+      - MIRASET_HOTSTUFF_ADDR=0.0.0.0:9948
+      - MIRASET_HOTSTUFF_KEY=1111111111111111111111111111111111111111111111111111111111111111
+      - MIRASET_HOTSTUFF_VALIDATORS=d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737@0.0.0.0:9948,a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0@node2:9948,17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce@node3:9948,d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48@node4:9948
     networks:
       miraset-net:
         ipv4_address: 172.20.0.11
-    command: miraset node start --rpc-addr 0.0.0.0:9944
+    command: miraset node start --rpc-addr 0.0.0.0:9944 --hotstuff
 
   node2:
     build: .
     container_name: miraset-node2
     ports:
       - "9945:9944"
+      - "9949:9948"
     volumes:
       - node2-data:/data
     environment:
       - NODE_ID=2
       - RUST_LOG=info
-      - RPC_ADDR=0.0.0.0:9944
+      - MIRASET_STORAGE_PATH=/data
+      - MIRASET_HOTSTUFF=true
+      - MIRASET_HOTSTUFF_ADDR=0.0.0.0:9948
+      - MIRASET_HOTSTUFF_KEY=2222222222222222222222222222222222222222222222222222222222222222
+      - MIRASET_HOTSTUFF_VALIDATORS=d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737@node1:9948,a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0@0.0.0.0:9948,17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce@node3:9948,d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48@node4:9948
     networks:
       miraset-net:
         ipv4_address: 172.20.0.12
-    command: miraset node start --rpc-addr 0.0.0.0:9944
+    command: miraset node start --rpc-addr 0.0.0.0:9944 --hotstuff
 
   node3:
     build: .
     container_name: miraset-node3
     ports:
       - "9946:9944"
+      - "9950:9948"
     volumes:
       - node3-data:/data
     environment:
       - NODE_ID=3
       - RUST_LOG=info
-      - RPC_ADDR=0.0.0.0:9944
+      - MIRASET_STORAGE_PATH=/data
+      - MIRASET_HOTSTUFF=true
+      - MIRASET_HOTSTUFF_ADDR=0.0.0.0:9948
+      - MIRASET_HOTSTUFF_KEY=3333333333333333333333333333333333333333333333333333333333333333
+      - MIRASET_HOTSTUFF_VALIDATORS=d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737@node1:9948,a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0@node2:9948,17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce@0.0.0.0:9948,d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48@node4:9948
     networks:
       miraset-net:
         ipv4_address: 172.20.0.13
-    command: miraset node start --rpc-addr 0.0.0.0:9944
+    command: miraset node start --rpc-addr 0.0.0.0:9944 --hotstuff
 
   node4:
     build: .
     container_name: miraset-node4
     ports:
       - "9947:9944"
+      - "9951:9948"
     volumes:
       - node4-data:/data
     environment:
       - NODE_ID=4
       - RUST_LOG=info
-      - RPC_ADDR=0.0.0.0:9944
+      - MIRASET_STORAGE_PATH=/data
+      - MIRASET_HOTSTUFF=true
+      - MIRASET_HOTSTUFF_ADDR=0.0.0.0:9948
+      - MIRASET_HOTSTUFF_KEY=4444444444444444444444444444444444444444444444444444444444444444
+      - MIRASET_HOTSTUFF_VALIDATORS=d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737@node1:9948,a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0@node2:9948,17cb79fb2b4120f2b1ec65e4198d6e08b28e813feb01e4a400839b85e18080ce@node3:9948,d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c48@0.0.0.0:9948
     networks:
       miraset-net:
         ipv4_address: 172.20.0.14
-    command: miraset node start --rpc-addr 0.0.0.0:9944
+    command: miraset node start --rpc-addr 0.0.0.0:9944 --hotstuff
 
 networks:
   miraset-net:

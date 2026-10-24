@@ -27,7 +27,8 @@ rand.workspace = true
 
 # Gas metering
 once_cell.workspace = true
+hotstuff_rs = "=0.4.0"
+borsh = "0.10"
 
 [dev-dependencies]
 tempfile = "3.8"
-

@@ -24,6 +24,12 @@ struct NodeConfig {
     storage_path: String,
     #[serde(default = "default_block_interval")]
     block_interval: u64,
+    #[serde(default)]
+    hotstuff: bool,
+    #[serde(default = "default_hotstuff_addr")]
+    hotstuff_addr: String,
+    #[serde(default)]
+    hotstuff_validators: String,
 }
 
 impl Default for NodeConfig {
@@ -32,6 +38,9 @@ impl Default for NodeConfig {
             rpc_addr: default_rpc_addr(),
             storage_path: default_storage_path(),
             block_interval: default_block_interval(),
+            hotstuff: false,
+            hotstuff_addr: default_hotstuff_addr(),
+            hotstuff_validators: String::new(),
         }
     }
 }
@@ -46,6 +55,10 @@ fn default_storage_path() -> String {
 
 fn default_block_interval() -> u64 {
     300
+}
+
+fn default_hotstuff_addr() -> String {
+    "0.0.0.0:9948".to_string()
 }
 
 /// Path for the persisted genesis key inside the node's storage directory.
@@ -72,9 +85,10 @@ fn load_or_create_genesis_keypair(
     dev: bool,
     rpc_addr: &str,
     storage_path: &str,
+    allow_network_dev: bool,
 ) -> anyhow::Result<KeyPair> {
     if dev {
-        if !is_loopback_bind(rpc_addr) {
+        if !is_loopback_bind(rpc_addr) && !allow_network_dev {
             anyhow::bail!(
                 "--dev is only allowed when binding to a loopback address (got {})",
                 rpc_addr
@@ -141,6 +155,7 @@ fn load_or_create_dispatch_secret(
     dev: bool,
     rpc_addr: &str,
     storage_path: &str,
+    allow_network_dev: bool,
 ) -> anyhow::Result<[u8; 32]> {
     if let Ok(hex_secret) = std::env::var("MIRASET_DISPATCH_SECRET") {
         let bytes = hex::decode(hex_secret.trim())?;
@@ -153,7 +168,7 @@ fn load_or_create_dispatch_secret(
     }
 
     if dev {
-        if !is_loopback_bind(rpc_addr) {
+        if !is_loopback_bind(rpc_addr) && !allow_network_dev {
             anyhow::bail!(
                 "dev-mode dispatch secret is only allowed on loopback binds (got {})",
                 rpc_addr
@@ -198,6 +213,72 @@ fn load_or_create_dispatch_secret(
     Ok(secret)
 }
 
+fn parse_hotstuff_validators(
+    value: &str,
+) -> anyhow::Result<Vec<miraset_node::hotstuff::ValidatorPeer>> {
+    let mut validators = Vec::new();
+    for entry in value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let (public_key, address) = entry
+            .split_once('@')
+            .ok_or_else(|| anyhow::anyhow!("invalid HotStuff validator entry: {entry}"))?;
+        let bytes = hex::decode(public_key)?;
+        let public_key: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("HotStuff validator public keys must be 32 bytes"))?;
+        validators.push(miraset_node::hotstuff::ValidatorPeer {
+            public_key,
+            address: address.parse()?,
+        });
+    }
+    anyhow::ensure!(
+        !validators.is_empty(),
+        "HotStuff requires MIRASET_HOTSTUFF_VALIDATORS entries"
+    );
+    Ok(validators)
+}
+
+fn load_or_create_hotstuff_key(storage_path: &str) -> anyhow::Result<[u8; 32]> {
+    if let Ok(value) = std::env::var("MIRASET_HOTSTUFF_KEY") {
+        let bytes = hex::decode(value.trim())?;
+        return bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("MIRASET_HOTSTUFF_KEY must be 32 hex-encoded bytes"));
+    }
+
+    let path = Path::new(storage_path).join("hotstuff_key");
+    if path.exists() {
+        let bytes = hex::decode(std::fs::read_to_string(&path)?.trim())?;
+        return bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("persisted HotStuff key has wrong length"));
+    }
+
+    let keypair = KeyPair::generate();
+    let secret = keypair.secret_bytes();
+    std::fs::create_dir_all(storage_path)?;
+    let secret_hex = hex::encode(secret);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        std::io::Write::write_all(&mut file, secret_hex.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, secret_hex)?;
+    }
+
+    Ok(secret)
+}
+
 /// Load configuration with precedence: CLI flags > Env vars > Config file > Defaults
 fn load_config() -> Config {
     load_config_from_path(Path::new("miraset.toml"))
@@ -235,6 +316,15 @@ fn apply_env_overrides_from_vars(
         && let Ok(interval) = val.parse::<u64>()
     {
         config.node.block_interval = interval;
+    }
+    if let Some(val) = vars.get("MIRASET_HOTSTUFF") {
+        config.node.hotstuff = val.eq_ignore_ascii_case("true");
+    }
+    if let Some(val) = vars.get("MIRASET_HOTSTUFF_ADDR") {
+        config.node.hotstuff_addr = val.clone();
+    }
+    if let Some(val) = vars.get("MIRASET_HOTSTUFF_VALIDATORS") {
+        config.node.hotstuff_validators = val.clone();
     }
     config
 }
@@ -289,6 +379,15 @@ enum NodeCommands {
         /// Allow any origin for CORS. Only safe on loopback devnets.
         #[arg(long)]
         cors_any: bool,
+        /// Enable the experimental HotStuff BFT consensus runtime.
+        #[arg(long)]
+        hotstuff: bool,
+        /// TCP bind address for HotStuff consensus messages.
+        #[arg(long)]
+        hotstuff_addr: Option<String>,
+        /// Comma-separated validator entries in public-key-hex@socket-address form.
+        #[arg(long)]
+        hotstuff_validators: Option<String>,
     },
 }
 
@@ -377,6 +476,9 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             dev,
             allow_private_endpoints,
             cors_any,
+            hotstuff,
+            hotstuff_addr,
+            hotstuff_validators,
         } => {
             // Load config with precedence: CLI > Env > File > Defaults
             let mut config = load_config();
@@ -386,12 +488,14 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             let final_rpc_addr = rpc_addr;
             let final_storage_path = storage_path.unwrap_or(config.node.storage_path);
             let final_block_interval = block_interval.unwrap_or(config.node.block_interval);
+            let hotstuff_enabled = hotstuff || config.node.hotstuff;
+            let final_hotstuff_addr = hotstuff_addr.unwrap_or(config.node.hotstuff_addr);
+            let final_hotstuff_validators =
+                hotstuff_validators.unwrap_or(config.node.hotstuff_validators);
 
-            // H5: devnet gate. Consensus is not wired; production mode is
-            // explicitly unsupported.
-            if !dev {
+            if !dev && !hotstuff_enabled {
                 anyhow::bail!(
-                    "Non-dev mode is not supported: PoCC consensus is not yet wired into block production. Use --dev for local devnet only."
+                    "Non-dev mode requires an enabled consensus runtime. Use --dev for the single-author local devnet."
                 );
             }
 
@@ -399,10 +503,18 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             println!("RPC address: {}", final_rpc_addr);
             println!("Storage path: {}", final_storage_path);
             println!("Block interval: {}s", final_block_interval);
+            if hotstuff_enabled {
+                println!("Consensus: HotStuff BFT");
+                println!("Consensus address: {}", final_hotstuff_addr);
+            }
 
             // H2: secure genesis key handling.
-            let genesis_kp =
-                load_or_create_genesis_keypair(dev, &final_rpc_addr, &final_storage_path)?;
+            let genesis_kp = load_or_create_genesis_keypair(
+                dev,
+                &final_rpc_addr,
+                &final_storage_path,
+                hotstuff_enabled,
+            )?;
             println!("Genesis account: {}", genesis_kp.address().to_hex());
             if dev {
                 tracing::warn!(
@@ -414,8 +526,12 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
 
             // H4: load or create the shared secret used to authenticate
             // node->worker job dispatches.
-            let dispatch_secret =
-                load_or_create_dispatch_secret(dev, &final_rpc_addr, &final_storage_path)?;
+            let dispatch_secret = load_or_create_dispatch_secret(
+                dev,
+                &final_rpc_addr,
+                &final_storage_path,
+                hotstuff_enabled,
+            )?;
             if dev {
                 tracing::warn!(
                     "A dispatch secret has been generated/loaded. Workers must be started with the same secret to accept job assignments."
@@ -434,15 +550,32 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             // Fund genesis account for devnet operation.
             state.add_balance(&genesis_kp.address(), 1_000_000_000_000); // 1 trillion tokens
 
-            // Start block producer
-            let producer_state = state.clone();
-            tokio::spawn(async move {
-                miraset_node::run_block_producer(
-                    producer_state,
-                    Duration::from_secs(final_block_interval),
-                )
-                .await;
-            });
+            let _hotstuff_node = if hotstuff_enabled {
+                let consensus_address = final_hotstuff_addr.parse()?;
+                let validators = parse_hotstuff_validators(&final_hotstuff_validators)?;
+                let signing_key = load_or_create_hotstuff_key(&final_storage_path)?;
+                Some(miraset_node::hotstuff::start_hotstuff(
+                    state.clone(),
+                    &storage,
+                    miraset_node::hotstuff::HotStuffConfig {
+                        bind_address: consensus_address,
+                        signing_key,
+                        validators,
+                        chain_id: 1,
+                        max_view_time: Duration::from_secs(3),
+                    },
+                )?)
+            } else {
+                let producer_state = state.clone();
+                tokio::spawn(async move {
+                    miraset_node::run_block_producer(
+                        producer_state,
+                        Duration::from_secs(final_block_interval),
+                    )
+                    .await;
+                });
+                None
+            };
 
             // Start RPC
             let addr: std::net::SocketAddr = final_rpc_addr.parse()?;

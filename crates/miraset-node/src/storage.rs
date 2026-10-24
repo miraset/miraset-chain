@@ -25,6 +25,10 @@ impl Storage {
         Ok(Self { db: Arc::new(db) })
     }
 
+    pub(crate) fn open_tree(&self, name: &str) -> Result<sled::Tree, StorageError> {
+        Ok(self.db.open_tree(name)?)
+    }
+
     /// Save a block
     pub fn save_block(&self, block: &Block) -> Result<(), StorageError> {
         let key = format!("block:{}", block.height);

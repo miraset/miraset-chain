@@ -7,7 +7,13 @@ pub(crate) fn find_worker_for_model(
     objects: &std::collections::HashMap<ObjectId, miraset_core::Object>,
     model_id: &str,
 ) -> Option<ObjectId> {
-    for (wid, obj) in objects {
+    let mut worker_ids: Vec<_> = objects.keys().copied().collect();
+    worker_ids.sort_unstable();
+
+    for wid in worker_ids {
+        let Some(obj) = objects.get(&wid) else {
+            continue;
+        };
         if let ObjectData::WorkerRegistration {
             supported_models,
             status,
@@ -16,7 +22,7 @@ pub(crate) fn find_worker_for_model(
             && *status == WorkerStatus::Active
             && supported_models.iter().any(|m| m == model_id)
         {
-            return Some(*wid);
+            return Some(wid);
         }
     }
     None

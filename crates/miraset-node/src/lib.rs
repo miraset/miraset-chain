@@ -6,6 +6,7 @@ pub mod epoch;
 pub mod error;
 pub mod executor;
 pub mod gas;
+pub mod hotstuff;
 pub mod pocc;
 pub mod pocc_manager;
 pub mod rpc;
