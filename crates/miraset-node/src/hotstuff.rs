@@ -93,8 +93,8 @@ pub fn start_hotstuff(
         "local HotStuff signing key is not in the validator set"
     );
     anyhow::ensure!(
-        peer_addresses.get(&local_key) == Some(&config.bind_address),
-        "local HotStuff validator address must match the consensus bind address"
+        peer_addresses.get(&local_key).map(SocketAddr::port) == Some(config.bind_address.port()),
+        "local HotStuff validator port must match the consensus bind address port"
     );
 
     let (network, network_runtime) =

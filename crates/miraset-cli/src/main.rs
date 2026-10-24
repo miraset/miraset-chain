@@ -216,6 +216,8 @@ fn load_or_create_dispatch_secret(
 fn parse_hotstuff_validators(
     value: &str,
 ) -> anyhow::Result<Vec<miraset_node::hotstuff::ValidatorPeer>> {
+    use std::net::ToSocketAddrs;
+
     let mut validators = Vec::new();
     for entry in value
         .split(',')
@@ -229,9 +231,20 @@ fn parse_hotstuff_validators(
         let public_key: [u8; 32] = bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("HotStuff validator public keys must be 32 bytes"))?;
+        let resolved = address
+            .parse()
+            .or_else(|_| {
+                address
+                    .to_socket_addrs()?
+                    .next()
+                    .ok_or_else(|| std::io::Error::other("no socket addresses resolved"))
+            })
+            .map_err(|error| {
+                anyhow::anyhow!("invalid HotStuff validator address '{address}': {error}")
+            })?;
         validators.push(miraset_node::hotstuff::ValidatorPeer {
             public_key,
-            address: address.parse()?,
+            address: resolved,
         });
     }
     anyhow::ensure!(
