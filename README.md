@@ -32,6 +32,19 @@ cd wallet && bun run tauri:dev
 cargo test --workspace
 ```
 
+## Resource Benchmark
+
+Measures block-production resources (wall-time, throughput, peak RSS,
+serialized block size) for blocks with 0, 1, 100, 1,000 and 10,000
+transactions (10,000 = mempool cap, the practical max txs per block):
+
+```bash
+npm run bench:resources
+```
+
+On completion the benchmark writes `reports/block-resource-bench.json`
+and `reports/block-resource-bench.md`.
+
 ## Local Docker Inference Test
 
 The test compose stack runs one node and one worker. Ollama stays on the host
