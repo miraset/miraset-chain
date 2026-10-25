@@ -71,6 +71,7 @@ passthrough can be enabled with the optional Compose override below.
 
    ```bash
    export MIRASET_DISPATCH_SECRET="$(openssl rand -hex 32)"
+   export MIRASET_WORKER_SECRET_KEY="$(openssl rand -hex 32)"
    # Optional: change the default model from gemma3:4b
    # export OLLAMA_MODEL=llama3.2:latest
    docker compose -f docker-compose.test.yml up --build
@@ -86,15 +87,26 @@ passthrough can be enabled with the optional Compose override below.
    docker compose -f docker-compose.test.yml -f docker-compose.test.gpu.yml up --build
    ```
 
-2. Import the fixed devnet genesis account into the local CLI wallet (test
-   key only; never use it outside this local devnet):
+2. Import the fixed devnet account and the worker key into the local CLI
+   wallet. The genesis key is public test-only; don't use it outside this
+   local devnet:
 
    ```bash
    cargo run -p miraset-cli -- wallet import local-dev 0101010101010101010101010101010101010101010101010101010101010101
+   cargo run -p miraset-cli -- wallet import local-worker "$MIRASET_WORKER_SECRET_KEY"
    ```
 
-3. Submit a job through node RPC and wait for the Ollama-backed result. Use
-   the same model configured in `OLLAMA_MODEL`:
+   The worker account needs gas to register. Copy its address from the import
+   output, fund it from the devnet account, then restart the worker:
+
+   ```bash
+   cargo run -p miraset-cli -- wallet transfer local-dev <worker-address> 1000000000
+   docker compose -f docker-compose.test.yml restart worker
+   ```
+
+3. Check `curl http://127.0.0.1:9944/workers` shows the worker as active, then
+   submit a job through node RPC. Use the same model configured in
+   `OLLAMA_MODEL`:
 
    ```bash
    cargo run -p miraset-cli -- job submit local-dev \

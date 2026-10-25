@@ -2,6 +2,7 @@
 use anyhow::Result;
 use miraset_core::KeyPair;
 use miraset_worker::{BackendType, Worker, WorkerConfig};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -146,6 +147,24 @@ fn supported_models_from_env(backend_type: BackendType) -> Vec<String> {
         .collect()
 }
 
+fn worker_keypair_from_secret(secret_hex: Option<&str>) -> Result<KeyPair> {
+    let Some(secret_hex) = secret_hex else {
+        return Ok(KeyPair::generate());
+    };
+    let secret: [u8; 32] = hex::decode(secret_hex.trim())?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("MIRASET_WORKER_SECRET_KEY must be 32 hex-encoded bytes"))?;
+    Ok(KeyPair::from_bytes(&secret))
+}
+
+fn worker_keypair_from_env() -> Result<KeyPair> {
+    match std::env::var("MIRASET_WORKER_SECRET_KEY") {
+        Ok(secret_hex) => worker_keypair_from_secret(Some(&secret_hex)),
+        Err(std::env::VarError::NotPresent) => worker_keypair_from_secret(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
@@ -190,7 +209,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    let keypair = KeyPair::generate();
+    let keypair = worker_keypair_from_env()?;
     let worker_id = blake3::hash(&bincode::serialize(&keypair.address())?).into();
     let bind_addr =
         std::env::var("MIRASET_WORKER_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
@@ -252,7 +271,11 @@ async fn main() -> Result<()> {
     tracing::info!("Connecting to node at {}", config.node_url);
 
     let listener = TcpListener::bind(&bind_addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
@@ -261,6 +284,13 @@ async fn main() -> Result<()> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn worker_secret_key_requires_32_hex_bytes() {
+        let keypair = worker_keypair_from_secret(Some(&"02".repeat(32))).unwrap();
+        assert_eq!(keypair.address(), KeyPair::from_bytes(&[2; 32]).address());
+        assert!(worker_keypair_from_secret(Some("bad-key")).is_err());
+    }
 
     #[test]
     fn test_default_backend_url() {

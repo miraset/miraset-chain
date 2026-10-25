@@ -98,6 +98,7 @@ are identical regardless of backend — only the inference engine differs.
 | `MIRASET_BACKEND_API_KEY` | _(unset)_ | Optional Bearer auth key. Required for cloud OpenAI-compatible providers; ignored by local backends without auth. |
 | `MIRASET_SUPPORTED_MODELS` | (per backend defaults) | Comma-separated list of model ids this worker accepts. Overrides per-backend defaults. |
 | `MIRASET_NODE_URL` | `http://127.0.0.1:9944` | Node RPC base URL. |
+| `MIRASET_WORKER_SECRET_KEY` | _(generated at startup)_ | Optional 32-byte hex signing key. Configure it when the worker needs a funded, stable on-chain identity. |
 | `MIRASET_WORKER_BIND_ADDR` | `127.0.0.1:8080` | Worker listener address. |
 | `MIRASET_WORKER_ENDPOINT` | `127.0.0.1:8080` | Hostname and port advertised to the node (without scheme). |
 | `MIRASET_GPU_MODEL` | `Ollama host (hardware unspecified)` | Self-reported hardware label. |

@@ -390,6 +390,10 @@ enum NodeCommands {
         /// Pass `--dev=false` to opt out; the node will refuse to start.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         dev: bool,
+        /// Allow dev mode to bind beyond loopback (e.g. inside a local container).
+        /// Only use on a trusted, isolated network; dev mode uses a fixed key.
+        #[arg(long)]
+        allow_network_dev: bool,
         /// Allow worker endpoints that resolve to loopback/private addresses.
         /// This weakens SSRF protections and is only intended for local testing.
         #[arg(long)]
@@ -516,6 +520,7 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             storage_path,
             block_interval,
             dev,
+            allow_network_dev,
             allow_private_endpoints,
             cors_any,
             hotstuff,
@@ -531,6 +536,7 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
             let final_storage_path = storage_path.unwrap_or(config.node.storage_path);
             let final_block_interval = block_interval.unwrap_or(config.node.block_interval);
             let hotstuff_enabled = hotstuff || config.node.hotstuff;
+            let network_dev_allowed = allow_network_dev || hotstuff_enabled;
             let final_hotstuff_addr = hotstuff_addr.unwrap_or(config.node.hotstuff_addr);
             let final_hotstuff_validators =
                 hotstuff_validators.unwrap_or(config.node.hotstuff_validators);
@@ -549,13 +555,18 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
                 println!("Consensus: HotStuff BFT");
                 println!("Consensus address: {}", final_hotstuff_addr);
             }
+            if allow_network_dev {
+                tracing::warn!(
+                    "Network binding is explicitly allowed in dev mode; keep this node on a trusted, isolated network."
+                );
+            }
 
             // H2: secure genesis key handling.
             let genesis_kp = load_or_create_genesis_keypair(
                 dev,
                 &final_rpc_addr,
                 &final_storage_path,
-                hotstuff_enabled,
+                network_dev_allowed,
             )?;
             println!("Genesis account: {}", genesis_kp.address().to_hex());
             if dev {
@@ -572,7 +583,7 @@ async fn handle_node(cmd: NodeCommands) -> anyhow::Result<()> {
                 dev,
                 &final_rpc_addr,
                 &final_storage_path,
-                hotstuff_enabled,
+                network_dev_allowed,
             )?;
             if dev {
                 tracing::warn!(

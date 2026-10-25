@@ -31,7 +31,7 @@ services:
     build: .
     container_name: miraset-test-node
     ports:
-      - "9944:9944"
+      - "127.0.0.1:9944:9944"
     environment:
       - RUST_LOG=info
       - RUST_BACKTRACE=1
@@ -50,6 +50,7 @@ services:
       - --block-interval
       - "1"
       - --allow-private-endpoints
+      - --allow-network-dev
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9944/health"]
       interval: 2s
@@ -67,6 +68,7 @@ services:
     environment:
       - RUST_LOG=info
       - MIRASET_NODE_URL=http://node:9944
+      - MIRASET_WORKER_SECRET_KEY=${MIRASET_WORKER_SECRET_KEY:?Set a random 32-byte hex worker key in MIRASET_WORKER_SECRET_KEY}
       - MIRASET_WORKER_BIND_ADDR=0.0.0.0:8080
       - MIRASET_WORKER_ENDPOINT=worker:8080
       - MIRASET_BACKEND_TYPE=ollama

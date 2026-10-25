@@ -47,6 +47,8 @@ fn submit_transaction_inner(
         return Err(TxError::InvalidSignature);
     }
 
+    let persisted_nonce = state.get_nonce(from);
+    let persisted_balance = state.get_balance(from);
     let tx_hash = if prompt.is_some() {
         Some(tx.hash().map_err(TxError::Serialization)?)
     } else {
@@ -54,9 +56,10 @@ fn submit_transaction_inner(
     };
 
     let mut w = state.inner.write();
+    let current_nonce = *w.nonces.entry(*from).or_insert(persisted_nonce);
+    let current_balance = *w.balances.entry(*from).or_insert(persisted_balance);
 
     // Check nonce
-    let current_nonce = w.nonces.get(from).copied().unwrap_or(0);
     if nonce != current_nonce {
         return Err(TxError::InvalidNonce {
             expected: current_nonce,
@@ -82,12 +85,11 @@ fn submit_transaction_inner(
     // Type-specific validation (including gas funds)
     match &tx {
         Transaction::Transfer { amount, .. } => {
-            let balance = w.balances.get(from).copied().unwrap_or(0);
             let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
             let total = amount
                 .checked_add(gas_cost)
                 .ok_or(TxError::InsufficientBalance)?;
-            if balance < total {
+            if current_balance < total {
                 return Err(TxError::InsufficientBalance);
             }
         }
@@ -95,9 +97,8 @@ fn submit_transaction_inner(
             if message.is_empty() || message.len() > 1000 {
                 return Err(TxError::InvalidMessageLength);
             }
-            let balance = w.balances.get(from).copied().unwrap_or(0);
             let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
-            if balance < gas_cost {
+            if current_balance < gas_cost {
                 return Err(TxError::InsufficientGas);
             }
         }
@@ -105,26 +106,23 @@ fn submit_transaction_inner(
             if !w.objects.contains_key(object_id) {
                 return Err(TxError::ObjectNotFound);
             }
-            let balance = w.balances.get(from).copied().unwrap_or(0);
             let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
-            if balance < gas_cost {
+            if current_balance < gas_cost {
                 return Err(TxError::InsufficientGas);
             }
         }
         Transaction::CreateJob { escrow_amount, .. } => {
-            let balance = w.balances.get(from).copied().unwrap_or(0);
             let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
             let total = escrow_amount
                 .checked_add(gas_cost)
                 .ok_or(TxError::InsufficientEscrow)?;
-            if balance < total {
+            if current_balance < total {
                 return Err(TxError::InsufficientEscrow);
             }
         }
         _ => {
-            let balance = w.balances.get(from).copied().unwrap_or(0);
             let gas_cost = gas_cost_tokens(estimated_gas, gas_config.base_fee.max(1));
-            if balance < gas_cost {
+            if current_balance < gas_cost {
                 return Err(TxError::InsufficientGas);
             }
         }

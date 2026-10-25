@@ -121,8 +121,9 @@ pub(crate) fn execute_transaction_inner(
                 ));
             }
 
+            let worker_id = new_object_id(&bincode::serialize(owner)?);
             let data = ObjectData::WorkerRegistration {
-                worker_id: new_object_id(&bincode::serialize(owner)?),
+                worker_id,
                 pubkey: *owner,
                 endpoints: validated_endpoints,
                 gpu_model: gpu_model.clone(),
@@ -132,8 +133,12 @@ pub(crate) fn execute_transaction_inner(
                 status: WorkerStatus::Active,
             };
 
-            let obj = Object::new(*owner, data)?;
-            let worker_id = obj.id;
+            let obj = Object {
+                id: worker_id,
+                version: 0,
+                owner: *owner,
+                data,
+            };
             w.objects.insert(worker_id, obj);
             w.object_versions.insert(worker_id, 0);
             w.owned_objects.entry(*owner).or_default().push(worker_id);

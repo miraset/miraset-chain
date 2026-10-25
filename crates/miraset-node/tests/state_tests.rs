@@ -1,7 +1,8 @@
 // State unit tests, moved from src/state/mod.rs to keep the source module focused.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use miraset_core::{Event, KeyPair, Transaction};
+use miraset_core::{Event, KeyPair, ObjectData, Transaction, new_object_id};
 use miraset_node::State;
+use miraset_node::Storage;
 use miraset_node::error::TxError;
 use miraset_node::gas::GasConfig;
 
@@ -308,6 +309,15 @@ fn test_get_events() {
     state.submit_transaction(tx).unwrap();
     state.produce_block().unwrap();
 
+    let expected_worker_id = new_object_id(&bincode::serialize(&kp.address()).unwrap());
+    let workers = state.get_workers();
+    assert_eq!(workers.len(), 1);
+    assert_eq!(workers[0].0, expected_worker_id);
+    assert!(matches!(
+        &workers[0].1.data,
+        ObjectData::WorkerRegistration { worker_id, .. } if *worker_id == expected_worker_id
+    ));
+
     let events = state.get_events(0, 10);
     assert_eq!(events.len(), 1);
 
@@ -393,6 +403,34 @@ fn test_worker_register() {
         }
         _ => panic!("Expected WorkerRegistered event"),
     }
+}
+
+#[test]
+fn test_worker_register_uses_persisted_nonce_and_balance() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage = Storage::open(temp_dir.path()).unwrap();
+    let kp = KeyPair::generate();
+    storage.save_nonce(&kp.address(), 11).unwrap();
+    storage.save_balance(&kp.address(), 10_000).unwrap();
+
+    let mut state = State::new_with_storage(Some(storage)).unwrap();
+    state.set_gas_config(cheap_gas_config());
+    state.set_allow_private_endpoints(true);
+
+    let mut tx = Transaction::RegisterWorker {
+        owner: kp.address(),
+        pubkey: kp.address(),
+        endpoints: vec!["http://localhost:8080".to_string()],
+        gpu_model: "Ollama container".to_string(),
+        vram_total_gib: 0,
+        supported_models: vec!["gemma3:4b".to_string()],
+        stake_bond: 1000,
+        nonce: 11,
+        signature: [0; 64],
+    };
+    miraset_core::sign_transaction(&mut tx, &kp).unwrap();
+
+    assert!(state.submit_transaction(tx).is_ok());
 }
 
 #[test]
