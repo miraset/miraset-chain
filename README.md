@@ -62,40 +62,43 @@ per-package report to `reports/vps-simulation.md` (JSON twin next to it).
 
 ## Local Docker Inference Test
 
-The test compose stack runs one node and one worker. Ollama stays on the host
-so it can use the host's CPU/GPU. The worker calls the host Ollama API, while
-clients submit jobs to the node RPC.
+The test compose stack runs one node, one worker, and Ollama from the official
+`ollama/ollama` image. It downloads the model on first start and keeps model
+data in a Docker volume. Ollama uses the host's CPU by default; NVIDIA GPU
+passthrough can be enabled with the optional Compose override below.
 
-1. Download the configured model (default: `gemma3:4b`), then start Ollama in
-   a terminal with a host-reachable listener:
-
-   ```bash
-   ollama pull gemma3:4b
-   OLLAMA_HOST=0.0.0.0:11434 ollama serve
-   ```
-
-   Binding Ollama to all host interfaces can expose it to your LAN; use this
-   only on a trusted machine/network and restrict access with your firewall.
-2. In another terminal, set a fresh 32-byte hex dispatch secret and start the
-   node and worker containers:
+1. Set a fresh 32-byte hex dispatch secret and start the services:
 
    ```bash
    export MIRASET_DISPATCH_SECRET="$(openssl rand -hex 32)"
+   # Optional: change the default model from gemma3:4b
+   # export OLLAMA_MODEL=llama3.2:latest
    docker compose -f docker-compose.test.yml up --build
    ```
 
-3. Import the fixed devnet genesis account into the local CLI wallet (test
+   To use a different Ollama model, set `OLLAMA_MODEL` before startup (the
+   default is `gemma3:4b`); Compose pulls it automatically.
+
+   To enable an NVIDIA GPU, install the NVIDIA Container Toolkit and start
+   with the GPU override:
+
+   ```bash
+   docker compose -f docker-compose.test.yml -f docker-compose.test.gpu.yml up --build
+   ```
+
+2. Import the fixed devnet genesis account into the local CLI wallet (test
    key only; never use it outside this local devnet):
 
    ```bash
    cargo run -p miraset-cli -- wallet import local-dev 0101010101010101010101010101010101010101010101010101010101010101
    ```
 
-4. Submit a job through node RPC and wait for the Ollama-backed result:
+3. Submit a job through node RPC and wait for the Ollama-backed result. Use
+   the same model configured in `OLLAMA_MODEL`:
 
    ```bash
    cargo run -p miraset-cli -- job submit local-dev \
-     --model gemma3:4b \
+     --model "${OLLAMA_MODEL:-gemma3:4b}" \
      --prompt "Explain what a blockchain node does in one sentence." \
      --max-tokens 128 \
      --escrow 10000
@@ -104,9 +107,9 @@ clients submit jobs to the node RPC.
 The CLI prints the job ID and polls node RPC until the job is completed. To
 inspect the services manually, use `curl http://127.0.0.1:9944/workers` and
 `curl http://127.0.0.1:9944/jobs/<job-id>/result`. Ollama fallback is disabled
-in this compose file, so a missing host/model causes the job to fail instead
-of returning a synthetic response. The prompt stays in node memory until
-dispatch and is lost if the node restarts before then.
+in this compose file, so inference errors fail instead of returning a
+synthetic response. The prompt stays in node memory until dispatch and is lost
+if the node restarts before then.
 
 ## Documentation
 - [Concepts & Overview](docs/concepts/overview.md)

@@ -9,8 +9,11 @@ pluggable inference backend.
 ## Local inference test
 
 The local Docker test keeps the node as the job coordinator and runs one
-worker container. Ollama runs on the host so it can use the host's available
-CPU/GPU; the worker reaches it through Docker's host-gateway address. Clients
+worker container plus Ollama from the official `ollama/ollama` image. The
+worker calls the Ollama service over the private Compose network. Ollama model
+data persists in a Docker volume; a one-shot service pulls the configured
+model before the worker starts. CPU inference is the default; GPU passthrough
+is optional and requires the matching host container runtime/toolkit. Clients
 submit a signed `CreateJob` transaction together with a separately signed,
 off-chain prompt through the node RPC. The prompt is not added to the
 transaction or block serialization. The node holds it in memory until dispatch

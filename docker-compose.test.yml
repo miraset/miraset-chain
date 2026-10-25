@@ -1,4 +1,32 @@
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: miraset-test-ollama
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - miraset-test-net
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  ollama-model:
+    image: ollama/ollama:latest
+    container_name: miraset-test-ollama-model
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["ollama"]
+    command: ["pull", "${OLLAMA_MODEL:-gemma3:4b}"]
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    networks:
+      - miraset-test-net
+    restart: "no"
+
   node:
     build: .
     container_name: miraset-test-node
@@ -34,18 +62,18 @@ services:
     depends_on:
       node:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      ollama-model:
+        condition: service_completed_successfully
     environment:
       - RUST_LOG=info
       - MIRASET_NODE_URL=http://node:9944
       - MIRASET_WORKER_BIND_ADDR=0.0.0.0:8080
       - MIRASET_WORKER_ENDPOINT=worker:8080
       - MIRASET_BACKEND_TYPE=ollama
-      - MIRASET_BACKEND_URL=${MIRASET_BACKEND_URL:-http://host.docker.internal:11434}
+      - MIRASET_BACKEND_URL=http://ollama:11434
       - MIRASET_ALLOW_MOCK_FALLBACK=false
-      - MIRASET_SUPPORTED_MODELS=${MIRASET_SUPPORTED_MODELS:-gemma3:4b}
-      - MIRASET_GPU_MODEL=${MIRASET_GPU_MODEL:-Ollama host}
+      - MIRASET_SUPPORTED_MODELS=${OLLAMA_MODEL:-gemma3:4b}
+      - MIRASET_GPU_MODEL=${MIRASET_GPU_MODEL:-Ollama container}
       - MIRASET_VRAM_TOTAL_GIB=${MIRASET_VRAM_TOTAL_GIB:-0}
       - MIRASET_DISPATCH_SECRET=${MIRASET_DISPATCH_SECRET:?Set a random 32-byte hex value in MIRASET_DISPATCH_SECRET}
     networks:
@@ -58,3 +86,4 @@ networks:
 
 volumes:
   node-data:
+  ollama-data:
