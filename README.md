@@ -34,9 +34,10 @@ cargo test --workspace
 
 ## Resource Benchmark
 
-Measures block-production resources (wall-time, throughput, peak RSS,
-serialized block size) for blocks with 0, 1, 100, 1,000 and 10,000
-transactions (10,000 = mempool cap, the practical max txs per block):
+Measures block-production resources (wall-time, throughput, CPU time and
+utilisation, peak RAM and its share of system RAM, serialized block size)
+for blocks with 0, 1, 100, 1,000 and 10,000 transactions (10,000 =
+mempool cap, the practical max txs per block):
 
 ```bash
 npm run bench:resources

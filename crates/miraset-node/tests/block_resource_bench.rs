@@ -59,6 +59,29 @@ fn parse_kb_field(status: &str, prefix: &str) -> Option<u64> {
     })
 }
 
+/// Process CPU time (user + system) in milliseconds (Linux only).
+///
+/// Reads `utime`/`stime` from `/proc/self/stat` (fields 14/15, clock ticks).
+fn process_cpu_ms() -> Option<f64> {
+    const CLK_TCK: f64 = 100.0; // standard Linux clock tick rate
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // comm may contain spaces/parens; parse fields after the last ')'.
+    let mut rest = stat.rsplit(')').next()?.split_whitespace();
+    let utime: f64 = rest.nth(11)?.parse().ok()?; // field 14 overall
+    let stime: f64 = rest.next()?.parse().ok()?; // field 15 overall
+    Some((utime + stime) / CLK_TCK * 1_000.0)
+}
+
+/// Total system RAM in KiB (Linux only).
+fn system_total_ram_kb() -> Option<u64> {
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+    meminfo.lines().find_map(|line| {
+        line.strip_prefix("MemTotal:")
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+    })
+}
+
 fn median_ms(samples: &[Duration]) -> f64 {
     let mut sorted: Vec<Duration> = samples.to_vec();
     sorted.sort_unstable();
@@ -95,10 +118,16 @@ struct ScenarioReport {
     median_ms: f64,
     max_ms: f64,
     throughput_tx_per_s: f64,
+    /// Total process CPU time (user + system) consumed by the scenario.
+    cpu_time_ms: Option<f64>,
+    /// CPU utilisation: cpu_time / total wall time of all repetitions, %.
+    cpu_percent: Option<f64>,
     peak_rss_kb: Option<u64>,
     rss_before_kb: Option<u64>,
     rss_after_kb: Option<u64>,
     rss_delta_kb: Option<i64>,
+    /// Peak RSS as % of total system RAM.
+    ram_percent_of_system: Option<f64>,
     block_bytes: usize,
 }
 
@@ -107,6 +136,8 @@ struct BenchReport {
     generated_at: DateTime<Utc>,
     os: String,
     cpu_cores: Option<usize>,
+    system_total_ram_kb: Option<u64>,
+    total_cpu_time_ms: Option<f64>,
     max_txs_per_block: usize,
     repeats: usize,
     scenarios: Vec<ScenarioReport>,
@@ -122,6 +153,7 @@ fn run_scenario(tx_count: usize) -> ScenarioReport {
     };
 
     let rss_before_kb = current_rss_kb();
+    let cpu_before_ms = process_cpu_ms();
     let mut samples: Vec<Duration> = Vec::with_capacity(REPEATS);
     let mut block_bytes = 0usize;
 
@@ -150,6 +182,20 @@ fn run_scenario(tx_count: usize) -> ScenarioReport {
     }
 
     let rss_after_kb = current_rss_kb();
+    let cpu_after_ms = process_cpu_ms();
+    let cpu_time_ms = match (cpu_before_ms, cpu_after_ms) {
+        (Some(b), Some(a)) => Some(a - b),
+        _ => None,
+    };
+    let total_wall_ms: f64 = samples.iter().map(|d| d.as_secs_f64() * 1_000.0).sum();
+    let cpu_percent = match (cpu_time_ms, total_wall_ms) {
+        (Some(cpu), wall) if wall > 0.0 => Some(cpu / wall * 100.0),
+        _ => None,
+    };
+    let ram_percent_of_system = match (peak_rss_kb(), system_total_ram_kb()) {
+        (Some(peak), Some(total)) if total > 0 => Some(peak as f64 / total as f64 * 100.0),
+        _ => None,
+    };
     let peak = peak_rss_kb();
     let median = median_ms(&samples);
     let throughput = if median > 0.0 {
@@ -171,6 +217,8 @@ fn run_scenario(tx_count: usize) -> ScenarioReport {
             .map(|d| d.as_secs_f64() * 1_000.0)
             .fold(f64::NEG_INFINITY, f64::max),
         throughput_tx_per_s: throughput,
+        cpu_time_ms,
+        cpu_percent,
         peak_rss_kb: peak,
         rss_before_kb,
         rss_after_kb,
@@ -178,6 +226,7 @@ fn run_scenario(tx_count: usize) -> ScenarioReport {
             (Some(b), Some(a)) => Some(a as i64 - b as i64),
             _ => None,
         },
+        ram_percent_of_system,
         block_bytes,
     }
 }
@@ -218,32 +267,58 @@ fn write_markdown(report: &BenchReport, path: &std::path::Path) {
     writeln!(md, "- Repeats per scenario: {}", report.repeats).unwrap();
     writeln!(
         md,
+        "- System RAM: {}",
+        report
+            .system_total_ram_kb
+            .map_or_else(|| "unknown".into(), |kb| format!("{} KiB", kb))
+    )
+    .unwrap();
+    writeln!(
+        md,
+        "- Total CPU time across scenarios: {}",
+        report
+            .total_cpu_time_ms
+            .map_or_else(|| "unknown".into(), |ms| format!("{:.1} ms", ms))
+    )
+    .unwrap();
+    writeln!(
+        md,
         "- Max txs per block (mempool cap): {}",
         report.max_txs_per_block
     )
     .unwrap();
     writeln!(md).unwrap();
-    writeln!(md, "| txs/block | median ms | min ms | max ms | tx/s | block bytes | peak RSS KiB | RSS delta KiB |").unwrap();
-    writeln!(md, "|---:|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+    writeln!(md, "| txs/block | median ms | min ms | max ms | tx/s | CPU ms | CPU % | block bytes | peak RSS KiB | RSS delta KiB | RAM % |").unwrap();
+    writeln!(
+        md,
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    )
+    .unwrap();
     for s in &report.scenarios {
         writeln!(
             md,
-            "| {} | {:.2} | {:.2} | {:.2} | {:.1} | {} | {} | {} |",
+            "| {} | {:.2} | {:.2} | {:.2} | {:.1} | {} | {} | {} | {} | {} | {} |",
             s.tx_count,
             s.median_ms,
             s.min_ms,
             s.max_ms,
             s.throughput_tx_per_s,
+            s.cpu_time_ms
+                .map_or_else(|| "-".into(), |v| format!("{:.1}", v)),
+            s.cpu_percent
+                .map_or_else(|| "-".into(), |v| format!("{:.1}", v)),
             s.block_bytes,
             s.peak_rss_kb.map_or_else(|| "-".into(), |v| v.to_string()),
             s.rss_delta_kb.map_or_else(|| "-".into(), |v| v.to_string()),
+            s.ram_percent_of_system
+                .map_or_else(|| "-".into(), |v| format!("{:.3}", v)),
         )
         .unwrap();
     }
     writeln!(md).unwrap();
     writeln!(
         md,
-        "Notes: `0` = empty-block baseline; `{}` = mempool capacity (practical max txs per block; block production itself has no tx cap). In-memory state, no storage/RPC. Cheap gas config.",
+        "Notes: `0` = empty-block baseline; `{}` = mempool capacity (practical max txs per block; block production itself has no tx cap). In-memory state, no storage/RPC. Cheap gas config. `CPU ms` is the total process CPU time (user + system) for the whole scenario including all repeats and setup; `CPU %` = CPU ms / summed wall time of the timed repeats (may exceed 100% slightly because setup work is included in CPU but not in wall samples). `RAM %` is peak process RSS relative to total system RAM.",
         MAX_TXS_PER_BLOCK
     )
     .unwrap();
@@ -265,6 +340,8 @@ fn block_resource_benchmark() {
         generated_at: Utc::now(),
         os: std::env::consts::OS.to_string(),
         cpu_cores: cpu_cores(),
+        system_total_ram_kb: system_total_ram_kb(),
+        total_cpu_time_ms: Some(scenarios.iter().filter_map(|s| s.cpu_time_ms).sum()),
         max_txs_per_block: MAX_TXS_PER_BLOCK,
         repeats: REPEATS,
         scenarios,
@@ -282,8 +359,18 @@ fn block_resource_benchmark() {
     );
     for s in &report.scenarios {
         eprintln!(
-            "[bench] txs={:<6} median={:.2}ms throughput={:.1} tx/s block={}B peak_rss={:?}KiB",
-            s.tx_count, s.median_ms, s.throughput_tx_per_s, s.block_bytes, s.peak_rss_kb
+            "[bench] txs={:<6} median={:.2}ms throughput={:.1} tx/s cpu={}ms ({}) block={}B peak_rss={:?}KiB ram%={}",
+            s.tx_count,
+            s.median_ms,
+            s.throughput_tx_per_s,
+            s.cpu_time_ms
+                .map_or_else(|| "-".into(), |v| format!("{:.1}", v)),
+            s.cpu_percent
+                .map_or_else(|| "-".into(), |v| format!("{:.1}%", v)),
+            s.block_bytes,
+            s.peak_rss_kb,
+            s.ram_percent_of_system
+                .map_or_else(|| "-".into(), |v| format!("{:.3}", v)),
         );
     }
 }

@@ -43,9 +43,12 @@ completes.
 - Each scenario measured over K = 10 repetitions; metrics:
   - wall-time of `produce_block` (min / median / max, ms)
   - throughput (tx/s)
+  - **CPU**: process CPU time (utime+stime from `/proc/self/stat`) per
+    scenario and CPU utilisation % (CPU time / summed wall time)
   - peak process RSS (Linux: `VmHWM` from `/proc/self/status`;
     fallback `VmRSS`; `null` on other OSes)
   - RSS delta before/after scenario
+  - RAM usage as % of total system RAM (`/proc/meminfo` MemTotal)
   - serialized block size (bincode)
 - After completion writes:
   - `reports/block-resource-bench.json` (machine-readable)
