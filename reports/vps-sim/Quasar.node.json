@@ -1,0 +1,19 @@
+{
+  "package": "Quasar",
+  "cpu_cores": 4,
+  "ram_mb": 6144,
+  "storage_gb": 120,
+  "price_usd_mo": 12.88,
+  "node_started": true,
+  "bench_exit_code": 0,
+  "height_start": 1,
+  "height_end": 1,
+  "blocks_produced": 0,
+  "node_peak_rss_kb": 8904,
+  "node_cpu_ms": 0,
+  "node_cpu_percent": 0.0,
+  "bench_wall_ms": 4848,
+  "cgroup_peak_ram_kb": 24804,
+  "cgroup_cpu_ms": 4968,
+  "node_storage_bytes": 885
+}

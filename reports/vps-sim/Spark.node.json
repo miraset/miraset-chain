@@ -1,0 +1,19 @@
+{
+  "package": "Spark",
+  "cpu_cores": 1,
+  "ram_mb": 1024,
+  "storage_gb": 20,
+  "price_usd_mo": 3.88,
+  "node_started": true,
+  "bench_exit_code": 0,
+  "height_start": 1,
+  "height_end": 2,
+  "blocks_produced": 1,
+  "node_peak_rss_kb": 8632,
+  "node_cpu_ms": 0,
+  "node_cpu_percent": 0.0,
+  "bench_wall_ms": 5387,
+  "cgroup_peak_ram_kb": 25560,
+  "cgroup_cpu_ms": 5382,
+  "node_storage_bytes": 1062
+}

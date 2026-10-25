@@ -140,7 +140,39 @@ struct BenchReport {
     total_cpu_time_ms: Option<f64>,
     max_txs_per_block: usize,
     repeats: usize,
+    /// Optional target-server (VPS package) metadata, set via env by the
+    /// VPS simulation scripts.
+    package: Option<PackageMeta>,
     scenarios: Vec<ScenarioReport>,
+}
+
+#[derive(Serialize)]
+struct PackageMeta {
+    name: String,
+    cpu_cores: Option<u64>,
+    ram_mb: Option<u64>,
+    storage_gb: Option<u64>,
+    price_usd_mo: Option<f64>,
+}
+
+/// Read package metadata from `MIRASET_BENCH_PACKAGE_*` env vars.
+fn package_meta_from_env() -> Option<PackageMeta> {
+    let name = std::env::var("MIRASET_BENCH_PACKAGE").ok()?;
+    Some(PackageMeta {
+        name,
+        cpu_cores: std::env::var("MIRASET_BENCH_PACKAGE_CPU")
+            .ok()
+            .and_then(|v| v.parse().ok()),
+        ram_mb: std::env::var("MIRASET_BENCH_PACKAGE_RAM_MB")
+            .ok()
+            .and_then(|v| v.parse().ok()),
+        storage_gb: std::env::var("MIRASET_BENCH_PACKAGE_STORAGE_GB")
+            .ok()
+            .and_then(|v| v.parse().ok()),
+        price_usd_mo: std::env::var("MIRASET_BENCH_PACKAGE_PRICE")
+            .ok()
+            .and_then(|v| v.parse().ok()),
+    })
 }
 
 fn run_scenario(tx_count: usize) -> ScenarioReport {
@@ -236,6 +268,15 @@ fn cpu_cores() -> Option<usize> {
 }
 
 fn report_paths() -> (PathBuf, PathBuf) {
+    // `MIRASET_BENCH_OUT` overrides the report base path (without
+    // extension) — used by the VPS simulation to write per-package reports.
+    if let Ok(base) = std::env::var("MIRASET_BENCH_OUT") {
+        let base = PathBuf::from(base);
+        if let Some(parent) = base.parent() {
+            std::fs::create_dir_all(parent).expect("create report dir");
+        }
+        return (base.with_extension("json"), base.with_extension("md"));
+    }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -255,6 +296,19 @@ fn write_markdown(report: &BenchReport, path: &std::path::Path) {
     writeln!(md, "# Block Resource Benchmark").unwrap();
     writeln!(md).unwrap();
     writeln!(md, "- Generated at: {}", report.generated_at.to_rfc3339()).unwrap();
+    if let Some(p) = &report.package {
+        writeln!(
+            md,
+            "- Target package: {} ({} CPU cores, {} MB RAM, {} GB storage, ${}/mo)",
+            p.name,
+            p.cpu_cores.map_or_else(|| "?".into(), |v| v.to_string()),
+            p.ram_mb.map_or_else(|| "?".into(), |v| v.to_string()),
+            p.storage_gb.map_or_else(|| "?".into(), |v| v.to_string()),
+            p.price_usd_mo
+                .map_or_else(|| "?".into(), |v| format!("{v:.2}")),
+        )
+        .unwrap();
+    }
     writeln!(md, "- OS: {}", report.os).unwrap();
     writeln!(
         md,
@@ -344,6 +398,7 @@ fn block_resource_benchmark() {
         total_cpu_time_ms: Some(scenarios.iter().filter_map(|s| s.cpu_time_ms).sum()),
         max_txs_per_block: MAX_TXS_PER_BLOCK,
         repeats: REPEATS,
+        package: package_meta_from_env(),
         scenarios,
     };
 

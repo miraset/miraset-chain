@@ -46,6 +46,20 @@ npm run bench:resources
 On completion the benchmark writes `reports/block-resource-bench.json`
 and `reports/block-resource-bench.md`.
 
+### VPS package simulation
+
+Simulates the node + benchmark on each Namecheap VPS package
+(Spark/Pulsar/Quasar/Magnetar/Hypernova) by running them inside cgroup
+scopes with the package's CPU/RAM limits (Linux + systemd user session):
+
+```bash
+npm run bench:vps            # all packages
+bash scripts/bench-vps-sim.sh spark pulsar   # subset
+```
+
+Writes per-package results to `reports/vps-sim/` and an aggregated
+per-package report to `reports/vps-simulation.md` (JSON twin next to it).
+
 ## Local Docker Inference Test
 
 The test compose stack runs one node and one worker. Ollama stays on the host
