@@ -1,5 +1,14 @@
 # Copilot instructions
 
+## Source of truth
+
+Use `/home/daochild/.obsidian/miraset-knowledge-vault` as the primary source
+for protocol, PoCC economics and product requirements. Read
+`docs/business/knowledge-sources.md` for the source map, decision precedence,
+privacy boundaries and unavailable-source behavior. Inspect original chain
+engineering ADRs and code directly; the vault's engineering summary is not
+implementation evidence. Demos are secondary examples, not authority.
+
 ## Project shape
 
 This repository is currently a Rust 2024 binary crate. `src/main.rs` is its only Rust source and entry point; `Cargo.toml` defines the crate and currently has no Rust dependencies. The repository name does not yet imply any implemented blockchain-specific architecture or behavior.
