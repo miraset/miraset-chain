@@ -77,7 +77,8 @@ must be explicit, versioned and tested; no automatic destructive repair.
 ## Consensus specification prerequisite
 
 No existing HotStuff variant was found. Do not claim one is selected here.
-Before slice C, a reviewed specification must define proposal/vote phases,
+Before plan phase P4 (see [PLAN.md](PLAN.md)), a reviewed specification must
+define proposal/vote phases,
 certificate meaning, safe-vote predicate, lock/unlock predicate, ancestry
 requirements, exact commit rule, new-view messages, timeout certificates,
 leader scheduling and pacemaker transitions as one coherent algorithm.
