@@ -2,14 +2,21 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{
+        IntoResponse,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use hotstuff_rs::block_tree::pluggables::KVStore;
 use hotstuff_rs::networking::network::Network;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio_stream::Stream;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::core::types::{ComputeReceipt, Transaction};
@@ -105,6 +112,7 @@ where
         .route("/task/{task_id}", get(get_task_handler))
         .route("/block/latest", get(latest_block_handler))
         .route("/mempool/status", get(mempool_status_handler))
+        .route("/events/blocks", get(sse_block_events_handler))
         .layer(cors)
         .with_state(state)
 }
@@ -238,6 +246,25 @@ where
         pending_txs: txs,
         pending_receipts: receipts,
     }))
+}
+
+async fn sse_block_events_handler<K, N>(
+    State(state): State<RpcState<K, N>>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>>
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    let receiver = state.node.subscribe_commits();
+    let stream = BroadcastStream::new(receiver).filter_map(|res| match res {
+        Ok(event) => {
+            let json = serde_json::to_string(&event).unwrap_or_default();
+            Some(Ok(SseEvent::default().event("commit_block").data(json)))
+        }
+        Err(_) => None,
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// Start an RPC server on the specified address.

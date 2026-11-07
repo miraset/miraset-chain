@@ -192,9 +192,22 @@ async fn test_rpc_worker_and_block_query() {
         .method("GET")
         .body(Body::empty())
         .unwrap();
-    let resp_task = app.oneshot(req_task).await.unwrap();
+    let resp_task = app.clone().oneshot(req_task).await.unwrap();
     assert_eq!(resp_task.status(), StatusCode::OK);
     let body = resp_task.into_body().collect().await.unwrap().to_bytes();
     let task_resp: ApiResponse<TaskSettlementResponse> = serde_json::from_slice(&body).unwrap();
     assert!(!task_resp.data.unwrap().settled);
+
+    // Test SSE block events endpoint connects with 200 OK and text/event-stream content type
+    let req_events = Request::builder()
+        .uri("/events/blocks")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp_events = app.oneshot(req_events).await.unwrap();
+    assert_eq!(resp_events.status(), StatusCode::OK);
+    assert_eq!(
+        resp_events.headers().get("content-type").unwrap(),
+        "text/event-stream"
+    );
 }

@@ -1,13 +1,18 @@
 use hotstuff_rs::block_tree::accessors::public::BlockTreeCamera;
 use hotstuff_rs::block_tree::pluggables::KVStore;
+use hotstuff_rs::events::CommitBlockEvent;
 use hotstuff_rs::networking::network::Network;
 use hotstuff_rs::replica::{Replica, ReplicaSpec};
 use hotstuff_rs::types::data_types::{CryptoHash, Power};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
 use hotstuff_rs::types::validator_set::{ValidatorSet, ValidatorSetState, VerifyingKey};
+use std::time::UNIX_EPOCH;
+use tokio::sync::broadcast;
 
 use crate::app::MirasetApp;
-use crate::core::types::{AccountState, ComputeReceipt, Transaction, WorkerInfo};
+use crate::core::types::{
+    AccountState, BlockPayload, CommitEvent, ComputeReceipt, Transaction, WorkerInfo,
+};
 use crate::mempool::Mempool;
 use crate::node::config::NodeConfig;
 
@@ -17,6 +22,7 @@ pub struct MirasetNode<K: KVStore, N: Network + 'static> {
     pub mempool: Mempool,
     pub kv_store: K,
     pub network: N,
+    pub commit_sender: broadcast::Sender<CommitEvent>,
 }
 
 /// Initialize genesis block tree storage with the given validators and initial accounts.
@@ -63,11 +69,45 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         let app = MirasetApp::new(mempool.clone());
         let hs_config = config.to_hotstuff_config();
 
+        let (commit_sender, _) = broadcast::channel(1024);
+        let commit_tx = commit_sender.clone();
+        let kv_for_event = kv_store.clone();
+
         let replica = ReplicaSpec::builder()
             .app(app)
             .network(network.clone())
             .kv_store(kv_store.clone())
             .configuration(hs_config)
+            .on_commit_block(move |event: &CommitBlockEvent| {
+                let block_hash_hex = hex::encode(event.block.bytes());
+                let timestamp_secs = event
+                    .timestamp
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                let camera = BlockTreeCamera::new(kv_for_event.clone());
+                let snapshot = camera.snapshot();
+                let (tx_count, receipt_count) = match snapshot.block_data(&event.block) {
+                    Ok(Some(data)) if !data.vec().is_empty() => {
+                        let datum = &data.vec()[0];
+                        match BlockPayload::from_bytes(datum.bytes()) {
+                            Ok(payload) => {
+                                (payload.transactions.len(), payload.compute_receipts.len())
+                            }
+                            Err(_) => (0, 0),
+                        }
+                    }
+                    _ => (0, 0),
+                };
+
+                let _ = commit_tx.send(CommitEvent {
+                    block_hash: block_hash_hex,
+                    timestamp_secs,
+                    tx_count,
+                    receipt_count,
+                });
+            })
             .build()
             .start();
 
@@ -76,7 +116,13 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             mempool,
             kv_store,
             network,
+            commit_sender,
         }
+    }
+
+    /// Subscribe to committed block events.
+    pub fn subscribe_commits(&self) -> broadcast::Receiver<CommitEvent> {
+        self.commit_sender.subscribe()
     }
 
     /// Returns a reference to the node's mempool.

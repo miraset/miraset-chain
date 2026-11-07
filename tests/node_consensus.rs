@@ -27,6 +27,7 @@ fn test_single_node_genesis_and_query() {
     let config = NodeConfig::devnet(keypair);
 
     let node = MirasetNode::start(config, kv_store, network, mempool);
+    let mut commit_rx = node.subscribe_commits();
 
     // Verify genesis state is queryable
     let alice = node
@@ -58,6 +59,19 @@ fn test_single_node_genesis_and_query() {
 
     // Allow background consensus threads to run and commit blocks
     thread::sleep(Duration::from_millis(1500));
+
+    // Verify commit event was broadcast and received
+    let mut received_event = false;
+    while let Ok(evt) = commit_rx.try_recv() {
+        if !evt.block_hash.is_empty() {
+            received_event = true;
+            break;
+        }
+    }
+    assert!(
+        received_event,
+        "Expected to receive at least one commit event"
+    );
 
     // Verify task settlement and client debit / worker reward
     assert!(node.is_task_settled("compute_task_001"));

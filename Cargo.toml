@@ -16,6 +16,7 @@ sha2 = "0.10"
 tempfile = "3.27.0"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 [dev-dependencies]

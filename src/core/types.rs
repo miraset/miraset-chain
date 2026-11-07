@@ -168,6 +168,15 @@ impl ComputeReceipt {
     }
 }
 
+/// Event emitted when a block is committed (finalized by consensus).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitEvent {
+    pub block_hash: String,
+    pub timestamp_secs: u64,
+    pub tx_count: usize,
+    pub receipt_count: usize,
+}
+
 /// Consolidated block payload containing transactions and PoCC receipts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BlockPayload {

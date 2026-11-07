@@ -63,7 +63,9 @@ This document tracks prioritized integration tasks for connecting external and a
 ---
 
 ## 5. Commit Event Stream & Indexer Integration (Phase 5)
-- [ ] **5.1. Block Commitment Event Hook**
-  - Expose a tokio broadcast channel on `MirasetNode` that receives `CommitBlockEvent` upon 3-chain finalization.
-- [ ] **5.2. External Indexer Connector**
-  - Provide a stream or WebSocket/SSE endpoint so `miraset-indexer` can project finalized blocks into queryable storage.
+- [x] **5.1. Block Commitment Event Hook**
+  - Expose a tokio broadcast channel on `MirasetNode` that receives `CommitBlockEvent` upon 3-chain finalization (`subscribe_commits()`).
+  - Extract block metadata, transaction counts, and receipt counts on commit.
+- [x] **5.2. External Indexer Connector**
+  - Provide a stream or SSE endpoint (`GET /events/blocks`) so `miraset-indexer` can project finalized blocks into queryable storage.
+  - Server-Sent Events (SSE) stream yielding `commit_block` events with JSON payloads and keep-alive heartbeats.
