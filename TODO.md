@@ -34,10 +34,10 @@ This document tracks prioritized integration tasks for connecting external and a
 ---
 
 ## 3. P2P Transport Adapter (Phase 3)
-- [ ] **3.1. Framed TCP Network Protocol**
+- [x] **3.1. Framed TCP Network Protocol**
   - Implement `hotstuff_rs::networking::network::Network` over length-delimited framed TCP connections (porting proven design from `demo/crates/miraset-node/src/hotstuff.rs`).
   - Support point-to-point direct validator connections and broadcast queues.
-- [ ] **3.2. Peer Discovery & DoS Protection**
+- [x] **3.2. Peer Discovery & DoS Protection**
   - Static validator peer registry for devnet/testnet.
   - Bounded buffers, frame size validation (e.g. max 16 MiB), and disconnect on malformed messages.
 

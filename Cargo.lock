@@ -538,6 +538,7 @@ name = "miraset-chain"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "borsh",
  "ed25519-dalek",
  "hex",
  "hotstuff_rs",
