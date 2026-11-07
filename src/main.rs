@@ -3,11 +3,14 @@ use miraset_chain::core::types::{ComputeReceipt, Transaction};
 use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub};
 use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
+use miraset_chain::rpc::start_rpc_server;
 use miraset_chain::storage::MemKVStore;
-use std::thread;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("=======================================================");
     println!("     MIRASET Chain L1 - HotStuff-rs Consensus Devnet   ");
     println!("=======================================================\n");
@@ -42,7 +45,21 @@ fn main() {
     println!("\n[3] Starting MIRASET Replica Node (Chain ID: 1337)...");
     let mempool = Mempool::new();
     let config = NodeConfig::devnet(validator_key);
-    let node = MirasetNode::start(config, kv_store, network, mempool);
+    let chain_id = config.chain_id;
+    let node = Arc::new(MirasetNode::start(config, kv_store, network, mempool));
+
+    // 5. Start Node RPC API Gateway
+    let rpc_addr: SocketAddr = "127.0.0.1:8545".parse().unwrap();
+    let rpc_node = Arc::clone(&node);
+    tokio::spawn(async move {
+        if let Err(e) = start_rpc_server(rpc_node, chain_id, rpc_addr).await {
+            eprintln!("RPC server error: {}", e);
+        }
+    });
+    println!("    ✓ Node RPC API listening on http://{}", rpc_addr);
+    println!(
+        "      Endpoints: /health, /account/:addr, /worker/:id, /tx/submit, /receipt/submit, /block/latest, /mempool/status"
+    );
 
     // Verify initial account queries
     if let Some(alice) = node.get_account("alice") {
@@ -52,13 +69,13 @@ fn main() {
         );
     }
 
-    // 5. Submit sample transaction
+    // 6. Submit sample transaction
     println!("\n[4] Submitting Transactions to Mempool:");
     let tx1 = Transaction::new("alice", 0, "bob", 75_000, 150);
     println!("    - Tx: Alice -> Bob (Amount: 75,000, Fee: 150)");
     node.submit_transaction(tx1).expect("Tx submission failed");
 
-    // 6. Submit sample PoCC compute receipt
+    // 7. Submit sample PoCC compute receipt
     println!("\n[5] Submitting PoCC Compute Receipt to Mempool:");
     let receipt1 = ComputeReceipt {
         task_id: "inference_task_gpt_oss_1".to_string(),
@@ -76,9 +93,9 @@ fn main() {
         .expect("Receipt submission failed");
 
     println!("\n[6] Waiting for HotStuff consensus round to propose and commit block...");
-    thread::sleep(Duration::from_millis(2000));
+    tokio::time::sleep(Duration::from_millis(2000)).await;
 
-    // 7. Check committed state
+    // 8. Check committed state
     println!("\n[7] Querying Node State after Consensus:");
     if let Some(block_hash) = node.highest_committed_block() {
         println!("    ✓ Highest Committed Block Hash: {}", block_hash);
