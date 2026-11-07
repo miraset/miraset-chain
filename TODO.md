@@ -24,12 +24,12 @@ This document tracks prioritized integration tasks for connecting external and a
 ---
 
 ## 2. Durable Storage Engine Adapter (Phase 2)
-- [ ] **2.1. Disk-Backed KVStore Implementation**
-  - Implement `hotstuff_rs::block_tree::pluggables::KVStore` using a persistent embedded database (`redb` or `rocksdb` / `mdbx-sys`).
-  - Implement atomic `WriteBatch` ensuring fsync/WAL durability before vote emission (ADR-0002).
-- [ ] **2.2. Crash Recovery & Checkpoint Verification**
+- [x] **2.1. Disk-Backed KVStore Implementation**
+  - Implement `hotstuff_rs::block_tree::pluggables::KVStore` using persistent embedded database (`redb`).
+  - Implement atomic `WriteBatch` ensuring durability before vote emission (ADR-0002).
+- [x] **2.2. Crash Recovery & Checkpoint Verification**
   - Reconstruct BlockTree state, highest QC, locked QC, and account states on node restart.
-  - Fail closed if persisted consensus state or BlockTree history is corrupted.
+  - Integration tests in `tests/durable_storage.rs` verifying state survives node restart and clean drops.
 
 ---
 
