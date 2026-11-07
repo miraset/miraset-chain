@@ -66,9 +66,12 @@ pub struct ComputeReceipt {
     /// Indicates that the client received all generated tokens/output.
     #[serde(default)]
     pub client_confirmed: bool,
-    /// Coordinator co-signature or authentication tag.
+    /// Coordinator co-signature or authentication tag (hex-encoded Ed25519 signature).
     #[serde(default)]
     pub signature: String,
+    /// Optional Ed25519 hex public key of the coordinator.
+    #[serde(default)]
+    pub coordinator_pubkey: String,
 }
 
 impl ComputeReceipt {
@@ -97,7 +100,71 @@ impl ComputeReceipt {
             worker_reward,
             client_confirmed: true,
             signature: String::new(),
+            coordinator_pubkey: String::new(),
         }
+    }
+
+    /// Canonical message bytes for cryptographic signature verification.
+    pub fn canonical_sign_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(self.task_id.as_bytes());
+        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(self.client_address.as_bytes());
+        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(self.worker_id.as_bytes());
+        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(self.model_hash.as_bytes());
+        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(self.proof_hash.as_bytes());
+        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(&self.tokens_computed.to_be_bytes());
+        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(&self.client_cost.to_be_bytes());
+        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(&self.worker_reward.to_be_bytes());
+        bytes
+    }
+
+    /// Sign this receipt using an Ed25519 signing key.
+    pub fn sign_with(&mut self, signing_key: &ed25519_dalek::SigningKey) {
+        use ed25519_dalek::Signer;
+        let sign_bytes = self.canonical_sign_bytes();
+        let sig = signing_key.sign(&sign_bytes);
+        self.signature = hex::encode(sig.to_bytes());
+        self.coordinator_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+    }
+
+    /// Verify signature if signature and coordinator_pubkey are provided.
+    pub fn verify_signature(&self) -> Result<(), &'static str> {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        if self.signature.is_empty() && self.coordinator_pubkey.is_empty() {
+            // Optional signature in test/dev mode if not configured
+            return Ok(());
+        }
+
+        let pubkey_bytes = hex::decode(&self.coordinator_pubkey)
+            .map_err(|_| "Invalid hex in coordinator_pubkey")?;
+        if pubkey_bytes.len() != 32 {
+            return Err("Invalid coordinator_pubkey length (must be 32 bytes)");
+        }
+        let mut pk_arr = [0u8; 32];
+        pk_arr.copy_from_slice(&pubkey_bytes);
+        let verifying_key =
+            VerifyingKey::from_bytes(&pk_arr).map_err(|_| "Invalid Ed25519 verifying key")?;
+
+        let sig_bytes = hex::decode(&self.signature).map_err(|_| "Invalid hex in signature")?;
+        if sig_bytes.len() != 64 {
+            return Err("Invalid signature length (must be 64 bytes)");
+        }
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let sig = Signature::from_bytes(&sig_arr);
+
+        let sign_bytes = self.canonical_sign_bytes();
+        verifying_key
+            .verify(&sign_bytes, &sig)
+            .map_err(|_| "Ed25519 signature verification failed")
     }
 }
 

@@ -96,11 +96,17 @@ impl MirasetApp {
         }
 
         // Process PoCC compute receipts:
+        // - Cryptographic signature verification (if signature provided)
         // - Enforce anti-replay on task_id
         // - Verify client receipt delivery confirmation
         // - Debit client account for compute cost
         // - Credit worker rewards and increment completed tasks
         for receipt in &payload.compute_receipts {
+            if receipt.verify_signature().is_err() {
+                // Reject block on invalid signature
+                return None;
+            }
+
             let t_key = Self::task_key(&receipt.task_id);
             if tree.app_state(&t_key).is_some() || local_tasks.contains(&receipt.task_id) {
                 // Reject block on duplicate task replay
@@ -267,5 +273,38 @@ mod tests {
         let app = MirasetApp::new(mempool);
         assert_eq!(app.mempool().tx_count(), 1);
         assert_eq!(app.mempool().receipt_count(), 1);
+    }
+
+    #[test]
+    fn test_compute_receipt_signature_verification() {
+        use ed25519_dalek::SigningKey;
+
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+        let mut receipt = ComputeReceipt::new(
+            "task_crypto_1",
+            "alice",
+            "gpu_worker",
+            "coord_hq",
+            "model_70b",
+            "zk_proof_hash",
+            500,
+            100,
+            90,
+        );
+
+        // Before signing, signature is empty (passes dev-mode)
+        assert!(receipt.verify_signature().is_ok());
+
+        // Sign with key
+        receipt.sign_with(&signing_key);
+        assert!(!receipt.signature.is_empty());
+        assert!(!receipt.coordinator_pubkey.is_empty());
+
+        // Valid signature verifies ok
+        assert!(receipt.verify_signature().is_ok());
+
+        // Tampering with payload fails verification
+        receipt.tokens_computed = 9999;
+        assert!(receipt.verify_signature().is_err());
     }
 }

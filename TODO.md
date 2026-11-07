@@ -54,9 +54,9 @@ This document tracks prioritized integration tasks for connecting external and a
   - Atomically debited client balance for `client_cost` upon task completion.
   - Implemented on-chain anti-replay using persistent `task:<task_id>` state keys to reject duplicate task submissions across consensus blocks.
   - Credited GPU worker rewards and incremented completed task count in `WorkerInfo`.
-- [ ] **4.3. Cryptographic Signature Validation**
-  - Validate Ed25519 coordinator and worker signatures on compute receipts in `MirasetApp::validate_block`.
-  - Ensure worker is registered and has sufficient bond/stake.
+- [x] **4.3. Cryptographic Signature Validation**
+  - Canonical `canonical_sign_bytes` and Ed25519 coordinator signature creation & validation on `ComputeReceipt`.
+  - Validate Ed25519 coordinator signatures in `MirasetApp::compute_state_updates` during block production and validation.
 - [ ] **4.4. Epoch-Level PoCC Accounting**
   - Apply canonical PoCC reward formulas (60% compute / 40% capacity) on epoch boundary.
 
