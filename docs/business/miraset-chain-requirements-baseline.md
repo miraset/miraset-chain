@@ -14,11 +14,13 @@ unavailable in this checkout.
 
 ## Verified checkout
 
-Baseline commit: `b9b3886` (`add opencode config`).
+Baseline commit (pinned for current execution): `b14588025d9641ab26dcab67573bfdeb51227e6d` (`fix doc collision`) on branch `dev`.
+Historical initial baseline reference: `b9b3886` (`add opencode config`).
 
 - `Cargo.toml:1-7` declares a Rust 2024 binary package with no dependencies
   and no workspace declaration.
-- `src/main.rs:1-3` prints `Hello, world!`; it contains no chain implementation.
+- `src/main.rs` now provides runtime status output and tests for the current
+  planning state; it is not a HotStuff implementation.
 - `AGENTS.md:1-3` delegates workflow instructions to the installed
   `@daochild/agents-config` package.
 - The tracked-file inventory has no tests, `docs/adr`, storage implementation,

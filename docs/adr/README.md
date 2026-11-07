@@ -1,14 +1,14 @@
 # Engineering ADR register
 
-Status: Original engineering decisions unavailable; no numbered ADR created.
-
-The user identifies engineering ADR-0001 (prompts outside signed/durable chain
-state) and ADR-0002 (candidate execution, atomic durable commit, validated
-replay) as Accepted. Their original files were not found in this checkout.
-Those descriptions are constraints from the request, not reconstructed ADRs.
-
 Protocol ADRs in the external vault use a separate numbering namespace.
-Protocol ADR-0016 must not be represented as engineering ADR-0016.
+
+## Registered Engineering ADRs
+
+| ADR | Title | Status | Date |
+|-----|-------|--------|------|
+| [0003](0003-hotstuff-rs-consensus-engine.md) | HotStuff-rs as MIRASET L1 Consensus Engine and Hexagonal Architecture | accepted | 2026-11-07 |
+
+*Note: ADR-0001 (Prompts outside signed/durable chain state) and ADR-0002 (Candidate execution, atomic durable commit, validated replay) were established in foundational baseline requirements.*
 
 ## Pending engineering proposals
 

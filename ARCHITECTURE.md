@@ -6,7 +6,7 @@ Traceability epic: `miraset-chain-hardening`.
 ## Current architecture
 
 `Cargo.toml` defines one dependency-free Rust 2024 binary.
-`src/main.rs` only prints `Hello, world!`. There are no chain modules,
+`src/main.rs` currently prints a bootstrap placeholder message. There are no chain modules,
 adapters, workspace members or tests. See the
 [baseline](docs/business/miraset-chain-requirements-baseline.md).
 
@@ -102,6 +102,78 @@ finalized transition proof, activation boundary, new committee bootstrap,
 state transfer and quorum safety across epochs; a transport peer change is not
 a validator change.
 
+## Proposed HotStuff v1 contract (for architecture review)
+
+This section defines a concrete proposal to reduce implementation ambiguity.
+It is a candidate contract for review and approval, not an accepted protocol
+decision.
+
+### Variant
+
+- Chained HotStuff, 3 phases per view: `Prepare -> PreCommit -> Commit`.
+- Equal validator weights with static committee in v1:
+  - committee size `n = 3f + 1`
+  - quorum threshold `2f + 1` distinct valid signatures
+- Leader schedule: deterministic round-robin by view number over committee order.
+
+### Block and certificate model
+
+- Each proposed block includes:
+  - `height`, `view`, `parent_id`, `payload_root`, `state_root_candidate`,
+    `timestamp`, `proposer_id`, `chain_id`, `protocol_version`.
+- A quorum certificate (QC) binds:
+  - `phase`, `view`, `block_id`, `chain_id`, `protocol_version`,
+    `committee_id`, signer bitmap/list, aggregated signature bytes or signer set.
+- Genesis carries a fixed genesis QC and fixed committee identity.
+
+### Safety rules
+
+- **Vote eligibility:** a validator votes only if:
+  1. proposal extends known ancestry
+  2. proposal carries valid parent/justify QC
+  3. proposal view is strictly greater than last voted view
+  4. proposal does not violate current lock rule.
+- **Lock rule:** lock on highest valid `PreCommit` QC seen.
+- **Safe vote rule:** vote only for proposals extending the locked block, unless
+  a higher-view QC justifies lock advancement.
+- **Persistence rule:** persist vote/lock safety state durably before emitting a vote.
+- **No equivocation:** at most one vote per `(view, phase)` per validator key.
+
+### Commit and finality rule
+
+- A block `B` is finalized when there is a 3-chain of valid QCs:
+  - `QC_prepare(B)`
+  - `QC_precommit(child_of_B)`
+  - `QC_commit(grandchild_of_B)`.
+- Finalization is strictly monotonic by height.
+- Finalized blocks must be contiguous with no gaps.
+
+### View change and pacemaker
+
+- Each validator has a local timeout schedule:
+  - `timeout(view) = base_timeout * 2^k`, capped at `max_timeout`,
+    where `k` is consecutive timeout count.
+- On timeout, validator emits signed timeout message for `(view, high_qc)`.
+- A timeout certificate (TC) forms at quorum and moves the protocol to next view.
+- New-view message includes validator high QC and optional TC.
+- Next leader proposes using highest justified QC from gathered new-view data.
+
+### Replay and restart invariants
+
+- On restart, node reconstructs:
+  - highest QC
+  - lock QC
+  - last voted `(view, phase)`
+  - finalized tip and parent continuity.
+- Node refuses to resume voting if persisted safety state is missing/ambiguous.
+
+### Out-of-scope in v1
+
+- Dynamic validator reconfiguration
+- Weighted voting
+- Slashing semantics
+- BLS threshold scheme migration details
+
 ## Library evaluation shortlist
 
 These are candidates, not verified selections or new dependencies.
@@ -120,6 +192,9 @@ These are candidates, not verified selections or new dependencies.
 Investigate maintained Rust HotStuff libraries before writing consensus; reuse
 only when the exact variant, safety persistence, committee rules and licensing
 fit the reviewed specification. Do not substitute Raft for HotStuff.
+Do not introduce direct dependencies on unmaintained HotStuff repositories.
+If no maintained library matches the required contract, implement the consensus
+core in-repo with explicit tests and versioned compatibility boundaries.
 Do not introduce BLS until its approved scope is verified. Aggregation is not
 threshold signing; signer accounting, key validation and rogue-key protection
 require an explicit reviewed scheme.
