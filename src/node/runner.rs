@@ -103,6 +103,14 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         WorkerInfo::from_bytes(&raw).ok()
     }
 
+    /// Check if a compute task has been settled on-chain.
+    pub fn is_task_settled(&self, task_id: &str) -> bool {
+        let snapshot = self.block_tree_camera().snapshot();
+        snapshot
+            .committed_app_state(&MirasetApp::task_key(task_id))
+            .is_some()
+    }
+
     /// Read the hash of the highest committed block.
     pub fn highest_committed_block(&self) -> Option<CryptoHash> {
         self.block_tree_camera()

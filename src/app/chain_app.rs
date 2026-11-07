@@ -35,6 +35,12 @@ impl MirasetApp {
         key
     }
 
+    pub fn task_key(task_id: &str) -> Vec<u8> {
+        let mut key = b"task:".to_vec();
+        key.extend_from_slice(task_id.as_bytes());
+        key
+    }
+
     /// Read account state from block tree view or default to 0.
     fn read_account<K: KVStore>(
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
@@ -65,6 +71,7 @@ impl MirasetApp {
 
         // Track running balances in-memory during block processing
         let mut local_accounts = std::collections::HashMap::<String, AccountState>::new();
+        let mut local_tasks = std::collections::HashSet::<String>::new();
 
         for tx in &payload.transactions {
             let mut sender_acc = local_accounts
@@ -88,15 +95,48 @@ impl MirasetApp {
             local_accounts.insert(tx.recipient.clone(), recipient_acc);
         }
 
-        // Apply account updates
-        for (addr, acc) in local_accounts {
-            let key = Self::account_key(&addr);
-            let val = serde_json::to_vec(&acc).expect("account serialization failed");
-            updates.insert(key, val);
-        }
-
-        // Process PoCC compute receipts
+        // Process PoCC compute receipts:
+        // - Enforce anti-replay on task_id
+        // - Verify client receipt delivery confirmation
+        // - Debit client account for compute cost
+        // - Credit worker rewards and increment completed tasks
         for receipt in &payload.compute_receipts {
+            let t_key = Self::task_key(&receipt.task_id);
+            if tree.app_state(&t_key).is_some() || local_tasks.contains(&receipt.task_id) {
+                // Reject block on duplicate task replay
+                return None;
+            }
+            local_tasks.insert(receipt.task_id.clone());
+            updates.insert(t_key, b"settled".to_vec());
+
+            // If client account is specified, verify client delivery confirmation and debit cost
+            if !receipt.client_address.is_empty() {
+                if !receipt.client_confirmed {
+                    // Client did not confirm receiving all generated output
+                    return None;
+                }
+
+                if receipt.client_cost > 0 {
+                    let mut client_acc = local_accounts
+                        .remove(&receipt.client_address)
+                        .unwrap_or_else(|| Self::read_account(tree, &receipt.client_address));
+
+                    if client_acc.balance < receipt.client_cost {
+                        // Insufficient balance to debit client
+                        return None;
+                    }
+
+                    client_acc.balance = client_acc.balance.saturating_sub(receipt.client_cost);
+                    local_accounts.insert(receipt.client_address.clone(), client_acc);
+                }
+            }
+
+            let reward = if receipt.worker_reward > 0 {
+                receipt.worker_reward
+            } else {
+                receipt.gas_reward
+            };
+
             let mut worker = Self::read_worker(tree, &receipt.worker_id).unwrap_or(WorkerInfo {
                 worker_id: receipt.worker_id.clone(),
                 stake: 0,
@@ -106,12 +146,17 @@ impl MirasetApp {
             });
 
             worker.completed_tasks = worker.completed_tasks.saturating_add(1);
-            worker.rewards_accumulated = worker
-                .rewards_accumulated
-                .saturating_add(receipt.gas_reward);
+            worker.rewards_accumulated = worker.rewards_accumulated.saturating_add(reward);
 
             let key = Self::worker_key(&receipt.worker_id);
             let val = serde_json::to_vec(&worker).expect("worker serialization failed");
+            updates.insert(key, val);
+        }
+
+        // Apply account updates (both transactions and compute receipt client debits)
+        for (addr, acc) in local_accounts {
+            let key = Self::account_key(&addr);
+            let val = serde_json::to_vec(&acc).expect("account serialization failed");
             updates.insert(key, val);
         }
 
@@ -197,19 +242,27 @@ mod tests {
 
         let wrk_k = MirasetApp::worker_key("gpu_01");
         assert_eq!(wrk_k, b"worker:gpu_01".to_vec());
+
+        let task_k = MirasetApp::task_key("task_99");
+        assert_eq!(task_k, b"task:task_99".to_vec());
     }
 
     #[test]
     fn test_app_creation_with_mempool() {
         let mempool = Mempool::new();
         mempool.insert_tx(Transaction::new("alice", 1, "bob", 100, 5));
-        mempool.insert_receipt(ComputeReceipt {
-            task_id: "t1".into(),
-            worker_id: "w1".into(),
-            model_hash: "m".into(),
-            proof_hash: "p".into(),
-            gas_reward: 10,
-        });
+        let receipt = ComputeReceipt::new(
+            "t1",
+            "client_alice",
+            "gpu_worker_01",
+            "coord_01",
+            "model_llama",
+            "proof_abc",
+            150,
+            20,
+            18,
+        );
+        mempool.insert_receipt(receipt);
 
         let app = MirasetApp::new(mempool);
         assert_eq!(app.mempool().tx_count(), 1);

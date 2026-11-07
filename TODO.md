@@ -43,12 +43,21 @@ This document tracks prioritized integration tasks for connecting external and a
 
 ---
 
-## 4. GPU Worker & PoCC Verification Pipeline (Phase 4)
-- [ ] **4.1. Cryptographic Signature Validation**
-  - Validate Ed25519 signatures on compute receipts in `MirasetApp::validate_block`.
+## 4. GPU Worker, Coordinator & PoCC Verification Pipeline (Phase 4)
+*Architecture note: The GPU Worker runs as an independent client-side program/daemon on the provider's machine next to the local inference backend (Ollama, vLLM). It executes tasks and streams outputs directly to the client. The Coordinator verifies client receipt confirmation, co-signs the receipt with client cost debit, and submits it to MIRASET L1 for trustless consensus settlement.*
+
+- [x] **4.1. Compute Receipt & Client Debit Data Structures**
+  - Extended `ComputeReceipt` with `client_address`, `coordinator_id`, `tokens_computed`, `client_cost`, `worker_reward`, `client_confirmed`, and coordinator `signature`.
+  - Added RPC endpoint `GET /task/{task_id}` returning `TaskSettlementResponse` for Coordinator and Client tracking.
+- [x] **4.2. On-Chain Settlement, Client Debit & Anti-Replay**
+  - Enforced client delivery confirmation (`client_confirmed == true`) in `MirasetApp::compute_state_updates`.
+  - Atomically debited client balance for `client_cost` upon task completion.
+  - Implemented on-chain anti-replay using persistent `task:<task_id>` state keys to reject duplicate task submissions across consensus blocks.
+  - Credited GPU worker rewards and incremented completed task count in `WorkerInfo`.
+- [ ] **4.3. Cryptographic Signature Validation**
+  - Validate Ed25519 coordinator and worker signatures on compute receipts in `MirasetApp::validate_block`.
   - Ensure worker is registered and has sufficient bond/stake.
-- [ ] **4.2. Receipt Anti-Replay & Token Accounting**
-  - Prevent duplicate task submission across blocks using challenge nonces and task registries.
+- [ ] **4.4. Epoch-Level PoCC Accounting**
   - Apply canonical PoCC reward formulas (60% compute / 40% capacity) on epoch boundary.
 
 ---

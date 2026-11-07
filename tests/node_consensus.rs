@@ -43,17 +43,35 @@ fn test_single_node_genesis_and_query() {
     assert!(node.submit_transaction(tx).is_ok());
 
     // Submit compute receipt to mempool
-    let receipt = ComputeReceipt {
-        task_id: "compute_task_001".to_string(),
-        worker_id: "worker_h100".to_string(),
-        model_hash: "hash_llama_70b".to_string(),
-        proof_hash: "zkp_proof_verified".to_string(),
-        gas_reward: 200,
-    };
+    let receipt = ComputeReceipt::new(
+        "compute_task_001",
+        "alice",
+        "worker_h100",
+        "coordinator_local",
+        "hash_llama_70b",
+        "zkp_proof_verified",
+        150,
+        250,
+        200,
+    );
     assert!(node.submit_receipt(receipt).is_ok());
 
-    // Allow background consensus threads to run for a short duration
-    thread::sleep(Duration::from_millis(500));
+    // Allow background consensus threads to run and commit blocks
+    thread::sleep(Duration::from_millis(1500));
+
+    // Verify task settlement and client debit / worker reward
+    assert!(node.is_task_settled("compute_task_001"));
+
+    let worker = node.get_worker("worker_h100").expect("worker not recorded");
+    assert_eq!(worker.completed_tasks, 1);
+    assert_eq!(worker.rewards_accumulated, 200);
+
+    let alice = node.get_account("alice").expect("alice not found");
+    // Initial 10_000 - tx(1000 + 50) - client_cost(250) = 8_700
+    assert_eq!(alice.balance, 8_700);
+
+    let bob = node.get_account("bob").expect("bob not found");
+    assert_eq!(bob.balance, 1_500);
 
     // Clean drop of the node
     drop(node);
@@ -94,17 +112,32 @@ fn test_three_validator_cluster_consensus() {
     assert!(nodes[0].submit_transaction(tx).is_ok());
 
     // Submit compute receipt
-    let receipt = ComputeReceipt {
-        task_id: "task_cluster_01".to_string(),
-        worker_id: "cluster_worker".to_string(),
-        model_hash: "model_deepseek_r1".to_string(),
-        proof_hash: "proof_cluster_ok".to_string(),
-        gas_reward: 500,
-    };
+    let receipt = ComputeReceipt::new(
+        "task_cluster_01",
+        "alice",
+        "cluster_worker",
+        "coordinator_cluster",
+        "model_deepseek_r1",
+        "proof_cluster_ok",
+        200,
+        50,
+        45,
+    );
     assert!(nodes[0].submit_receipt(receipt).is_ok());
 
     // Allow consensus rounds between the 3 validators to progress
     thread::sleep(Duration::from_millis(2500));
+
+    // Verify on all 3 nodes that task was settled and alice was debited across consensus
+    for node in &nodes {
+        assert!(node.is_task_settled("task_cluster_01"));
+        let alice = node.get_account("alice").expect("alice not found");
+        // 50_000 - tx(5_000 + 100) - client_cost(50) = 44_850
+        assert_eq!(alice.balance, 44_850);
+        let worker = node.get_worker("cluster_worker").expect("worker not found");
+        assert_eq!(worker.completed_tasks, 1);
+        assert_eq!(worker.rewards_accumulated, 45);
+    }
 
     // Clean shutdown of all nodes
     drop(nodes);

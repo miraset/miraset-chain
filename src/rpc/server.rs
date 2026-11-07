@@ -63,6 +63,13 @@ pub struct LatestBlockResponse {
     pub highest_committed_block: Option<String>,
 }
 
+/// Task settlement status response for Coordinator / client tracking.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TaskSettlementResponse {
+    pub task_id: String,
+    pub settled: bool,
+}
+
 /// Shared RPC state wrapping MirasetNode.
 pub struct RpcState<K: KVStore, N: Network + 'static> {
     pub node: Arc<MirasetNode<K, N>>,
@@ -95,6 +102,7 @@ where
         .route("/receipt/submit", post(submit_receipt_handler))
         .route("/account/{address}", get(get_account_handler))
         .route("/worker/{worker_id}", get(get_worker_handler))
+        .route("/task/{task_id}", get(get_task_handler))
         .route("/block/latest", get(latest_block_handler))
         .route("/mempool/status", get(mempool_status_handler))
         .layer(cors)
@@ -184,6 +192,21 @@ where
             Json(ApiResponse::err("Worker not found in committed state")),
         ),
     }
+}
+
+async fn get_task_handler<K, N>(
+    State(state): State<RpcState<K, N>>,
+    Path(task_id): Path<String>,
+) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    let settled = state.node.is_task_settled(&task_id);
+    (
+        StatusCode::OK,
+        Json(ApiResponse::ok(TaskSettlementResponse { task_id, settled })),
+    )
 }
 
 async fn latest_block_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse

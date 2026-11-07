@@ -77,16 +77,19 @@ async fn main() {
 
     // 7. Submit sample PoCC compute receipt
     println!("\n[5] Submitting PoCC Compute Receipt to Mempool:");
-    let receipt1 = ComputeReceipt {
-        task_id: "inference_task_gpt_oss_1".to_string(),
-        worker_id: "worker_4090".to_string(),
-        model_hash: "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"
-            .to_string(),
-        proof_hash: "zkp:0x892a71f0923058b73a4cf02".to_string(),
-        gas_reward: 500,
-    };
+    let receipt1 = ComputeReceipt::new(
+        "inference_task_gpt_oss_1",
+        "alice",
+        "worker_4090",
+        "coordinator_east",
+        "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
+        "zkp:0x892a71f0923058b73a4cf02",
+        250,
+        600,
+        500,
+    );
     println!(
-        "    - Worker: {} completed task '{}' (Reward: 500 MIRA)",
+        "    - Worker: {} completed task '{}' (Reward: 500 MIRA, Client Cost: 600 MIRA)",
         receipt1.worker_id, receipt1.task_id
     );
     node.submit_receipt(receipt1)

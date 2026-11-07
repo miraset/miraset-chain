@@ -7,7 +7,8 @@ use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub};
 use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
 use miraset_chain::rpc::{
-    ApiResponse, HealthResponse, MempoolStatusResponse, RpcState, create_router,
+    ApiResponse, HealthResponse, MempoolStatusResponse, RpcState, TaskSettlementResponse,
+    create_router,
 };
 use miraset_chain::storage::MemKVStore;
 use std::sync::Arc;
@@ -127,13 +128,17 @@ async fn test_rpc_tx_and_receipt_submission() {
     assert_eq!(resp_dup.status(), StatusCode::BAD_REQUEST);
 
     // Submit compute receipt
-    let receipt = ComputeReceipt {
-        task_id: "task_rpc_101".into(),
-        worker_id: "worker_h100".into(),
-        model_hash: "model_hash_1".into(),
-        proof_hash: "proof_1".into(),
-        gas_reward: 50,
-    };
+    let receipt = ComputeReceipt::new(
+        "task_rpc_101",
+        "alice",
+        "worker_h100",
+        "coordinator_1",
+        "model_hash_1",
+        "proof_1",
+        100,
+        25,
+        20,
+    );
     let req_rcpt = Request::builder()
         .uri("/receipt/submit")
         .method("POST")
@@ -178,6 +183,18 @@ async fn test_rpc_worker_and_block_query() {
         .method("GET")
         .body(Body::empty())
         .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+
+    // Query task settlement status
+    let req_task = Request::builder()
+        .uri("/task/unsettled_task_123")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp_task = app.oneshot(req_task).await.unwrap();
+    assert_eq!(resp_task.status(), StatusCode::OK);
+    let body = resp_task.into_body().collect().await.unwrap().to_bytes();
+    let task_resp: ApiResponse<TaskSettlementResponse> = serde_json::from_slice(&body).unwrap();
+    assert!(!task_resp.data.unwrap().settled);
 }

@@ -115,13 +115,7 @@ mod tests {
     #[test]
     fn test_mempool_receipt_handling() {
         let pool = Mempool::new();
-        let r1 = ComputeReceipt {
-            task_id: "t1".into(),
-            worker_id: "w1".into(),
-            model_hash: "m1".into(),
-            proof_hash: "p1".into(),
-            gas_reward: 20,
-        };
+        let r1 = ComputeReceipt::new("t1", "client_alice", "w1", "coord", "m1", "p1", 50, 10, 8);
         assert!(pool.insert_receipt(r1.clone()));
         assert!(!pool.insert_receipt(r1)); // duplicate task
 
