@@ -226,6 +226,145 @@ pub struct WorkerInfo {
     pub completed_tasks: u64,
     pub rewards_accumulated: u64,
     pub active: bool,
+    /// Available VRAM in GiB for capacity scoring (PoCC).
+    #[serde(default = "default_vram_gib")]
+    pub vram_gib: u64,
+    /// Historical uptime in basis points (e.g. 9850 = 98.50%) in [0, 10000].
+    #[serde(default = "default_uptime_bps")]
+    pub uptime_bps: u64,
+    /// Accumulated verified output tokens in current epoch.
+    #[serde(default)]
+    pub epoch_tokens: u64,
+}
+
+fn default_vram_gib() -> u64 {
+    24
+}
+
+fn default_uptime_bps() -> u64 {
+    10000
+}
+
+/// Epoch-level PoCC reward distribution parameters (ADR-0004 & REWARDS.md).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochRewardConfig {
+    /// 60% compute pool split (basis points: 6000 / 10000).
+    pub compute_split_bps: u64,
+    /// 40% capacity pool split (basis points: 4000 / 10000).
+    pub capacity_split_bps: u64,
+    /// Minimum uptime in basis points to qualify for capacity rewards (e.g. 9000 = 90%).
+    pub min_uptime_bps: u64,
+    /// Saturation cap for VRAM contribution in GiB (e.g. 80 GiB).
+    pub vram_cap_gib: u64,
+}
+
+impl Default for EpochRewardConfig {
+    fn default() -> Self {
+        Self {
+            compute_split_bps: 6000,
+            capacity_split_bps: 4000,
+            min_uptime_bps: 9000,
+            vram_cap_gib: 80,
+        }
+    }
+}
+
+/// Result of an epoch reward distribution calculation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochRewardDistribution {
+    pub total_reward: u64,
+    pub compute_pool: u64,
+    pub capacity_pool: u64,
+    pub worker_rewards: std::collections::BTreeMap<String, u64>,
+}
+
+impl EpochRewardConfig {
+    /// Calculate PoCC rewards for a set of workers according to canonical ADR-0004 & REWARDS.md formulas:
+    /// - ComputeReward_i = R_comp * T_i / Σ T_j
+    /// - ScoreVal_i = (U_i / 10000)^2 * (min(V_i, V_cap) / V_cap)
+    /// - CapacityReward_i = R_cap * ScoreVal_i / Σ ScoreVal_j
+    pub fn distribute(&self, total_budget: u64, workers: &[WorkerInfo]) -> EpochRewardDistribution {
+        let compute_pool = (total_budget as u128 * self.compute_split_bps as u128 / 10000) as u64;
+        let capacity_pool = total_budget.saturating_sub(compute_pool);
+
+        let mut worker_rewards = std::collections::BTreeMap::new();
+        for w in workers {
+            worker_rewards.insert(w.worker_id.clone(), 0u64);
+        }
+
+        // 1. Compute pool distribution: proportional to epoch_tokens
+        let total_tokens: u128 = workers.iter().map(|w| w.epoch_tokens as u128).sum();
+        if total_tokens > 0 && compute_pool > 0 {
+            let mut compute_allocated = 0u64;
+            let active_workers: Vec<_> = workers.iter().filter(|w| w.epoch_tokens > 0).collect();
+            for (idx, w) in active_workers.iter().enumerate() {
+                let share = if idx == active_workers.len() - 1 {
+                    compute_pool.saturating_sub(compute_allocated)
+                } else {
+                    let s = (compute_pool as u128 * w.epoch_tokens as u128 / total_tokens) as u64;
+                    compute_allocated = compute_allocated.saturating_add(s);
+                    s
+                };
+                if let Some(r) = worker_rewards.get_mut(&w.worker_id) {
+                    *r = r.saturating_add(share);
+                }
+            }
+        }
+
+        // 2. Capacity pool distribution:
+        // ScoreVal = U^2 * (V / V_cap). Scaled with fixed point precision:
+        // u_ratio = U_bps (max 10000)
+        // v_norm = min(vram, cap) * 10000 / cap
+        // raw_score = (u_ratio * u_ratio / 10000) * v_norm / 10000
+        let mut capacity_scores = Vec::with_capacity(workers.len());
+        let mut total_capacity_score: u128 = 0;
+
+        for w in workers {
+            if !w.active || w.uptime_bps < self.min_uptime_bps {
+                capacity_scores.push(0u128);
+                continue;
+            }
+
+            let u = w.uptime_bps as u128; // in [0, 10000]
+            let u_sq = (u * u) / 10000; // in [0, 10000]
+
+            let capped_vram = w.vram_gib.min(self.vram_cap_gib) as u128;
+            let v_norm = (capped_vram * 10000) / self.vram_cap_gib as u128; // in [0, 10000]
+
+            let score = (u_sq * v_norm) / 10000;
+            total_capacity_score = total_capacity_score.saturating_add(score);
+            capacity_scores.push(score);
+        }
+
+        if total_capacity_score > 0 && capacity_pool > 0 {
+            let eligible_workers: Vec<(&WorkerInfo, u128)> = workers
+                .iter()
+                .zip(capacity_scores)
+                .filter(|(_, score)| *score > 0)
+                .collect();
+
+            let mut capacity_allocated = 0u64;
+            for (idx, (w, score)) in eligible_workers.iter().enumerate() {
+                let share = if idx == eligible_workers.len() - 1 {
+                    capacity_pool.saturating_sub(capacity_allocated)
+                } else {
+                    let s = (capacity_pool as u128 * *score / total_capacity_score) as u64;
+                    capacity_allocated = capacity_allocated.saturating_add(s);
+                    s
+                };
+                if let Some(r) = worker_rewards.get_mut(&w.worker_id) {
+                    *r = r.saturating_add(share);
+                }
+            }
+        }
+
+        EpochRewardDistribution {
+            total_reward: total_budget,
+            compute_pool,
+            capacity_pool,
+            worker_rewards,
+        }
+    }
 }
 
 impl WorkerInfo {
@@ -262,5 +401,48 @@ mod tests {
         let decoded = BlockPayload::from_bytes(&bytes).expect("decoding failed");
 
         assert_eq!(payload, decoded);
+    }
+
+    #[test]
+    fn test_epoch_reward_distribution_60_40() {
+        let config = EpochRewardConfig::default(); // 60% compute, 40% capacity
+
+        let w1 = WorkerInfo {
+            worker_id: "worker_a".to_string(),
+            stake: 1000,
+            completed_tasks: 10,
+            rewards_accumulated: 0,
+            active: true,
+            vram_gib: 40,
+            uptime_bps: 9900, // 99%
+            epoch_tokens: 120_000,
+        };
+
+        let w2 = WorkerInfo {
+            worker_id: "worker_b".to_string(),
+            stake: 2000,
+            completed_tasks: 8,
+            rewards_accumulated: 0,
+            active: true,
+            vram_gib: 80,
+            uptime_bps: 9500, // 95%
+            epoch_tokens: 80_000,
+        };
+
+        let total_budget = 3000; // 1800 compute, 1200 capacity
+        let dist = config.distribute(total_budget, &[w1, w2]);
+
+        assert_eq!(dist.compute_pool, 1800);
+        assert_eq!(dist.capacity_pool, 1200);
+
+        // Compute share: total 200k. w1 has 120k (60%), w2 has 80k (40%).
+        // w1 compute = 1800 * 60% = 1080.
+        // w2 compute = 1800 * 40% = 720.
+        let reward_a = dist.worker_rewards.get("worker_a").copied().unwrap();
+        let reward_b = dist.worker_rewards.get("worker_b").copied().unwrap();
+
+        assert!(reward_a > 1080, "worker_a should get compute + capacity");
+        assert!(reward_b > 720, "worker_b should get compute + capacity");
+        assert_eq!(reward_a + reward_b, total_budget);
     }
 }

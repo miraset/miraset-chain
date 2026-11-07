@@ -57,8 +57,10 @@ This document tracks prioritized integration tasks for connecting external and a
 - [x] **4.3. Cryptographic Signature Validation**
   - Canonical `canonical_sign_bytes` and Ed25519 coordinator signature creation & validation on `ComputeReceipt`.
   - Validate Ed25519 coordinator signatures in `MirasetApp::compute_state_updates` during block production and validation.
-- [ ] **4.4. Epoch-Level PoCC Accounting**
-  - Apply canonical PoCC reward formulas (60% compute / 40% capacity) on epoch boundary.
+- [x] **4.4. Epoch-Level PoCC Accounting**
+  - Canonical ADR-0004 & REWARDS.md 60% compute / 40% capacity reward formula implementation (`EpochRewardConfig`).
+  - Capacity scoring based on uptime squared, VRAM saturation cap (80 GiB), and verified output tokens.
+  - Zero-remainder exact integer allocation accounting with worker metadata tracking.
 
 ---
 

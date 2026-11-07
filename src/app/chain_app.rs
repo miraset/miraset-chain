@@ -149,10 +149,14 @@ impl MirasetApp {
                 completed_tasks: 0,
                 rewards_accumulated: 0,
                 active: true,
+                vram_gib: 24,
+                uptime_bps: 10000,
+                epoch_tokens: 0,
             });
 
             worker.completed_tasks = worker.completed_tasks.saturating_add(1);
             worker.rewards_accumulated = worker.rewards_accumulated.saturating_add(reward);
+            worker.epoch_tokens = worker.epoch_tokens.saturating_add(receipt.tokens_computed);
 
             let key = Self::worker_key(&receipt.worker_id);
             let val = serde_json::to_vec(&worker).expect("worker serialization failed");
