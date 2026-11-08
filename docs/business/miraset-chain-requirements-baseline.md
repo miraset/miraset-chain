@@ -10,7 +10,7 @@ Update 2026-11-06: the maintainer supplied an accessible vault at
 inventory below is historical; a full requirements cross-check is still
 pending. See [knowledge sources](knowledge-sources.md) for verified access,
 source precedence and PoCC terminology. Original engineering ADRs remain
-unavailable in this checkout.
+partially recovered in this checkout (`docs/adr/README.md`, ADR-0003).
 
 ## Verified checkout
 
@@ -33,6 +33,29 @@ Command: `cargo test`
 
 Result: exit 0; **zero tests**. This verifies only that the starter binary
 compiles under the test profile, not any blockchain behavior.
+
+## 2026-11-08 source reconciliation (R01, R02, R13)
+
+This pass reviews source status and conflicts only. It is **not** architecture,
+security, or production-readiness approval.
+
+| Concern | Verified source evidence | Status / conflict | Impact on implementation scope |
+|---|---|---|---|
+| Protocol ADR authority | `protocol/decisions/README.md:33-41` | ADR-0013 is Accepted; ADR-0016 is Proposed and does not supersede 0013 yet | Keep HotStuff path experimental/devnet-only; do not treat custom-chain settlement as approved production architecture |
+| Accepted settlement decision | `protocol/decisions/0013-hybrid-sui-coordinator.md:25,38-39` | Accepted decision selects Sui canonical settlement for Phase 1-3 | Any production claim for self-hosted HotStuff settlement is out of scope until supersession is explicitly accepted |
+| Proposed HotStuff direction | `protocol/decisions/0016-permissioned-hotstuff-network.md:20,28,81` | Proposal explicitly states it is pending and experimental code is not production evidence | Continue implementation only behind explicit experimental boundary and pending-gate language |
+| PoCC terminology | `protocol/SOW.md:27`; `protocol/decisions/0004-reward-split-60-40.md`; `protocol/REWARDS.md:20-22,345-349` | PoCC means Proof of Compute & Capacity, not proof of inference correctness | Remove unsupported "proof-of-correct-compute" wording from repository planning docs |
+| Public/private boundary | `product/development/decisions/0001-public-chain-private-product-code.md:41-56` | Accepted boundary keeps blockchain protocol/node public and product services private | Avoid pulling private product workflows into chain consensus requirements |
+| Engineering ADR evidence | `docs/adr/README.md:1-24`; `docs/adr/0003-hotstuff-rs-consensus-engine.md` | Engineering ADR namespace is separate from protocol ADRs; ADR-0001/0002 originals still missing | Treat missing originals as unresolved inputs; do not infer acceptance of safety, durability, or key-custody details |
+
+### Requirement Gate review snapshot
+
+- Gate reviewed for R01/R02/R13 traceability with the source map above.
+- Gate **not approved**: architecture, security, and code-review approvals are
+  still required for high-risk consensus, key, membership, persistence, and
+  settlement changes.
+- Unresolved assumptions remain tracked as open decisions; none are treated as
+  accepted protocol or production decisions.
 
 ## Requirements matrix
 

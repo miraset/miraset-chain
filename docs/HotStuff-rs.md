@@ -4,11 +4,17 @@
 - **Цільова система:** MIRASET L1 (Rust-native Compute-first Blockchain)
 - **Консенсусне ядро:** `hotstuff_rs` (v0.4.0)
 
+> [!warning]
+> Документ описує архітектурний аналіз експериментального напряму HotStuff.
+> За джерелом `protocol/decisions/README.md` (vault), прийнятим рішенням
+> залишається ADR-0013 (Sui settlement), а ADR-0016 (permissioned HotStuff)
+> має статус Proposed і не є production-апрувом.
+
 ---
 
 ## 1. Вступ та Executive Summary
 
-Для блокчейну **MIRASET L1** консенсусний рівень є критичним фундаментом, на якому будуються децентралізований реєстр GPU-воркерів, протокол перевірки обчислень Proof-of-Correct-Compute (PoCC), механізми PoS-стейкінгу та система виплат винагород.
+Для блокчейну **MIRASET L1** консенсусний рівень є критичним фундаментом, на якому будуються децентралізований реєстр GPU-воркерів, модель **Proof of Compute & Capacity (PoCC)**, механізми PoS-стейкінгу та система виплат винагород.
 
 **HotStuff-rs** — це бібліотека мовою Rust для реалізації BFT State Machine Replication (SMR), заснована на сучасному протоколі Chained HotStuff із триланцюговим правилом фіналізації (Three-Chain Commit Rule).
 
@@ -273,9 +279,9 @@ HotStuff вирішує задачу візантійського консенс
 
 ---
 
-### 5.6. MIRASET Compute & PoCC Verification Engine
+### 5.6. MIRASET Compute & PoCC Accounting/Receipt Engine
 
-**Призначення:** Спеціалізоване ядро MIRASET для перевірки доказів обчислень штучного інтелекту / GPU (Proof-of-Correct-Compute) та взаємодії з пулом воркерів.
+**Призначення:** Спеціалізоване ядро MIRASET для обліку корисних обчислень і доступної потужності (PoCC = Proof of Compute & Capacity), перевірки авторизованих receipt-комітментів і взаємодії з пулом воркерів.
 
 **Функціональні вимоги:**
 1. **Реєстр GPU-воркерів (Worker Registry):**

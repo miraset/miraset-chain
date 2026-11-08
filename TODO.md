@@ -102,11 +102,12 @@ Do not mark an item complete based only on a module existing. Record its accepta
 
 ### 8.1. Requirements and architecture gates — prerequisite
 
-- [ ] **8.1.1. Reconcile this roadmap with the authoritative protocol and engineering sources** (PRD R01, R02, R13).
+- [x] **8.1.1. Reconcile this roadmap with the authoritative protocol and engineering sources** (PRD R01, R02, R13).
   - Verify ADR-0013/0016 status and scope; keep unapproved HotStuff isolated from production settlement.
   - Verify original engineering ADRs and relevant SOW, REWARDS, crypto, and public/private-boundary decisions; record exact sources and conflicts in `docs/business/miraset-chain-requirements-baseline.md`.
   - Correct stale or conflicting claims in this file and `docs/HotStuff-rs.md`, including the PoCC terminology and whether a proposal is an approved decision.
   - **Accept:** source matrix and Requirement Gate are reviewed; no unresolved economic or production-scope assumptions are treated as decisions.
+  - **Evidence (2026-11-08):** `docs/business/miraset-chain-requirements-baseline.md` adds a source-status/conflict matrix and reviewed (not approved) Requirement Gate snapshot; `docs/HotStuff-rs.md` now states ADR-0013 accepted vs ADR-0016 proposed and corrects PoCC terminology.
 - [ ] **8.1.2. Complete architecture and implementation gates before production hardening** (PRD R03–R12).
   - Specify the canonical encoding, deterministic execution, durable commit/recovery, exact consensus variant, validator authorization, network identity, sync trust model, and RPC security contracts.
   - Resolve architecture proposals and required human approvals before implementation; keep the experimental boundary explicit in startup/configuration and docs.
