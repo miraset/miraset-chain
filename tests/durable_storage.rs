@@ -14,12 +14,14 @@ fn test_node_consensus_with_durable_redb() {
 
     let signing_key = SigningKey::from_bytes(&[10u8; 32]);
     let vk = signing_key.verifying_key();
+    let alice_key = SigningKey::from_bytes(&[11u8; 32]);
+    let alice_addr = hex::encode(alice_key.verifying_key().to_bytes());
     let hub = ChannelNetworkHub::new();
     let network = ChannelNetwork::new(vk, hub);
     let kv_store = RedbKVStore::open(&db_path).expect("failed to open redb store");
 
     let validators = vec![(vk, 100)];
-    let initial_accounts = vec![("alice", 20_000), ("bob", 500)];
+    let initial_accounts = vec![(alice_addr.as_str(), 20_000), ("bob", 500)];
     init_genesis(kv_store.clone(), &validators, &initial_accounts);
 
     let mempool = Mempool::new();
@@ -28,15 +30,16 @@ fn test_node_consensus_with_durable_redb() {
     // 1. Start node with durable Redb store
     let node = MirasetNode::start(config, kv_store, network, mempool);
 
-    // Submit transaction
-    let tx = Transaction::new("alice", 0, "bob", 2_000, 100);
+    // Submit a signed transaction
+    let mut tx = Transaction::new(&alice_addr, 0, "bob", 2_000, 100);
+    tx.sign_with(&alice_key);
     assert!(node.submit_transaction(tx).is_ok());
 
     // Submit signed compute receipt
     let coord_key = SigningKey::from_bytes(&[99u8; 32]);
     let mut receipt = ComputeReceipt::new(
         "redb_task_01",
-        "alice",
+        &alice_addr,
         "worker_gpu_redb",
         "coord_secure",
         "model_llama3",
@@ -53,7 +56,7 @@ fn test_node_consensus_with_durable_redb() {
 
     // Verify state committed
     assert!(node.is_task_settled("redb_task_01"));
-    let alice = node.get_account("alice").expect("alice not found");
+    let alice = node.get_account(&alice_addr).expect("alice not found");
     // Initial 20_000 - tx(2_000 + 100) - client_cost(500) = 17_400
     assert_eq!(alice.balance, 17_400);
 
@@ -83,7 +86,7 @@ fn test_node_consensus_with_durable_redb() {
     // Verify persisted state survived the restart
     assert!(node2.is_task_settled("redb_task_01"));
     let reloaded_alice = node2
-        .get_account("alice")
+        .get_account(&alice_addr)
         .expect("reloaded alice not found");
     assert_eq!(reloaded_alice.balance, 17_400);
 

@@ -211,3 +211,28 @@ async fn test_rpc_worker_and_block_query() {
         "text/event-stream"
     );
 }
+
+#[tokio::test]
+async fn test_rpc_worker_bond_submission() {
+    let (node, chain_id) = setup_test_node();
+    let state = RpcState { node, chain_id };
+    let app = create_router(state);
+
+    let bond_action = miraset_chain::core::types::WorkerBondAction::Register {
+        worker_id: "rpc_worker_1".to_string(),
+        bond_amount: 300,
+        vram_gib: 24,
+        endpoint: "127.0.0.1:8080".to_string(),
+    };
+    let tx = Transaction::new_worker_bond("alice", 0, 5, bond_action).unwrap();
+
+    let req = Request::builder()
+        .uri("/tx/submit")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&tx).unwrap()))
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}

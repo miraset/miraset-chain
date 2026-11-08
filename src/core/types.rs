@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Transaction representing a state transfer or interaction in MIRASET L1.
+///
+/// `sender` is the lowercase-hex Ed25519 public key that authorizes this transaction.
+/// `verify_signature` rejects any transaction whose `sender` does not match `pubkey`,
+/// so account identity is the signing key itself; there is no separate address registry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
     pub sender: String,
@@ -9,6 +13,56 @@ pub struct Transaction {
     pub amount: u64,
     pub fee: u64,
     pub payload: Vec<u8>,
+    /// Hex-encoded Ed25519 public key of the sender. Must equal `sender`.
+    #[serde(default)]
+    pub pubkey: String,
+    /// Hex-encoded Ed25519 signature over `canonical_sign_bytes()`.
+    #[serde(default)]
+    pub signature: String,
+}
+
+/// Appends a length-prefixed byte string, so adjacent variable-length fields in a
+/// canonical signing payload cannot be shifted into one another (e.g. recipient
+/// bytes bleeding into the following payload bytes).
+fn write_length_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {
+    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+/// Minimum worker bond required to register and serve tasks (ADR-0007 / protocol/model.md: 100 MIR).
+pub const MIN_WORKER_BOND: u64 = 100;
+
+/// Base slashing penalty for worker receipt or delivery fraud (ADR-0007: 10% base).
+pub const WORKER_BASE_SLASH_BPS: u64 = 1000; // 10.00%
+
+/// Actions that a worker or governance/coordinator can execute for worker stake bonds (ADR-0007).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkerBondAction {
+    /// Register or increase a worker's stake bond.
+    Register {
+        worker_id: String,
+        bond_amount: u64,
+        vram_gib: u64,
+        endpoint: String,
+    },
+    /// Unbond stake (returns unbonded amount to worker owner account).
+    Unbond { worker_id: String, amount: u64 },
+    /// Slash worker bond due to verified fault or challenge (ADR-0007).
+    Slash {
+        worker_id: String,
+        slash_amount: u64,
+        reason: String,
+    },
+}
+
+impl WorkerBondAction {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
 }
 
 impl Transaction {
@@ -26,7 +80,94 @@ impl Transaction {
             amount,
             fee,
             payload: Vec::new(),
+            pubkey: String::new(),
+            signature: String::new(),
         }
+    }
+
+    /// Construct a worker bond transaction (register, unbond, or slash).
+    pub fn new_worker_bond(
+        sender: impl Into<String>,
+        nonce: u64,
+        fee: u64,
+        action: WorkerBondAction,
+    ) -> Result<Self, serde_json::Error> {
+        let payload = action.to_bytes()?;
+        let amount = match &action {
+            WorkerBondAction::Register { bond_amount, .. } => *bond_amount,
+            _ => 0,
+        };
+        Ok(Self {
+            sender: sender.into(),
+            nonce,
+            recipient: "system:worker_registry".to_string(),
+            amount,
+            fee,
+            payload,
+            pubkey: String::new(),
+            signature: String::new(),
+        })
+    }
+
+    /// Canonical message bytes for cryptographic signature verification.
+    pub fn canonical_sign_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        write_length_prefixed(&mut bytes, self.sender.as_bytes());
+        bytes.extend_from_slice(&self.nonce.to_be_bytes());
+        write_length_prefixed(&mut bytes, self.recipient.as_bytes());
+        bytes.extend_from_slice(&self.amount.to_be_bytes());
+        bytes.extend_from_slice(&self.fee.to_be_bytes());
+        write_length_prefixed(&mut bytes, &self.payload);
+        bytes
+    }
+
+    /// Sign this transaction using an Ed25519 signing key. Sets `sender` and `pubkey`
+    /// to the signer's hex-encoded verifying key, so the signed sender always matches
+    /// the key that produced the signature.
+    pub fn sign_with(&mut self, signing_key: &ed25519_dalek::SigningKey) {
+        use ed25519_dalek::Signer;
+        self.pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+        self.sender = self.pubkey.clone();
+        let sign_bytes = self.canonical_sign_bytes();
+        let sig = signing_key.sign(&sign_bytes);
+        self.signature = hex::encode(sig.to_bytes());
+    }
+
+    /// Verify the sender's signature. Unlike `ComputeReceipt::verify_signature`, a
+    /// missing signature is always rejected — transactions move funds and must always
+    /// be authenticated.
+    pub fn verify_signature(&self) -> Result<(), &'static str> {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        if self.signature.is_empty() || self.pubkey.is_empty() {
+            return Err("missing transaction signature");
+        }
+
+        let pubkey_bytes = hex::decode(&self.pubkey).map_err(|_| "Invalid hex in pubkey")?;
+        if pubkey_bytes.len() != 32 {
+            return Err("Invalid pubkey length (must be 32 bytes)");
+        }
+        let mut pk_arr = [0u8; 32];
+        pk_arr.copy_from_slice(&pubkey_bytes);
+        let verifying_key =
+            VerifyingKey::from_bytes(&pk_arr).map_err(|_| "Invalid Ed25519 verifying key")?;
+
+        if !self.sender.eq_ignore_ascii_case(&self.pubkey) {
+            return Err("sender does not match signing pubkey");
+        }
+
+        let sig_bytes = hex::decode(&self.signature).map_err(|_| "Invalid hex in signature")?;
+        if sig_bytes.len() != 64 {
+            return Err("Invalid signature length (must be 64 bytes)");
+        }
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let sig = Signature::from_bytes(&sig_arr);
+
+        let sign_bytes = self.canonical_sign_bytes();
+        verifying_key
+            .verify(&sign_bytes, &sig)
+            .map_err(|_| "Ed25519 transaction signature verification failed")
     }
 }
 
@@ -138,9 +279,8 @@ impl ComputeReceipt {
     pub fn verify_signature(&self) -> Result<(), &'static str> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-        if self.signature.is_empty() && self.coordinator_pubkey.is_empty() {
-            // Optional signature in test/dev mode if not configured
-            return Ok(());
+        if self.signature.is_empty() || self.coordinator_pubkey.is_empty() {
+            return Err("missing coordinator signature");
         }
 
         let pubkey_bytes = hex::decode(&self.coordinator_pubkey)
@@ -235,6 +375,22 @@ pub struct WorkerInfo {
     /// Accumulated verified output tokens in current epoch.
     #[serde(default)]
     pub epoch_tokens: u64,
+    /// Owner/operator address holding the bond and receiving withdrawals.
+    #[serde(default)]
+    pub owner_address: String,
+    /// Network endpoint or multiaddr for direct peer job dispatch (optional).
+    #[serde(default)]
+    pub endpoint: String,
+}
+
+impl WorkerInfo {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
+    }
 }
 
 fn default_vram_gib() -> u64 {
@@ -367,19 +523,40 @@ impl EpochRewardConfig {
     }
 }
 
-impl WorkerInfo {
-    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        serde_json::to_vec(self)
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_transaction_signature_roundtrip() {
+        use ed25519_dalek::SigningKey;
+
+        let key = SigningKey::from_bytes(&[11u8; 32]);
+        let mut tx = Transaction::new("placeholder", 0, "bob", 100, 5);
+
+        // Unsigned transactions must never verify.
+        assert!(tx.verify_signature().is_err());
+
+        tx.sign_with(&key);
+        assert_eq!(tx.sender, hex::encode(key.verifying_key().to_bytes()));
+        assert!(tx.verify_signature().is_ok());
+
+        // Tampering with any signed field invalidates the signature.
+        tx.amount = 999;
+        assert!(tx.verify_signature().is_err());
+    }
+
+    #[test]
+    fn test_transaction_rejects_sender_pubkey_mismatch() {
+        use ed25519_dalek::SigningKey;
+
+        let signer = SigningKey::from_bytes(&[12u8; 32]);
+        let mut tx = Transaction::new("not-the-signer", 0, "bob", 100, 5);
+        tx.sign_with(&signer);
+        // Force a mismatch between the claimed sender and the actual signing key.
+        tx.sender = "0".repeat(64);
+        assert!(tx.verify_signature().is_err());
+    }
 
     #[test]
     fn test_block_payload_serde_roundtrip() {
@@ -416,6 +593,8 @@ mod tests {
             vram_gib: 40,
             uptime_bps: 9900, // 99%
             epoch_tokens: 120_000,
+            owner_address: "owner_a".to_string(),
+            endpoint: "10.0.0.1:8000".to_string(),
         };
 
         let w2 = WorkerInfo {
@@ -427,6 +606,8 @@ mod tests {
             vram_gib: 80,
             uptime_bps: 9500, // 95%
             epoch_tokens: 80_000,
+            owner_address: "owner_b".to_string(),
+            endpoint: "10.0.0.2:8000".to_string(),
         };
 
         let total_budget = 3000; // 1800 compute, 1200 capacity
@@ -444,5 +625,27 @@ mod tests {
         assert!(reward_a > 1080, "worker_a should get compute + capacity");
         assert!(reward_b > 720, "worker_b should get compute + capacity");
         assert_eq!(reward_a + reward_b, total_budget);
+    }
+
+    #[test]
+    fn test_worker_bond_action_serde() {
+        let action = WorkerBondAction::Register {
+            worker_id: "worker_1".to_string(),
+            bond_amount: 500,
+            vram_gib: 48,
+            endpoint: "127.0.0.1:9000".to_string(),
+        };
+
+        let bytes = action.to_bytes().unwrap();
+        let decoded = WorkerBondAction::from_bytes(&bytes).unwrap();
+        assert_eq!(action, decoded);
+
+        let unbond = WorkerBondAction::Unbond {
+            worker_id: "worker_1".to_string(),
+            amount: 200,
+        };
+        let u_bytes = unbond.to_bytes().unwrap();
+        let u_decoded = WorkerBondAction::from_bytes(&u_bytes).unwrap();
+        assert_eq!(unbond, u_decoded);
     }
 }

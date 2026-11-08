@@ -77,3 +77,18 @@ This document tracks prioritized integration tasks for connecting external and a
   - Implement `demo` subcommand for in-memory development walkthrough.
   - Wire persistent `RedbKVStore` and framed `TcpNetwork` directly into the node executable.
 
+---
+
+## 7. Worker Stake Bond Registration & Slashing Enforcement (Phase 7 — ADR-0007)
+- [x] **7.1. Worker Bond Action & Transaction Encoding**
+  - Defined `WorkerBondAction` enum (`Register`, `Unbond`, `Slash`) with `MIN_WORKER_BOND` (100 MIR) and `WORKER_BASE_SLASH_BPS` (10%).
+  - Added `Transaction::new_worker_bond(...)` helper routing to `system:worker_registry`.
+  - Added worker ownership (`owner_address`) and network discovery `endpoint` to `WorkerInfo`.
+- [x] **7.2. State Machine Bond Transition & Slashing**
+  - Updated `MirasetApp::compute_state_updates` to validate and execute worker registration, bond additions, unbonding with refund to owner, and slash burning.
+  - Required workers to maintain `stake >= MIN_WORKER_BOND` to remain active.
+- [x] **7.3. Testing & RPC Validation**
+  - Added integration test `test_worker_bond_registration_unbonding_and_slashing` verifying end-to-end consensus transitions.
+  - Added RPC test `test_rpc_worker_bond_submission` verifying client/coordinator submission of bond transactions.
+
+

@@ -197,10 +197,15 @@ async fn run_devnet_demo() {
     let hub = ChannelNetworkHub::new();
     let network = ChannelNetwork::new(vk, hub);
 
-    // 3. Initialize Genesis State
+    // 3. Initialize Genesis State. Alice's account is keyed by her Ed25519 address
+    // (not a free-text label) since transactions must be signed by the account they debit.
+    let alice_key = SigningKey::from_bytes(&[7u8; 32]);
+    let alice_addr = hex::encode(alice_key.verifying_key().to_bytes());
+    let coordinator_key = SigningKey::from_bytes(&[8u8; 32]);
+
     let validators = vec![(vk, 100)];
     let initial_accounts = vec![
-        ("alice", 1_000_000),
+        (alice_addr.as_str(), 1_000_000),
         ("bob", 250_000),
         ("worker_4090", 10_000),
     ];
@@ -209,6 +214,7 @@ async fn run_devnet_demo() {
     for (acc, bal) in &initial_accounts {
         println!("    - Account '{}': {} MIRA", acc, bal);
     }
+    println!("    (Account '{alice_addr}' is addressed below as 'alice')");
     init_genesis(kv_store.clone(), &validators, &initial_accounts);
 
     // 4. Start Node
@@ -232,24 +238,25 @@ async fn run_devnet_demo() {
     );
 
     // Verify initial account queries
-    if let Some(alice) = node.get_account("alice") {
+    if let Some(alice) = node.get_account(&alice_addr) {
         println!(
             "    ✓ Alice initial balance verified: {} MIRA (nonce: {})",
             alice.balance, alice.nonce
         );
     }
 
-    // 6. Submit sample transaction
+    // 6. Submit sample transaction, signed by Alice's key
     println!("\n[4] Submitting Transactions to Mempool:");
-    let tx1 = Transaction::new("alice", 0, "bob", 75_000, 150);
+    let mut tx1 = Transaction::new(&alice_addr, 0, "bob", 75_000, 150);
+    tx1.sign_with(&alice_key);
     println!("    - Tx: Alice -> Bob (Amount: 75,000, Fee: 150)");
     node.submit_transaction(tx1).expect("Tx submission failed");
 
-    // 7. Submit sample PoCC compute receipt
+    // 7. Submit sample PoCC compute receipt, co-signed by the coordinator
     println!("\n[5] Submitting PoCC Compute Receipt to Mempool:");
-    let receipt1 = ComputeReceipt::new(
+    let mut receipt1 = ComputeReceipt::new(
         "inference_task_gpt_oss_1",
-        "alice",
+        &alice_addr,
         "worker_4090",
         "coordinator_east",
         "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
@@ -258,6 +265,7 @@ async fn run_devnet_demo() {
         600,
         500,
     );
+    receipt1.sign_with(&coordinator_key);
     println!(
         "    - Worker: {} completed task '{}' (Reward: 500 MIRA, Client Cost: 600 MIRA)",
         receipt1.worker_id, receipt1.task_id

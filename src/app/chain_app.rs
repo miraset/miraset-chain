@@ -1,4 +1,6 @@
-use crate::core::types::{AccountState, BlockPayload, WorkerInfo};
+use crate::core::types::{
+    AccountState, BlockPayload, MIN_WORKER_BOND, Transaction, WorkerBondAction, WorkerInfo,
+};
 use crate::mempool::Mempool;
 use hotstuff_rs::app::{
     App, ProduceBlockRequest, ProduceBlockResponse, ValidateBlockRequest, ValidateBlockResponse,
@@ -62,6 +64,34 @@ impl MirasetApp {
             .and_then(|bytes| serde_json::from_slice::<WorkerInfo>(&bytes).ok())
     }
 
+    /// Pure state transition for one transaction against its sender's current account:
+    /// verifies the sender's signature, enforces strict nonce sequencing (rejects replays
+    /// and out-of-order submissions), and checks funds. Returns the updated sender account
+    /// or a rejection reason; never mutates `sender_acc` in place.
+    fn apply_transaction_to_sender(
+        tx: &Transaction,
+        sender_acc: &AccountState,
+    ) -> Result<AccountState, &'static str> {
+        tx.verify_signature()?;
+
+        if tx.nonce != sender_acc.nonce {
+            return Err("transaction nonce does not match expected account nonce");
+        }
+
+        let required = tx.amount.saturating_add(tx.fee);
+        if sender_acc.balance < required {
+            return Err("insufficient funds");
+        }
+
+        let mut updated = sender_acc.clone();
+        updated.balance = updated.balance.saturating_sub(required);
+        updated.nonce = updated
+            .nonce
+            .checked_add(1)
+            .ok_or("account nonce overflow")?;
+        Ok(updated)
+    }
+
     /// Process payload against block tree view to compute state updates.
     fn compute_state_updates<K: KVStore>(
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
@@ -71,28 +101,114 @@ impl MirasetApp {
 
         // Track running balances in-memory during block processing
         let mut local_accounts = std::collections::HashMap::<String, AccountState>::new();
+        let mut local_workers = std::collections::HashMap::<String, WorkerInfo>::new();
         let mut local_tasks = std::collections::HashSet::<String>::new();
 
         for tx in &payload.transactions {
-            let mut sender_acc = local_accounts
+            let sender_acc = local_accounts
                 .remove(&tx.sender)
                 .unwrap_or_else(|| Self::read_account(tree, &tx.sender));
 
-            let required = tx.amount.saturating_add(tx.fee);
-            if sender_acc.balance < required {
-                // Invalid transaction (insufficient funds)
-                return None;
+            // Reject the block on an unsigned/forged sender, a replayed or
+            // out-of-order nonce, or insufficient funds.
+            let updated_sender = Self::apply_transaction_to_sender(tx, &sender_acc).ok()?;
+            local_accounts.insert(tx.sender.clone(), updated_sender);
+
+            // Handle worker bond actions if recipient is system:worker_registry
+            if tx.recipient == "system:worker_registry" && !tx.payload.is_empty() {
+                let action: WorkerBondAction = match serde_json::from_slice(&tx.payload) {
+                    Ok(a) => a,
+                    Err(_) => return None, // malformed payload
+                };
+
+                match action {
+                    WorkerBondAction::Register {
+                        worker_id,
+                        bond_amount,
+                        vram_gib,
+                        endpoint,
+                    } => {
+                        let mut worker = local_workers
+                            .remove(&worker_id)
+                            .or_else(|| Self::read_worker(tree, &worker_id))
+                            .unwrap_or(WorkerInfo {
+                                worker_id: worker_id.clone(),
+                                stake: 0,
+                                completed_tasks: 0,
+                                rewards_accumulated: 0,
+                                active: true,
+                                vram_gib,
+                                uptime_bps: 10000,
+                                epoch_tokens: 0,
+                                owner_address: tx.sender.clone(),
+                                endpoint: endpoint.clone(),
+                            });
+
+                        // If already has an owner, only owner can add bond
+                        if !worker.owner_address.is_empty() && worker.owner_address != tx.sender {
+                            return None;
+                        }
+
+                        worker.owner_address = tx.sender.clone();
+                        worker.stake = worker.stake.saturating_add(bond_amount);
+                        if vram_gib > 0 {
+                            worker.vram_gib = vram_gib;
+                        }
+                        if !endpoint.is_empty() {
+                            worker.endpoint = endpoint;
+                        }
+                        if worker.stake >= MIN_WORKER_BOND {
+                            worker.active = true;
+                        }
+                        local_workers.insert(worker_id, worker);
+                    }
+                    WorkerBondAction::Unbond { worker_id, amount } => {
+                        let mut worker = local_workers
+                            .remove(&worker_id)
+                            .or_else(|| Self::read_worker(tree, &worker_id))?;
+
+                        // Only owner can unbond
+                        if worker.owner_address != tx.sender || worker.stake < amount {
+                            return None;
+                        }
+
+                        worker.stake = worker.stake.saturating_sub(amount);
+                        if worker.stake < MIN_WORKER_BOND {
+                            worker.active = false;
+                        }
+                        local_workers.insert(worker_id, worker);
+
+                        // Credit unbonded funds back to owner
+                        let mut owner_acc = local_accounts
+                            .remove(&tx.sender)
+                            .unwrap_or_else(|| Self::read_account(tree, &tx.sender));
+                        owner_acc.balance = owner_acc.balance.saturating_add(amount);
+                        local_accounts.insert(tx.sender.clone(), owner_acc);
+                    }
+                    WorkerBondAction::Slash {
+                        worker_id,
+                        slash_amount,
+                        ..
+                    } => {
+                        // Slashes burn worker stake
+                        let mut worker = local_workers
+                            .remove(&worker_id)
+                            .or_else(|| Self::read_worker(tree, &worker_id))?;
+
+                        worker.stake = worker.stake.saturating_sub(slash_amount);
+                        if worker.stake < MIN_WORKER_BOND {
+                            worker.active = false;
+                        }
+                        local_workers.insert(worker_id, worker);
+                    }
+                }
+            } else {
+                let mut recipient_acc = local_accounts
+                    .remove(&tx.recipient)
+                    .unwrap_or_else(|| Self::read_account(tree, &tx.recipient));
+                recipient_acc.balance = recipient_acc.balance.saturating_add(tx.amount);
+                local_accounts.insert(tx.recipient.clone(), recipient_acc);
             }
-
-            sender_acc.balance = sender_acc.balance.saturating_sub(required);
-            sender_acc.nonce = sender_acc.nonce.saturating_add(1);
-            local_accounts.insert(tx.sender.clone(), sender_acc);
-
-            let mut recipient_acc = local_accounts
-                .remove(&tx.recipient)
-                .unwrap_or_else(|| Self::read_account(tree, &tx.recipient));
-            recipient_acc.balance = recipient_acc.balance.saturating_add(tx.amount);
-            local_accounts.insert(tx.recipient.clone(), recipient_acc);
         }
 
         // Process PoCC compute receipts:
@@ -143,22 +259,31 @@ impl MirasetApp {
                 receipt.gas_reward
             };
 
-            let mut worker = Self::read_worker(tree, &receipt.worker_id).unwrap_or(WorkerInfo {
-                worker_id: receipt.worker_id.clone(),
-                stake: 0,
-                completed_tasks: 0,
-                rewards_accumulated: 0,
-                active: true,
-                vram_gib: 24,
-                uptime_bps: 10000,
-                epoch_tokens: 0,
-            });
+            let mut worker = local_workers
+                .remove(&receipt.worker_id)
+                .or_else(|| Self::read_worker(tree, &receipt.worker_id))
+                .unwrap_or(WorkerInfo {
+                    worker_id: receipt.worker_id.clone(),
+                    stake: 0,
+                    completed_tasks: 0,
+                    rewards_accumulated: 0,
+                    active: true,
+                    vram_gib: 24,
+                    uptime_bps: 10000,
+                    epoch_tokens: 0,
+                    owner_address: String::new(),
+                    endpoint: String::new(),
+                });
 
             worker.completed_tasks = worker.completed_tasks.saturating_add(1);
             worker.rewards_accumulated = worker.rewards_accumulated.saturating_add(reward);
             worker.epoch_tokens = worker.epoch_tokens.saturating_add(receipt.tokens_computed);
+            local_workers.insert(receipt.worker_id.clone(), worker);
+        }
 
-            let key = Self::worker_key(&receipt.worker_id);
+        // Apply worker updates
+        for (w_id, worker) in local_workers {
+            let key = Self::worker_key(&w_id);
             let val = serde_json::to_vec(&worker).expect("worker serialization failed");
             updates.insert(key, val);
         }
@@ -296,8 +421,8 @@ mod tests {
             90,
         );
 
-        // Before signing, signature is empty (passes dev-mode)
-        assert!(receipt.verify_signature().is_ok());
+        // Before signing, signature is empty and must be rejected.
+        assert!(receipt.verify_signature().is_err());
 
         // Sign with key
         receipt.sign_with(&signing_key);
@@ -310,5 +435,72 @@ mod tests {
         // Tampering with payload fails verification
         receipt.tokens_computed = 9999;
         assert!(receipt.verify_signature().is_err());
+    }
+
+    #[test]
+    fn test_apply_transaction_rejects_unsigned() {
+        let tx = Transaction::new("alice_addr", 0, "bob", 100, 5);
+        let sender_acc = AccountState {
+            balance: 1_000,
+            nonce: 0,
+        };
+        assert!(MirasetApp::apply_transaction_to_sender(&tx, &sender_acc).is_err());
+    }
+
+    #[test]
+    fn test_apply_transaction_rejects_wrong_nonce() {
+        use ed25519_dalek::SigningKey;
+
+        let key = SigningKey::from_bytes(&[21u8; 32]);
+        let addr = hex::encode(key.verifying_key().to_bytes());
+        let mut tx = Transaction::new(&addr, 5, "bob", 100, 5); // account is at nonce 0
+        tx.sign_with(&key);
+
+        let sender_acc = AccountState {
+            balance: 1_000,
+            nonce: 0,
+        };
+        assert!(MirasetApp::apply_transaction_to_sender(&tx, &sender_acc).is_err());
+    }
+
+    #[test]
+    fn test_apply_transaction_rejects_replay() {
+        use ed25519_dalek::SigningKey;
+
+        let key = SigningKey::from_bytes(&[23u8; 32]);
+        let addr = hex::encode(key.verifying_key().to_bytes());
+        let mut tx = Transaction::new(&addr, 0, "bob", 100, 5);
+        tx.sign_with(&key);
+
+        let sender_acc = AccountState {
+            balance: 1_000,
+            nonce: 0,
+        };
+        let updated = MirasetApp::apply_transaction_to_sender(&tx, &sender_acc)
+            .expect("first application should succeed");
+        assert_eq!(updated.nonce, 1);
+
+        // Resubmitting the exact same (already-applied) transaction must fail
+        // against the post-application account, since its nonce is now stale.
+        assert!(MirasetApp::apply_transaction_to_sender(&tx, &updated).is_err());
+    }
+
+    #[test]
+    fn test_apply_transaction_accepts_valid_signed_tx() {
+        use ed25519_dalek::SigningKey;
+
+        let key = SigningKey::from_bytes(&[22u8; 32]);
+        let addr = hex::encode(key.verifying_key().to_bytes());
+        let mut tx = Transaction::new(&addr, 0, "bob", 100, 5);
+        tx.sign_with(&key);
+
+        let sender_acc = AccountState {
+            balance: 1_000,
+            nonce: 0,
+        };
+        let updated = MirasetApp::apply_transaction_to_sender(&tx, &sender_acc)
+            .expect("valid signed tx should apply");
+        assert_eq!(updated.balance, 895);
+        assert_eq!(updated.nonce, 1);
     }
 }

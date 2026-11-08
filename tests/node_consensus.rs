@@ -14,12 +14,16 @@ fn test_single_node_genesis_and_query() {
     let keypair = SigningKey::from_bytes(&[1u8; 32]);
     let vk = keypair.verifying_key();
 
+    let alice_key = SigningKey::from_bytes(&[2u8; 32]);
+    let alice_addr = hex::encode(alice_key.verifying_key().to_bytes());
+    let coord_key = SigningKey::from_bytes(&[3u8; 32]);
+
     let hub = ChannelNetworkHub::new();
     let network = ChannelNetwork::new(vk, hub);
     let kv_store = MemKVStore::new();
 
     let validators = vec![(vk, 100)];
-    let initial_accounts = vec![("alice", 10_000), ("bob", 500)];
+    let initial_accounts = vec![(alice_addr.as_str(), 10_000), ("bob", 500)];
 
     init_genesis(kv_store.clone(), &validators, &initial_accounts);
 
@@ -31,7 +35,7 @@ fn test_single_node_genesis_and_query() {
 
     // Verify genesis state is queryable
     let alice = node
-        .get_account("alice")
+        .get_account(&alice_addr)
         .expect("Alice account should exist");
     assert_eq!(alice.balance, 10_000);
     assert_eq!(alice.nonce, 0);
@@ -39,14 +43,15 @@ fn test_single_node_genesis_and_query() {
     let bob = node.get_account("bob").expect("Bob account should exist");
     assert_eq!(bob.balance, 500);
 
-    // Submit transaction to mempool
-    let tx = Transaction::new("alice", 0, "bob", 1000, 50);
+    // Submit a signed transaction to mempool
+    let mut tx = Transaction::new(&alice_addr, 0, "bob", 1000, 50);
+    tx.sign_with(&alice_key);
     assert!(node.submit_transaction(tx).is_ok());
 
-    // Submit compute receipt to mempool
-    let receipt = ComputeReceipt::new(
+    // Submit a coordinator-signed compute receipt to mempool
+    let mut receipt = ComputeReceipt::new(
         "compute_task_001",
-        "alice",
+        &alice_addr,
         "worker_h100",
         "coordinator_local",
         "hash_llama_70b",
@@ -55,6 +60,7 @@ fn test_single_node_genesis_and_query() {
         250,
         200,
     );
+    receipt.sign_with(&coord_key);
     assert!(node.submit_receipt(receipt).is_ok());
 
     // Allow background consensus threads to run and commit blocks
@@ -80,7 +86,7 @@ fn test_single_node_genesis_and_query() {
     assert_eq!(worker.completed_tasks, 1);
     assert_eq!(worker.rewards_accumulated, 200);
 
-    let alice = node.get_account("alice").expect("alice not found");
+    let alice = node.get_account(&alice_addr).expect("alice not found");
     // Initial 10_000 - tx(1000 + 50) - client_cost(250) = 8_700
     assert_eq!(alice.balance, 8_700);
 
@@ -104,7 +110,11 @@ fn test_three_validator_cluster_consensus() {
         .map(|kp| (kp.verifying_key(), 100))
         .collect();
 
-    let initial_accounts = vec![("alice", 50_000), ("bob", 1_000)];
+    let alice_key = SigningKey::from_bytes(&[4u8; 32]);
+    let alice_addr = hex::encode(alice_key.verifying_key().to_bytes());
+    let coord_key = SigningKey::from_bytes(&[5u8; 32]);
+
+    let initial_accounts = vec![(alice_addr.as_str(), 50_000), ("bob", 1_000)];
 
     let mut nodes = Vec::new();
 
@@ -121,14 +131,15 @@ fn test_three_validator_cluster_consensus() {
         nodes.push(node);
     }
 
-    // Submit transaction
-    let tx = Transaction::new("alice", 0, "bob", 5_000, 100);
+    // Submit a signed transaction
+    let mut tx = Transaction::new(&alice_addr, 0, "bob", 5_000, 100);
+    tx.sign_with(&alice_key);
     assert!(nodes[0].submit_transaction(tx).is_ok());
 
-    // Submit compute receipt
-    let receipt = ComputeReceipt::new(
+    // Submit a coordinator-signed compute receipt
+    let mut receipt = ComputeReceipt::new(
         "task_cluster_01",
-        "alice",
+        &alice_addr,
         "cluster_worker",
         "coordinator_cluster",
         "model_deepseek_r1",
@@ -137,6 +148,7 @@ fn test_three_validator_cluster_consensus() {
         50,
         45,
     );
+    receipt.sign_with(&coord_key);
     assert!(nodes[0].submit_receipt(receipt).is_ok());
 
     // Allow consensus rounds between the 3 validators to progress
@@ -145,7 +157,7 @@ fn test_three_validator_cluster_consensus() {
     // Verify on all 3 nodes that task was settled and alice was debited across consensus
     for node in &nodes {
         assert!(node.is_task_settled("task_cluster_01"));
-        let alice = node.get_account("alice").expect("alice not found");
+        let alice = node.get_account(&alice_addr).expect("alice not found");
         // 50_000 - tx(5_000 + 100) - client_cost(50) = 44_850
         assert_eq!(alice.balance, 44_850);
         let worker = node.get_worker("cluster_worker").expect("worker not found");
@@ -155,4 +167,95 @@ fn test_three_validator_cluster_consensus() {
 
     // Clean shutdown of all nodes
     drop(nodes);
+}
+
+#[test]
+fn test_worker_bond_registration_unbonding_and_slashing() {
+    let keypair = SigningKey::from_bytes(&[8u8; 32]);
+    let vk = keypair.verifying_key();
+
+    let worker_owner_key = SigningKey::from_bytes(&[9u8; 32]);
+    let worker_owner_addr = hex::encode(worker_owner_key.verifying_key().to_bytes());
+
+    let hub = ChannelNetworkHub::new();
+    let network = ChannelNetwork::new(vk, hub);
+    let kv_store = MemKVStore::new();
+
+    let validators = vec![(vk, 100)];
+    let initial_accounts = vec![(worker_owner_addr.as_str(), 10_000)];
+
+    init_genesis(kv_store.clone(), &validators, &initial_accounts);
+
+    let mempool = Mempool::new();
+    let config = NodeConfig::devnet(keypair);
+
+    let node = MirasetNode::start(config, kv_store, network, mempool);
+
+    // 1. Submit Worker Bond Registration (500 MIR stake)
+    let bond_action = miraset_chain::core::types::WorkerBondAction::Register {
+        worker_id: "gpu_worker_pro".to_string(),
+        bond_amount: 500,
+        vram_gib: 80,
+        endpoint: "10.0.0.5:9090".to_string(),
+    };
+    let mut bond_tx = Transaction::new_worker_bond(&worker_owner_addr, 0, 10, bond_action).unwrap();
+    bond_tx.sign_with(&worker_owner_key);
+    assert!(node.submit_transaction(bond_tx).is_ok());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    // Verify worker registration committed
+    let worker = node
+        .get_worker("gpu_worker_pro")
+        .expect("worker should be registered");
+    assert_eq!(worker.stake, 500);
+    assert!(worker.active);
+    assert_eq!(worker.vram_gib, 80);
+    assert_eq!(worker.owner_address, worker_owner_addr);
+    assert_eq!(worker.endpoint, "10.0.0.5:9090");
+
+    let owner_acc = node.get_account(&worker_owner_addr).unwrap();
+    // 10_000 - bond(500) - fee(10) = 9_490
+    assert_eq!(owner_acc.balance, 9_490);
+    assert_eq!(owner_acc.nonce, 1);
+
+    // 2. Submit partial Unbond (100 MIR)
+    let unbond_action = miraset_chain::core::types::WorkerBondAction::Unbond {
+        worker_id: "gpu_worker_pro".to_string(),
+        amount: 100,
+    };
+    let mut unbond_tx =
+        Transaction::new_worker_bond(&worker_owner_addr, 1, 10, unbond_action).unwrap();
+    unbond_tx.sign_with(&worker_owner_key);
+    assert!(node.submit_transaction(unbond_tx).is_ok());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    let worker = node.get_worker("gpu_worker_pro").unwrap();
+    assert_eq!(worker.stake, 400); // 500 - 100
+    assert!(worker.active);
+
+    let owner_acc = node.get_account(&worker_owner_addr).unwrap();
+    // 9_490 + unbond(100) - fee(10) = 9_580
+    assert_eq!(owner_acc.balance, 9_580);
+    assert_eq!(owner_acc.nonce, 2);
+
+    // 3. Submit Slash (10% base slash = 40 MIR)
+    let slash_action = miraset_chain::core::types::WorkerBondAction::Slash {
+        worker_id: "gpu_worker_pro".to_string(),
+        slash_amount: 40,
+        reason: "task_timeout_delivery_failure".to_string(),
+    };
+    let mut slash_tx =
+        Transaction::new_worker_bond(&worker_owner_addr, 2, 5, slash_action).unwrap();
+    slash_tx.sign_with(&worker_owner_key);
+    assert!(node.submit_transaction(slash_tx).is_ok());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    let worker = node.get_worker("gpu_worker_pro").unwrap();
+    assert_eq!(worker.stake, 360); // 400 - 40
+    assert!(worker.active); // > 100 MIN_WORKER_BOND
+
+    drop(node);
 }
