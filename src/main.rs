@@ -15,7 +15,9 @@ use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(name = "miraset-chain")]
-#[command(about = "MIRASET L1 blockchain node (HotStuff-rs consensus & PoCC settlement)")]
+#[command(
+    about = "MIRASET L1 experimental/devnet blockchain node (HotStuff-rs consensus & PoCC accounting; ADR-0016 Proposed)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -120,7 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .p2p_addr
         .unwrap_or_else(|| "127.0.0.1:9948".parse().unwrap());
 
-    println!("Starting MIRASET Production Node:");
+    println!("Starting MIRASET Experimental/Devnet Node (ADR-0016 Proposed / ADR-0013 Accepted):");
+    println!("  Mode:       experimental-devnet (not canonical production settlement)");
     println!("  Public Key: {}", hex::encode(vk.to_bytes()));
     println!("  Data Dir:   {}", data_dir.display());
     println!("  P2P Addr:   {}", p2p_addr);

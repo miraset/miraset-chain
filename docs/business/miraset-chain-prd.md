@@ -78,11 +78,11 @@ contract rather than success-shaped fallback behavior.
 
 | Decision | Required evidence / decision owner | Status |
 |---|---|---|
-| Intended implementation baseline | Repository/ref and original engineering ADRs; maintainer | Missing |
-| Settlement architecture | Protocol ADR-0013/0016 and explicit acceptance; protocol owner | Unverified; experimental only |
-| Economics and timestamp ordering | SOW, REWARDS, simulator and source decisions; protocol owner | Missing |
-| Consensus variant and committee model | Algorithm spec and quorum-intersection reasoning; architect + human reviewer | Proposed scope only |
-| Storage and encoding | Durability/compatibility evidence; architect + reviewer | Not selected |
-| Reconfiguration and BLS scope | Safe activation spec and crypto decision; protocol/security owners | Not selected |
+| Intended implementation baseline | `docs/adr/0003-hotstuff-rs-consensus-engine.md` and `src/` modules inspected at `dev` | Reconciled for experimental devnet; ADR-0001/0002 originals still external |
+| Settlement architecture | Protocol ADR-0013 (Accepted) vs ADR-0016 (Proposed); protocol owner | Enforced as `experimental_mode = true` in `NodeConfig::validate()`; production activation disabled |
+| Economics and timestamp ordering | `protocol/SOW.md`, `protocol/REWARDS.md`, ADR-0004 (60/40 split), ADR-0007 (worker bonds) | Specified in `ARCHITECTURE.md` R04/R13 contract |
+| Consensus variant and committee model | Pinned `hotstuff_rs` v0.4.0 3-chain Chained HotStuff with static committee (`validator_set_updates = None`) | Specified in `ARCHITECTURE.md` R06–R08 contract; production approval pending ADR-0016 |
+| Storage and encoding | Versioned canonical envelopes (`v1`), domain separation tags, and `RedbKVStore` atomic recovery metadata | Specified in `ARCHITECTURE.md` R03/R05 contract |
+| Reconfiguration and BLS scope | Dynamic validator reconfiguration and BLS aggregation in HotStuff | Explicitly disabled in v1 (`validator_set_updates = None`); Ed25519 used per ADR-0003 |
 
-Requirement Gate: **pending**, not passed.
+Requirement & Architecture Gate status (2026-11-08): R01–R13 implementation contracts are specified in `ARCHITECTURE.md` and bounded to experimental/devnet mode (`NodeConfig::validate()`). Production settlement approval remains pending acceptance of protocol ADR-0016.

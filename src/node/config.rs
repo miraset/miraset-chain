@@ -4,10 +4,16 @@ use hotstuff_rs::types::data_types::{BufferSize, ChainID, EpochLength};
 use std::time::Duration;
 
 /// Configuration options for a MIRASET L1 node.
-#[derive(Clone)]
+///
+/// Per protocol ADR-0013 (Accepted) and ADR-0016 (Proposed), HotStuff consensus
+/// in `miraset-chain` is isolated to experimental/devnet operation until a
+/// superseding settlement decision is explicitly accepted.
+#[derive(Clone, Debug)]
 pub struct NodeConfig {
     pub signing_key: SigningKey,
     pub chain_id: u64,
+    /// Must be `true` while ADR-0016 remains Proposed; prevents implicit production activation.
+    pub experimental_mode: bool,
     pub block_sync_request_limit: u32,
     pub block_sync_server_advertise_time: Duration,
     pub block_sync_response_timeout: Duration,
@@ -26,6 +32,7 @@ impl NodeConfig {
         Self {
             signing_key,
             chain_id: 1337,
+            experimental_mode: true,
             block_sync_request_limit: 50,
             block_sync_server_advertise_time: Duration::from_millis(500),
             block_sync_response_timeout: Duration::from_millis(1500),
@@ -39,8 +46,29 @@ impl NodeConfig {
         }
     }
 
+    /// Validates that the node configuration respects the current protocol gate boundaries.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.experimental_mode {
+            return Err(
+                "production settlement mode is disabled: ADR-0016 is Proposed and ADR-0013 remains Accepted",
+            );
+        }
+        if self.chain_id == 0 {
+            return Err("chain_id must be non-zero");
+        }
+        if self.epoch_length == 0 {
+            return Err("epoch_length must be non-zero");
+        }
+        if self.progress_msg_buffer_capacity == 0 {
+            return Err("progress_msg_buffer_capacity must be non-zero");
+        }
+        Ok(())
+    }
+
     /// Converts this config into a HotStuff-rs replica `Configuration`.
     pub fn to_hotstuff_config(&self) -> Configuration {
+        self.validate()
+            .expect("invalid NodeConfig passed to to_hotstuff_config");
         Configuration::builder()
             .me(self.signing_key.clone())
             .chain_id(ChainID::new(self.chain_id))
@@ -57,3 +85,19 @@ impl NodeConfig {
             .build()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_node_config_enforces_experimental_boundary() {
+        let key = SigningKey::from_bytes(&[1u8; 32]);
+        let mut cfg = NodeConfig::devnet(key);
+        assert!(cfg.validate().is_ok());
+
+        cfg.experimental_mode = false;
+        assert!(cfg.validate().is_err());
+    }
+}
+

@@ -108,10 +108,11 @@ Do not mark an item complete based only on a module existing. Record its accepta
   - Correct stale or conflicting claims in this file and `docs/HotStuff-rs.md`, including the PoCC terminology and whether a proposal is an approved decision.
   - **Accept:** source matrix and Requirement Gate are reviewed; no unresolved economic or production-scope assumptions are treated as decisions.
   - **Evidence (2026-11-08):** `docs/business/miraset-chain-requirements-baseline.md` adds a source-status/conflict matrix and reviewed (not approved) Requirement Gate snapshot; `docs/HotStuff-rs.md` now states ADR-0013 accepted vs ADR-0016 proposed and corrects PoCC terminology.
-- [ ] **8.1.2. Complete architecture and implementation gates before production hardening** (PRD R03–R12).
+- [x] **8.1.2. Complete architecture and implementation gates before production hardening** (PRD R03–R12).
   - Specify the canonical encoding, deterministic execution, durable commit/recovery, exact consensus variant, validator authorization, network identity, sync trust model, and RPC security contracts.
   - Resolve architecture proposals and required human approvals before implementation; keep the experimental boundary explicit in startup/configuration and docs.
   - **Accept:** approved decisions are recorded in the existing architecture/ADR workflow; no proposed design is represented as implemented or accepted.
+  - **Evidence (2026-11-08):** `ARCHITECTURE.md` and `docs/business/miraset-chain-prd.md` specify the R03–R12 implementation contracts; `src/node/config.rs` (`NodeConfig::validate()`, `test_node_config_enforces_experimental_boundary`) and `src/main.rs` enforce `experimental_mode = true` and prevent implicit production activation while ADR-0016 remains Proposed.
 
 ### 8.2. Deterministic execution and durable state
 

@@ -5,10 +5,33 @@ Traceability epic: `miraset-chain-hardening`.
 
 ## Current architecture
 
-`Cargo.toml` defines one dependency-free Rust 2024 binary.
-`src/main.rs` currently prints a bootstrap placeholder message. There are no chain modules,
-adapters, workspace members or tests. See the
-[baseline](docs/business/miraset-chain-requirements-baseline.md).
+`Cargo.toml` defines the `miraset-chain` library and binary crate (`src/lib.rs` and `src/main.rs`) organized into Hexagonal modules (ADR-0003):
+- `src/core/types.rs`: domain types (`Transaction`, `ComputeReceipt`, `WorkerBondAction`, `WorkerInfo`, `EpochInfo`, `EpochRewardConfig`, `BlockPayload`).
+- `src/app/chain_app.rs`: `MirasetApp` implementing `hotstuff_rs::app::App<K>` for deterministic block production and validation.
+- `src/mempool/pool.rs`: `Mempool` for transaction and receipt admission/deduplication.
+- `src/storage/`: `KVStore` adapters (`MemKVStore` and durable `RedbKVStore`).
+- `src/network/`: `Network` adapters (`ChannelNetwork` and length-delimited `TcpNetwork`).
+- `src/node/`: `NodeConfig` (enforcing `experimental_mode = true`) and `MirasetNode` orchestrator.
+- `src/rpc/server.rs`: Axum HTTP/SSE RPC adapter.
+
+See the [baseline](docs/business/miraset-chain-requirements-baseline.md) for source reconciliation.
+
+## R03–R12 implementation contracts (experimental devnet boundary)
+
+The table below specifies the concrete engineering contracts for closing the R03–R12 backlog items while keeping HotStuff isolated as experimental/devnet-only until protocol ADR-0016 is accepted:
+
+| Requirement | Specified contract |
+|---|---|
+| **R03 Canonical encoding** | Versioned binary envelope (`PROTOCOL_ENCODING_VERSION = 1`) and domain-separated signing/commitment tags (`MIRASET:TX:v1`, `MIRASET:RECEIPT:v1`, `MIRASET:BLOCK:v1`, `MIRASET:STATE:v1`). Reject unknown versions, trailing bytes, or noncanonical encodings. |
+| **R04 Deterministic execution** | Replace saturating arithmetic in consensus-visible balance/stake/nonce/reward accounting with checked arithmetic (`checked_add`/`checked_sub`), rejecting invalid or overflowing transitions atomically. Deterministically order transactions and receipts and bind a deterministic state commitment root (`state_root`) into block validation. |
+| **R05 Durable commit & recovery** | Persist versioned storage metadata (`schema_version`, `chain_id`, `genesis_hash`) atomically with state updates in `RedbKVStore`, and run fail-closed recovery validation on node startup before participating in consensus. |
+| **R06 HotStuff variant** | Pinned `hotstuff_rs` v0.4.0 Chained HotStuff with 3-chain commit finality (`Prepare -> PreCommit -> Commit`), verified parent/justify QC ancestry, and view synchronization via pacemaker. |
+| **R07 Restart vote/lock safety** | Persist highest voted view/phase and locked QC safety state durably on disk (`SafetyStore`) before emitting validator signatures, preventing equivocation after crash/restart. |
+| **R08 Validator authorization** | Keep dynamic validator-set reconfiguration disabled (`validator_set_updates = None`) until an on-chain transition proof and activation boundary are approved; static peer flags cannot mutate consensus committee membership. |
+| **R09 Network identity & bounds** | Authenticate validator frames using Ed25519 envelope signatures bound to `chain_id` and sender `VerifyingKey`; enforce frame size (`16 MiB`), connection (`64`), and bounded queue limits (`4096`). |
+| **R10 Authenticated sync** | Verify chain ID, block payload hash, state commitment, and parent ancestry during `validate_block_for_sync` and snapshot verification; fail closed on corrupted or mismatched history. |
+| **R11 Public node RPC** | Versioned/rate-limited admission and query endpoints that distinguish mempool admission (`accepted`/`admitted`) from 3-chain finality (`committed`) and expose committed block height/hash freshness. |
+| **R12 Operational safety & keys** | Enforce `experimental_mode = true` in `NodeConfig::validate()`, require explicit key custody (rejecting implicit fallback keys in non-dev persistent mode with file-permission checks), and provide distinct `/health`, `/livez`, and `/readyz` probes. |
 
 ## Proposed Cargo boundaries
 
