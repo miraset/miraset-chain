@@ -30,8 +30,13 @@ impl Mempool {
             return false;
         }
         lock.push(tx);
-        // Sort descending by fee to prioritize higher-fee transactions
-        lock.sort_by_key(|b| std::cmp::Reverse(b.fee));
+        // Sort deterministically: higher fee first across senders, with ties broken by (sender, nonce)
+        lock.sort_by(|a, b| {
+            std::cmp::Reverse(a.fee)
+                .cmp(&std::cmp::Reverse(b.fee))
+                .then_with(|| a.sender.cmp(&b.sender))
+                .then_with(|| a.nonce.cmp(&b.nonce))
+        });
         true
     }
 
@@ -48,6 +53,8 @@ impl Mempool {
             return false;
         }
         lock.push(receipt);
+        // Sort deterministically by task_id so receipt execution order is canonical
+        lock.sort_by(|a, b| a.task_id.cmp(&b.task_id));
         true
     }
 
@@ -59,7 +66,24 @@ impl Mempool {
     ) -> (Vec<Transaction>, Vec<ComputeReceipt>) {
         let mut tx_lock = self.pending_txs.lock().expect("mempool lock poisoned");
         let tx_count = max_txs.min(tx_lock.len());
-        let txs: Vec<Transaction> = tx_lock.drain(0..tx_count).collect();
+        let mut txs: Vec<Transaction> = tx_lock.drain(0..tx_count).collect();
+        // Ensure multiple transactions from the same sender are ordered by ascending nonce
+        // while preserving fee-descending order across distinct senders.
+        let mut by_sender: std::collections::BTreeMap<String, Vec<Transaction>> =
+            std::collections::BTreeMap::new();
+        let mut sender_order: Vec<String> = Vec::new();
+        for tx in txs.drain(..) {
+            if !by_sender.contains_key(&tx.sender) {
+                sender_order.push(tx.sender.clone());
+            }
+            by_sender.entry(tx.sender.clone()).or_default().push(tx);
+        }
+        for sender in sender_order {
+            if let Some(mut sender_txs) = by_sender.remove(&sender) {
+                sender_txs.sort_by_key(|t| t.nonce);
+                txs.extend(sender_txs);
+            }
+        }
 
         let mut receipt_lock = self
             .pending_receipts

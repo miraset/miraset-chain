@@ -1,6 +1,6 @@
 use crate::core::types::{
     AccountState, BlockPayload, EpochInfo, EpochRewardConfig, EpochStatus, MIN_WORKER_BOND,
-    Transaction, WorkerBondAction, WorkerInfo,
+    Transaction, WorkerBondAction, WorkerInfo, compute_state_commitment,
 };
 use crate::mempool::Mempool;
 use hotstuff_rs::app::{
@@ -9,6 +9,7 @@ use hotstuff_rs::app::{
 use hotstuff_rs::block_tree::pluggables::KVStore;
 use hotstuff_rs::types::data_types::{CryptoHash, Data, Datum};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Application state machine implementing `hotstuff_rs::app::App`.
 pub struct MirasetApp {
@@ -128,8 +129,8 @@ impl MirasetApp {
 
     /// Pure state transition for one transaction against its sender's current account:
     /// verifies the sender's signature, enforces strict nonce sequencing (rejects replays
-    /// and out-of-order submissions), and checks funds. Returns the updated sender account
-    /// or a rejection reason; never mutates `sender_acc` in place.
+    /// and out-of-order submissions), and checks funds using checked arithmetic.
+    /// Returns the updated sender account or a rejection reason; never mutates `sender_acc` in place.
     fn apply_transaction_to_sender(
         tx: &Transaction,
         sender_acc: &AccountState,
@@ -140,31 +141,42 @@ impl MirasetApp {
             return Err("transaction nonce does not match expected account nonce");
         }
 
-        let required = tx.amount.saturating_add(tx.fee);
-        if sender_acc.balance < required {
-            return Err("insufficient funds");
-        }
-
-        let mut updated = sender_acc.clone();
-        updated.balance = updated.balance.saturating_sub(required);
-        updated.nonce = updated
+        let required = tx
+            .amount
+            .checked_add(tx.fee)
+            .ok_or("transaction amount + fee overflow")?;
+        let next_balance = sender_acc
+            .balance
+            .checked_sub(required)
+            .ok_or("insufficient funds")?;
+        let next_nonce = sender_acc
             .nonce
             .checked_add(1)
             .ok_or("account nonce overflow")?;
-        Ok(updated)
+
+        Ok(AccountState {
+            balance: next_balance,
+            nonce: next_nonce,
+        })
     }
 
-    /// Process payload against block tree view to compute state updates.
-    fn compute_state_updates<K: KVStore>(
+    pub fn state_commitment_key() -> Vec<u8> {
+        b"state:commitment_root".to_vec()
+    }
+
+    /// Process payload against block tree view to compute deterministic state updates
+    /// and the resulting domain-separated state commitment root (PRD R04).
+    fn compute_state_updates_with_commitment<K: KVStore>(
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
         payload: &BlockPayload,
-    ) -> Option<AppStateUpdates> {
+    ) -> Option<(AppStateUpdates, [u8; 32])> {
         let mut updates = AppStateUpdates::new();
+        let mut committed_entries: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
 
-        // Track running balances in-memory during block processing
-        let mut local_accounts = std::collections::HashMap::<String, AccountState>::new();
-        let mut local_workers = std::collections::HashMap::<String, WorkerInfo>::new();
-        let mut local_tasks = std::collections::HashSet::<String>::new();
+        // Track running balances and state deterministically during block processing
+        let mut local_accounts = BTreeMap::<String, AccountState>::new();
+        let mut local_workers = BTreeMap::<String, WorkerInfo>::new();
+        let mut local_tasks = BTreeSet::<String>::new();
         let all_ids_key = b"workers:all_ids".to_vec();
         let mut worker_ids: Vec<String> = tree
             .app_state(&all_ids_key)
@@ -180,7 +192,7 @@ impl MirasetApp {
                 .unwrap_or_else(|| Self::read_account(tree, &tx.sender));
 
             // Reject the block on an unsigned/forged sender, a replayed or
-            // out-of-order nonce, or insufficient funds.
+            // out-of-order nonce, overflow, or insufficient funds.
             let updated_sender = Self::apply_transaction_to_sender(tx, &sender_acc).ok()?;
             local_accounts.insert(tx.sender.clone(), updated_sender);
 
@@ -198,6 +210,9 @@ impl MirasetApp {
                         vram_gib,
                         endpoint,
                     } => {
+                        if tx.amount != bond_amount {
+                            return None;
+                        }
                         let mut worker = local_workers
                             .remove(&worker_id)
                             .or_else(|| Self::read_worker(tree, &worker_id))
@@ -220,16 +235,14 @@ impl MirasetApp {
                         }
 
                         worker.owner_address = tx.sender.clone();
-                        worker.stake = worker.stake.saturating_add(bond_amount);
+                        worker.stake = worker.stake.checked_add(bond_amount)?;
                         if vram_gib > 0 {
                             worker.vram_gib = vram_gib;
                         }
                         if !endpoint.is_empty() {
                             worker.endpoint = endpoint;
                         }
-                        if worker.stake >= MIN_WORKER_BOND {
-                            worker.active = true;
-                        }
+                        worker.active = worker.stake >= MIN_WORKER_BOND;
                         local_workers.insert(worker_id.clone(), worker);
 
                         worker_ids_modified |= Self::add_worker_id(&mut worker_ids, &worker_id);
@@ -240,21 +253,21 @@ impl MirasetApp {
                             .or_else(|| Self::read_worker(tree, &worker_id))?;
 
                         // Only owner can unbond
-                        if worker.owner_address != tx.sender || worker.stake < amount {
+                        if worker.owner_address != tx.sender {
                             return None;
                         }
 
-                        worker.stake = worker.stake.saturating_sub(amount);
+                        worker.stake = worker.stake.checked_sub(amount)?;
                         if worker.stake < MIN_WORKER_BOND {
                             worker.active = false;
                         }
                         local_workers.insert(worker_id, worker);
 
-                        // Credit unbonded funds back to owner
+                        // Credit unbonded funds back to owner using checked arithmetic
                         let mut owner_acc = local_accounts
                             .remove(&tx.sender)
                             .unwrap_or_else(|| Self::read_account(tree, &tx.sender));
-                        owner_acc.balance = owner_acc.balance.saturating_add(amount);
+                        owner_acc.balance = owner_acc.balance.checked_add(amount)?;
                         local_accounts.insert(tx.sender.clone(), owner_acc);
                     }
                     WorkerBondAction::Slash {
@@ -262,12 +275,12 @@ impl MirasetApp {
                         slash_amount,
                         ..
                     } => {
-                        // Slashes burn worker stake
+                        // Slashes burn worker stake with checked underflow rejection
                         let mut worker = local_workers
                             .remove(&worker_id)
                             .or_else(|| Self::read_worker(tree, &worker_id))?;
 
-                        worker.stake = worker.stake.saturating_sub(slash_amount);
+                        worker.stake = worker.stake.checked_sub(slash_amount)?;
                         if worker.stake < MIN_WORKER_BOND {
                             worker.active = false;
                         }
@@ -300,11 +313,13 @@ impl MirasetApp {
                         all_workers.push(local_w.clone());
                     }
                 }
+                all_workers.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
 
                 // Compute canonical PoCC reward distribution across all registered workers
                 let reward_config = EpochRewardConfig::default();
-                let distribution =
-                    reward_config.distribute(current_epoch.reward_budget, &all_workers);
+                let distribution = reward_config
+                    .try_distribute(current_epoch.reward_budget, &all_workers)
+                    .ok()?;
 
                 // Credit distributed rewards to worker owners / balances
                 for (w_id, reward_amount) in &distribution.worker_rewards {
@@ -315,14 +330,14 @@ impl MirasetApp {
 
                         if let Some(mut worker) = worker {
                             worker.rewards_accumulated =
-                                worker.rewards_accumulated.saturating_add(*reward_amount);
+                                worker.rewards_accumulated.checked_add(*reward_amount)?;
                             if !worker.owner_address.is_empty() {
                                 let mut owner_acc =
                                     local_accounts.remove(&worker.owner_address).unwrap_or_else(
                                         || Self::read_account(tree, &worker.owner_address),
                                     );
                                 owner_acc.balance =
-                                    owner_acc.balance.saturating_add(*reward_amount);
+                                    owner_acc.balance.checked_add(*reward_amount)?;
                                 local_accounts.insert(worker.owner_address.clone(), owner_acc);
                             }
                             local_workers.insert(w_id.clone(), worker);
@@ -336,9 +351,8 @@ impl MirasetApp {
 
                 // Write finalized epoch to historical index: epoch:info:{epoch_id}
                 let hist_key = Self::epoch_key(current_epoch.epoch_id);
-                let hist_val = current_epoch
-                    .to_bytes()
-                    .expect("epoch serialization failed");
+                let hist_val = current_epoch.to_bytes().ok()?;
+                committed_entries.insert(hist_key.clone(), hist_val.clone());
                 updates.insert(hist_key, hist_val);
 
                 // Reset worker epoch_tokens for the next epoch across all workers
@@ -351,10 +365,10 @@ impl MirasetApp {
                     }
                 }
 
-                // Advance to next active epoch
+                // Advance to next active epoch using checked arithmetic
                 let next_epoch = EpochInfo::new(
-                    current_epoch.epoch_id.saturating_add(1),
-                    current_epoch.start_timestamp.saturating_add(3600),
+                    current_epoch.epoch_id.checked_add(1)?,
+                    current_epoch.start_timestamp.checked_add(3600)?,
                     current_epoch.reward_budget,
                 );
                 current_epoch = next_epoch;
@@ -363,17 +377,17 @@ impl MirasetApp {
                 let mut recipient_acc = local_accounts
                     .remove(&tx.recipient)
                     .unwrap_or_else(|| Self::read_account(tree, &tx.recipient));
-                recipient_acc.balance = recipient_acc.balance.saturating_add(tx.amount);
+                recipient_acc.balance = recipient_acc.balance.checked_add(tx.amount)?;
                 local_accounts.insert(tx.recipient.clone(), recipient_acc);
             }
         }
 
         // Process PoCC compute receipts:
-        // - Cryptographic signature verification (if signature provided)
+        // - Cryptographic signature verification
         // - Enforce anti-replay on task_id
         // - Verify client receipt delivery confirmation
-        // - Debit client account for compute cost
-        // - Credit worker rewards and increment completed tasks
+        // - Debit client account for compute cost with checked arithmetic
+        // - Credit worker rewards and increment completed tasks with checked arithmetic
         for receipt in &payload.compute_receipts {
             if receipt.verify_signature().is_err() {
                 // Reject block on invalid signature
@@ -386,7 +400,9 @@ impl MirasetApp {
                 return None;
             }
             local_tasks.insert(receipt.task_id.clone());
-            updates.insert(t_key, b"settled".to_vec());
+            let settled_val = b"settled".to_vec();
+            committed_entries.insert(t_key.clone(), settled_val.clone());
+            updates.insert(t_key, settled_val);
 
             // If client account is specified, verify client delivery confirmation and debit cost
             if !receipt.client_address.is_empty() {
@@ -400,12 +416,7 @@ impl MirasetApp {
                         .remove(&receipt.client_address)
                         .unwrap_or_else(|| Self::read_account(tree, &receipt.client_address));
 
-                    if client_acc.balance < receipt.client_cost {
-                        // Insufficient balance to debit client
-                        return None;
-                    }
-
-                    client_acc.balance = client_acc.balance.saturating_sub(receipt.client_cost);
+                    client_acc.balance = client_acc.balance.checked_sub(receipt.client_cost)?;
                     local_accounts.insert(receipt.client_address.clone(), client_acc);
                 }
             }
@@ -432,74 +443,95 @@ impl MirasetApp {
                     endpoint: String::new(),
                 });
 
-            worker.completed_tasks = worker.completed_tasks.saturating_add(1);
-            worker.rewards_accumulated = worker.rewards_accumulated.saturating_add(reward);
-            worker.epoch_tokens = worker.epoch_tokens.saturating_add(receipt.tokens_computed);
+            worker.completed_tasks = worker.completed_tasks.checked_add(1)?;
+            worker.rewards_accumulated = worker.rewards_accumulated.checked_add(reward)?;
+            worker.epoch_tokens = worker.epoch_tokens.checked_add(receipt.tokens_computed)?;
             local_workers.insert(receipt.worker_id.clone(), worker);
 
             // Accumulate tokens and receipt counts into active epoch
             current_epoch.total_tokens = current_epoch
                 .total_tokens
-                .saturating_add(receipt.tokens_computed);
-            current_epoch.total_receipts = current_epoch.total_receipts.saturating_add(1);
+                .checked_add(receipt.tokens_computed)?;
+            current_epoch.total_receipts = current_epoch.total_receipts.checked_add(1)?;
             epoch_modified = true;
         }
 
         if worker_ids_modified {
-            let val = serde_json::to_vec(&worker_ids).expect("worker ids serialization failed");
+            worker_ids.sort();
+            let val = serde_json::to_vec(&worker_ids).ok()?;
+            committed_entries.insert(all_ids_key.clone(), val.clone());
             updates.insert(all_ids_key, val);
         }
 
         // Apply epoch state updates
         if epoch_modified {
             let key = Self::current_epoch_key();
-            let val = current_epoch
-                .to_bytes()
-                .expect("current epoch serialization failed");
-            updates.insert(key, val);
+            let val = current_epoch.to_bytes().ok()?;
+            committed_entries.insert(key.clone(), val.clone());
+            updates.insert(key, val.clone());
 
             // Also keep current epoch synced under its indexed key epoch:info:{epoch_id}
             let info_key = Self::epoch_key(current_epoch.epoch_id);
-            updates.insert(
-                info_key,
-                current_epoch
-                    .to_bytes()
-                    .expect("epoch serialization failed"),
-            );
+            committed_entries.insert(info_key.clone(), val.clone());
+            updates.insert(info_key, val);
         }
 
-        // Apply worker updates
+        // Apply worker updates in deterministic BTreeMap order
         for (w_id, worker) in local_workers {
             let key = Self::worker_key(&w_id);
-            let val = serde_json::to_vec(&worker).expect("worker serialization failed");
+            let val = serde_json::to_vec(&worker).ok()?;
+            committed_entries.insert(key.clone(), val.clone());
             updates.insert(key, val);
         }
 
-        // Apply account updates (both transactions and compute receipt client debits)
+        // Apply account updates in deterministic BTreeMap order
         for (addr, acc) in local_accounts {
             let key = Self::account_key(&addr);
-            let val = serde_json::to_vec(&acc).expect("account serialization failed");
+            let val = serde_json::to_vec(&acc).ok()?;
+            committed_entries.insert(key.clone(), val.clone());
             updates.insert(key, val);
         }
 
-        Some(updates)
+        let refs: Vec<(&[u8], &[u8])> = committed_entries
+            .iter()
+            .map(|(k, v)| (k.as_slice(), v.as_slice()))
+            .collect();
+        let state_root = compute_state_commitment(&refs);
+        updates.insert(Self::state_commitment_key(), state_root.to_vec());
+
+        Some((updates, state_root))
     }
 }
 
 impl<K: KVStore> App<K> for MirasetApp {
     fn produce_block(&mut self, request: ProduceBlockRequest<'_, K>) -> ProduceBlockResponse {
         let (txs, receipts) = self.mempool.drain_for_block(100, 20);
-        let payload = BlockPayload::new(txs, receipts);
-        let payload_bytes = payload.to_bytes();
+        let mut payload = BlockPayload::new(txs, receipts);
 
+        let app_state_updates =
+            match Self::compute_state_updates_with_commitment(request.block_tree(), &payload) {
+                Some((updates, state_root)) => {
+                    payload.state_root = state_root;
+                    Some(updates)
+                }
+                None => {
+                    // If drained mempool batch fails validation, fall back to an empty valid block
+                    // so a single bad mempool entry cannot stall block production.
+                    payload = BlockPayload::default();
+                    let (updates, state_root) =
+                        Self::compute_state_updates_with_commitment(request.block_tree(), &payload)
+                            .expect("empty block state commitment must succeed");
+                    payload.state_root = state_root;
+                    Some(updates)
+                }
+            };
+
+        let payload_bytes = payload.to_bytes();
         let hash_arr = payload
             .commitment_hash()
             .expect("canonical block commitment hash failed");
         let data_hash = CryptoHash::new(hash_arr);
-
         let data = Data::new(vec![Datum::new(payload_bytes)]);
-
-        let app_state_updates = Self::compute_state_updates(request.block_tree(), &payload);
 
         ProduceBlockResponse {
             data_hash,
@@ -542,13 +574,15 @@ impl<K: KVStore> App<K> for MirasetApp {
             return ValidateBlockResponse::Invalid;
         }
 
-        // Validate state transitions
-        match Self::compute_state_updates(request.block_tree(), &payload) {
-            Some(updates) => ValidateBlockResponse::Valid {
-                app_state_updates: Some(updates),
-                validator_set_updates: None,
-            },
-            None => ValidateBlockResponse::Invalid,
+        // Validate state transitions and deterministic state commitment root
+        match Self::compute_state_updates_with_commitment(request.block_tree(), &payload) {
+            Some((updates, computed_state_root)) if computed_state_root == payload.state_root => {
+                ValidateBlockResponse::Valid {
+                    app_state_updates: Some(updates),
+                    validator_set_updates: None,
+                }
+            }
+            _ => ValidateBlockResponse::Invalid,
         }
     }
 
@@ -708,5 +742,71 @@ mod tests {
             .expect("valid signed tx should apply");
         assert_eq!(updated.balance, 895);
         assert_eq!(updated.nonce, 1);
+    }
+
+    #[test]
+    fn test_apply_transaction_rejects_arithmetic_overflow() {
+        use ed25519_dalek::SigningKey;
+
+        let key = SigningKey::from_bytes(&[24u8; 32]);
+        let addr = hex::encode(key.verifying_key().to_bytes());
+        // amount + fee overflows u64::MAX
+        let mut tx = Transaction::new(&addr, 0, "bob", u64::MAX, 10);
+        tx.sign_with(&key);
+
+        let sender_acc = AccountState {
+            balance: u64::MAX,
+            nonce: 0,
+        };
+        assert!(MirasetApp::apply_transaction_to_sender(&tx, &sender_acc).is_err());
+        assert_eq!(sender_acc.balance, u64::MAX);
+        assert_eq!(sender_acc.nonce, 0);
+    }
+
+    #[test]
+    fn test_reward_distribution_is_deterministic_across_worker_order() {
+        let cfg = EpochRewardConfig::default();
+        let w1 = WorkerInfo {
+            worker_id: "worker_alpha".to_string(),
+            stake: 500,
+            completed_tasks: 1,
+            rewards_accumulated: 0,
+            active: true,
+            vram_gib: 48,
+            uptime_bps: 9800,
+            epoch_tokens: 333,
+            owner_address: "o1".to_string(),
+            endpoint: String::new(),
+        };
+        let w2 = WorkerInfo {
+            worker_id: "worker_beta".to_string(),
+            stake: 500,
+            completed_tasks: 1,
+            rewards_accumulated: 0,
+            active: true,
+            vram_gib: 80,
+            uptime_bps: 9600,
+            epoch_tokens: 333,
+            owner_address: "o2".to_string(),
+            endpoint: String::new(),
+        };
+        let w3 = WorkerInfo {
+            worker_id: "worker_gamma".to_string(),
+            stake: 500,
+            completed_tasks: 1,
+            rewards_accumulated: 0,
+            active: true,
+            vram_gib: 24,
+            uptime_bps: 9900,
+            epoch_tokens: 333,
+            owner_address: "o3".to_string(),
+            endpoint: String::new(),
+        };
+
+        let d1 = cfg
+            .try_distribute(10_000, &[w1.clone(), w2.clone(), w3.clone()])
+            .unwrap();
+        let d2 = cfg.try_distribute(10_000, &[w3, w1, w2]).unwrap();
+        assert_eq!(d1, d2);
     }
 }

@@ -579,13 +579,16 @@ pub struct CommitEvent {
     pub receipt_count: usize,
 }
 
-/// Consolidated block payload containing transactions and PoCC receipts.
+/// Consolidated block payload containing transactions, PoCC receipts, and deterministic state commitment root.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockPayload {
     #[serde(default = "default_protocol_version")]
     pub version: u8,
     pub transactions: Vec<Transaction>,
     pub compute_receipts: Vec<ComputeReceipt>,
+    /// Deterministic state commitment root over the candidate state updates produced by this block (PRD R04).
+    #[serde(default)]
+    pub state_root: [u8; 32],
 }
 
 impl Default for BlockPayload {
@@ -594,6 +597,7 @@ impl Default for BlockPayload {
             version: PROTOCOL_ENCODING_VERSION,
             transactions: Vec::new(),
             compute_receipts: Vec::new(),
+            state_root: [0u8; 32],
         }
     }
 }
@@ -604,7 +608,13 @@ impl BlockPayload {
             version: PROTOCOL_ENCODING_VERSION,
             transactions,
             compute_receipts,
+            state_root: [0u8; 32],
         }
+    }
+
+    pub fn with_state_root(mut self, state_root: [u8; 32]) -> Self {
+        self.state_root = state_root;
+        self
     }
 
     /// Encode block payload into versioned canonical binary format.
@@ -615,6 +625,7 @@ impl BlockPayload {
         let mut buf = Vec::new();
         buf.extend_from_slice(BLOCK_MAGIC);
         buf.push(self.version);
+        buf.extend_from_slice(&self.state_root);
         buf.extend_from_slice(&(self.transactions.len() as u32).to_be_bytes());
         for tx in &self.transactions {
             let tx_bytes = tx.to_canonical_bytes()?;
@@ -639,6 +650,12 @@ impl BlockPayload {
         if version != PROTOCOL_ENCODING_VERSION {
             return Err("unsupported block payload encoding version");
         }
+        if input.len() < 32 {
+            return Err("unexpected end of canonical input (state_root)");
+        }
+        let mut state_root = [0u8; 32];
+        state_root.copy_from_slice(&input[..32]);
+        input = &input[32..];
         let tx_count = read_u32(&mut input)? as usize;
         if tx_count > 10_000 {
             return Err("block transaction count exceeds safety limit");
@@ -664,6 +681,7 @@ impl BlockPayload {
             version,
             transactions,
             compute_receipts,
+            state_root,
         })
     }
 
@@ -780,50 +798,87 @@ pub struct EpochRewardDistribution {
 }
 
 impl EpochRewardConfig {
-    /// Calculate PoCC rewards for a set of workers according to canonical ADR-0004 & REWARDS.md formulas:
-    /// - ComputeReward_i = R_comp * T_i / Σ T_j
-    /// - ScoreVal_i = (U_i / 10000)^2 * (min(V_i, V_cap) / V_cap)
-    /// - CapacityReward_i = R_cap * ScoreVal_i / Σ ScoreVal_j
-    pub fn distribute(&self, total_budget: u64, workers: &[WorkerInfo]) -> EpochRewardDistribution {
-        let compute_pool = (total_budget as u128 * self.compute_split_bps as u128 / 10000) as u64;
-        let capacity_pool = total_budget.saturating_sub(compute_pool);
+    /// Checked deterministic PoCC reward distribution across workers sorted by `worker_id`
+    /// (PRD R04, ADR-0004, REWARDS.md).
+    pub fn try_distribute(
+        &self,
+        total_budget: u64,
+        workers: &[WorkerInfo],
+    ) -> Result<EpochRewardDistribution, &'static str> {
+        if self
+            .compute_split_bps
+            .checked_add(self.capacity_split_bps)
+            != Some(10_000)
+        {
+            return Err("invalid reward pool split bps (must sum to 10000)");
+        }
+        if self.vram_cap_gib == 0 {
+            return Err("vram_cap_gib must be non-zero");
+        }
+
+        let compute_pool =
+            u64::try_from((total_budget as u128 * self.compute_split_bps as u128) / 10000)
+                .map_err(|_| "compute pool overflow")?;
+        let capacity_pool = total_budget
+            .checked_sub(compute_pool)
+            .ok_or("capacity pool underflow")?;
+
+        // Sort workers deterministically by worker_id so remainder rounding is independent of input order.
+        let mut sorted_workers: Vec<&WorkerInfo> = workers.iter().collect();
+        sorted_workers.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
 
         let mut worker_rewards = std::collections::BTreeMap::new();
-        for w in workers {
+        for w in &sorted_workers {
             worker_rewards.insert(w.worker_id.clone(), 0u64);
         }
 
         // 1. Compute pool distribution: proportional to epoch_tokens
-        let total_tokens: u128 = workers.iter().map(|w| w.epoch_tokens as u128).sum();
+        let mut total_tokens: u128 = 0;
+        for w in &sorted_workers {
+            total_tokens = total_tokens
+                .checked_add(w.epoch_tokens as u128)
+                .ok_or("total epoch tokens overflow")?;
+        }
         if total_tokens > 0 && compute_pool > 0 {
             let mut compute_allocated = 0u64;
-            let active_workers: Vec<_> = workers.iter().filter(|w| w.epoch_tokens > 0).collect();
+            let active_workers: Vec<&WorkerInfo> = sorted_workers
+                .iter()
+                .copied()
+                .filter(|w| w.epoch_tokens > 0)
+                .collect();
             for (idx, w) in active_workers.iter().enumerate() {
                 let share = if idx == active_workers.len() - 1 {
-                    compute_pool.saturating_sub(compute_allocated)
+                    compute_pool
+                        .checked_sub(compute_allocated)
+                        .ok_or("compute pool remainder underflow")?
                 } else {
-                    let s = (compute_pool as u128 * w.epoch_tokens as u128 / total_tokens) as u64;
-                    compute_allocated = compute_allocated.saturating_add(s);
+                    let s = u64::try_from(
+                        (compute_pool as u128 * w.epoch_tokens as u128) / total_tokens,
+                    )
+                    .map_err(|_| "compute share overflow")?;
+                    compute_allocated = compute_allocated
+                        .checked_add(s)
+                        .ok_or("compute allocated overflow")?;
                     s
                 };
                 if let Some(r) = worker_rewards.get_mut(&w.worker_id) {
-                    *r = r.saturating_add(share);
+                    *r = r.checked_add(share).ok_or("worker reward overflow")?;
                 }
             }
         }
 
         // 2. Capacity pool distribution:
-        // ScoreVal = U^2 * (V / V_cap). Scaled with fixed point precision:
-        // u_ratio = U_bps (max 10000)
-        // v_norm = min(vram, cap) * 10000 / cap
-        // raw_score = (u_ratio * u_ratio / 10000) * v_norm / 10000
-        let mut capacity_scores = Vec::with_capacity(workers.len());
+        // ScoreVal = U^2 * (V / V_cap) with fixed-point precision in [0, 10000].
+        let mut capacity_scores = Vec::with_capacity(sorted_workers.len());
         let mut total_capacity_score: u128 = 0;
 
-        for w in workers {
+        for w in &sorted_workers {
             if !w.active || w.uptime_bps < self.min_uptime_bps {
                 capacity_scores.push(0u128);
                 continue;
+            }
+            if w.uptime_bps > 10_000 {
+                return Err("worker uptime_bps exceeds 10000");
             }
 
             let u = w.uptime_bps as u128; // in [0, 10000]
@@ -833,13 +888,16 @@ impl EpochRewardConfig {
             let v_norm = (capped_vram * 10000) / self.vram_cap_gib as u128; // in [0, 10000]
 
             let score = (u_sq * v_norm) / 10000;
-            total_capacity_score = total_capacity_score.saturating_add(score);
+            total_capacity_score = total_capacity_score
+                .checked_add(score)
+                .ok_or("total capacity score overflow")?;
             capacity_scores.push(score);
         }
 
         if total_capacity_score > 0 && capacity_pool > 0 {
-            let eligible_workers: Vec<(&WorkerInfo, u128)> = workers
+            let eligible_workers: Vec<(&WorkerInfo, u128)> = sorted_workers
                 .iter()
+                .copied()
                 .zip(capacity_scores)
                 .filter(|(_, score)| *score > 0)
                 .collect();
@@ -847,24 +905,39 @@ impl EpochRewardConfig {
             let mut capacity_allocated = 0u64;
             for (idx, (w, score)) in eligible_workers.iter().enumerate() {
                 let share = if idx == eligible_workers.len() - 1 {
-                    capacity_pool.saturating_sub(capacity_allocated)
+                    capacity_pool
+                        .checked_sub(capacity_allocated)
+                        .ok_or("capacity pool remainder underflow")?
                 } else {
-                    let s = (capacity_pool as u128 * *score / total_capacity_score) as u64;
-                    capacity_allocated = capacity_allocated.saturating_add(s);
+                    let s =
+                        u64::try_from((capacity_pool as u128 * *score) / total_capacity_score)
+                            .map_err(|_| "capacity share overflow")?;
+                    capacity_allocated = capacity_allocated
+                        .checked_add(s)
+                        .ok_or("capacity allocated overflow")?;
                     s
                 };
                 if let Some(r) = worker_rewards.get_mut(&w.worker_id) {
-                    *r = r.saturating_add(share);
+                    *r = r.checked_add(share).ok_or("worker reward overflow")?;
                 }
             }
         }
 
-        EpochRewardDistribution {
+        Ok(EpochRewardDistribution {
             total_reward: total_budget,
             compute_pool,
             capacity_pool,
             worker_rewards,
-        }
+        })
+    }
+
+    /// Calculate PoCC rewards for a set of workers according to canonical ADR-0004 & REWARDS.md formulas:
+    /// - ComputeReward_i = R_comp * T_i / Σ T_j
+    /// - ScoreVal_i = (U_i / 10000)^2 * (min(V_i, V_cap) / V_cap)
+    /// - CapacityReward_i = R_cap * ScoreVal_i / Σ ScoreVal_j
+    pub fn distribute(&self, total_budget: u64, workers: &[WorkerInfo]) -> EpochRewardDistribution {
+        self.try_distribute(total_budget, workers)
+            .expect("reward distribution failed invariant check")
     }
 }
 
