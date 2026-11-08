@@ -68,6 +68,12 @@ This document tracks prioritized integration tasks for connecting external and a
 - [x] **5.1. Block Commitment Event Hook**
   - Expose a tokio broadcast channel on `MirasetNode` that receives `CommitBlockEvent` upon 3-chain finalization (`subscribe_commits()`).
   - Extract block metadata, transaction counts, and receipt counts on commit.
-- [x] **5.2. External Indexer Connector**
-  - Provide a stream or SSE endpoint (`GET /events/blocks`) so `miraset-indexer` can project finalized blocks into queryable storage.
-  - Server-Sent Events (SSE) stream yielding `commit_block` events with JSON payloads and keep-alive heartbeats.
+---
+
+## 6. Production CLI & Multi-Validator Node Operations (Phase 6)
+- [x] **6.1. CLI Subcommands & Flags**
+  - Add CLI arguments for RPC address, P2P address, peer discovery (`--peers <pubkey>@<ip:port>`), data directory, and key file.
+  - Implement `keygen` subcommand to generate fresh Ed25519 validator keypairs.
+  - Implement `demo` subcommand for in-memory development walkthrough.
+  - Wire persistent `RedbKVStore` and framed `TcpNetwork` directly into the node executable.
+

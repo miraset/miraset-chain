@@ -4,11 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.104"
 axum = "0.8"
 borsh = "0.10.4"
+clap = { version = "4.6.7", features = ["derive"] }
 ed25519-dalek = "2.2.0"
 hex = "0.4"
 hotstuff_rs = "0.4.0"
+rand = "0.10.3"
 redb = "4.5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
