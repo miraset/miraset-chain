@@ -97,4 +97,12 @@ fn test_node_consensus_with_durable_redb() {
     assert_eq!(reloaded_worker.rewards_accumulated, 450);
 
     drop(node2);
+
+    // 3. Verify fail-closed recovery when chain_id mismatches persisted genesis metadata
+    let reloaded_kv_mismatch = RedbKVStore::open(&db_path).expect("failed to reopen redb");
+    let net3 = ChannelNetwork::new(vk, ChannelNetworkHub::new());
+    let pool3 = Mempool::new();
+    let mut bad_config = NodeConfig::devnet(SigningKey::from_bytes(&[10u8; 32]));
+    bad_config.chain_id = 9999;
+    assert!(MirasetNode::try_start(bad_config, reloaded_kv_mismatch, net3, pool3).is_err());
 }

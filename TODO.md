@@ -125,10 +125,11 @@ Do not mark an item complete based only on a module existing. Record its accepta
   - Add the approved state commitment to block validation; do not add a gas model until its limits and accounting are specified.
   - **Accept:** replay from the same finalized inputs produces identical commitments; invalid input leaves candidate state unchanged; overflow and ordering edge cases are tested.
   - **Evidence (2026-11-08):** `src/app/chain_app.rs` (`compute_state_updates_with_commitment`, `apply_transaction_to_sender`), `src/core/types.rs` (`BlockPayload::state_root`, `EpochRewardConfig::try_distribute`), and `src/mempool/pool.rs` replace saturating arithmetic with checked arithmetic, enforce deterministic `BTreeMap`/`BTreeSet` ordering and per-sender ascending nonce ordering, and bind `state_root` into block production and validation (`test_apply_transaction_rejects_arithmetic_overflow`, `test_reward_distribution_is_deterministic_across_worker_order`).
-- [ ] **8.2.3. Implement atomic durable application commit and fail-closed recovery** (PRD R05).
+- [x] **8.2.3. Implement atomic durable application commit and fail-closed recovery** (PRD R05).
   - Persist application records and versioned recovery metadata as one approved commit bundle; flush successfully before publishing finalized state or events.
   - Validate schema/version, chain/genesis identity, height continuity, ancestry, and commitments on restart; stop on uncertain writes or inconsistent history.
   - **Accept:** crash/fault injection at write and flush boundaries preserves acknowledged commits; corrupt or incomplete history prevents voting/readiness.
+  - **Evidence (2026-11-08):** `src/storage/redb.rs` (`RecoveryMetadata`, `try_write`, `validate_recovery_state`, `test_redb_fault_injection_preserves_acknowledged_commits`, `test_recovery_validation_fails_closed_on_mismatch_or_corruption`), `src/node/runner.rs` (`init_genesis_with_chain_id`, `MirasetNode::try_start`), and `tests/durable_storage.rs` verify atomic commit sequencing, fault-injection rollback, and fail-closed startup recovery.
 - [ ] **8.2.4. Separate storage responsibilities and define retention/snapshot behavior** (HotStuff-rs.md §5.2; PRD R05/R10).
   - Decide the backend based on the approved durability/compatibility review; separate consensus, canonical history, application state, and receipt/index data as required.
   - Specify pruning and snapshot format, integrity, migration, and rollback behavior before implementing them.

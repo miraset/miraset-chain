@@ -12,9 +12,14 @@ use tokio::sync::broadcast;
 use crate::app::MirasetApp;
 use crate::core::types::{
     AccountState, BlockPayload, CommitEvent, ComputeReceipt, EpochInfo, Transaction, WorkerInfo,
+    compute_state_commitment,
 };
 use crate::mempool::Mempool;
 use crate::node::config::NodeConfig;
+use crate::storage::{
+    RecoveryMetadata, STORAGE_SCHEMA_VERSION, read_recovery_metadata, validate_recovery_state,
+    write_recovery_metadata,
+};
 
 /// High-level MIRASET node orchestrating consensus, state execution, mempool, and storage.
 pub struct MirasetNode<K: KVStore, N: Network + 'static> {
@@ -25,12 +30,18 @@ pub struct MirasetNode<K: KVStore, N: Network + 'static> {
     pub commit_sender: broadcast::Sender<CommitEvent>,
 }
 
-/// Initialize genesis block tree storage with the given validators and initial accounts.
-pub fn init_genesis<K: KVStore>(
-    kv_store: K,
+/// Initialize genesis block tree storage with the given chain ID, validators, and initial accounts.
+pub fn init_genesis_with_chain_id<K: KVStore>(
+    mut kv_store: K,
+    chain_id: u64,
     validators: &[(VerifyingKey, u64)],
     initial_accounts: &[(&str, u64)],
 ) {
+    // Do not overwrite an already-initialized store
+    if read_recovery_metadata(&kv_store).ok().flatten().is_some() {
+        return;
+    }
+
     let mut val_set = ValidatorSet::new();
     for (vk, power) in validators {
         val_set.put(vk, Power::new(*power));
@@ -39,26 +50,56 @@ pub fn init_genesis<K: KVStore>(
     let val_set_state = ValidatorSetState::new(val_set.clone(), val_set, None, true);
 
     let mut app_updates = AppStateUpdates::new();
+    let mut genesis_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for (address, balance) in initial_accounts {
         let acc = AccountState {
             balance: *balance,
             nonce: 0,
         };
-        app_updates.insert(
-            MirasetApp::account_key(address),
-            acc.to_bytes()
-                .expect("Serialization of genesis account failed"),
-        );
+        let key = MirasetApp::account_key(address);
+        let val = acc
+            .to_bytes()
+            .expect("Serialization of genesis account failed");
+        genesis_entries.push((key.clone(), val.clone()));
+        app_updates.insert(key, val);
     }
 
     let initial_epoch = EpochInfo::new(0, 0, 100_000);
     let epoch_bytes = initial_epoch
         .to_bytes()
         .expect("Serialization of genesis epoch failed");
-    app_updates.insert(MirasetApp::current_epoch_key(), epoch_bytes.clone());
-    app_updates.insert(MirasetApp::epoch_key(initial_epoch.epoch_id), epoch_bytes);
+    let current_key = MirasetApp::current_epoch_key();
+    let epoch0_key = MirasetApp::epoch_key(initial_epoch.epoch_id);
+    genesis_entries.push((current_key.clone(), epoch_bytes.clone()));
+    genesis_entries.push((epoch0_key.clone(), epoch_bytes.clone()));
+    app_updates.insert(current_key, epoch_bytes.clone());
+    app_updates.insert(epoch0_key, epoch_bytes);
 
-    Replica::initialize(kv_store, app_updates, val_set_state);
+    let refs: Vec<(&[u8], &[u8])> = genesis_entries
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+        .collect();
+    let genesis_hash = compute_state_commitment(&refs);
+    app_updates.insert(MirasetApp::state_commitment_key(), genesis_hash.to_vec());
+
+    Replica::initialize(kv_store.clone(), app_updates, val_set_state);
+
+    let meta = RecoveryMetadata {
+        schema_version: STORAGE_SCHEMA_VERSION,
+        chain_id,
+        genesis_hash,
+    };
+    write_recovery_metadata(&mut kv_store, &meta)
+        .expect("failed to persist genesis recovery metadata");
+}
+
+/// Initialize genesis block tree storage with default devnet chain ID (1337).
+pub fn init_genesis<K: KVStore>(
+    kv_store: K,
+    validators: &[(VerifyingKey, u64)],
+    initial_accounts: &[(&str, u64)],
+) {
+    init_genesis_with_chain_id(kv_store, 1337, validators, initial_accounts);
 }
 
 impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
@@ -71,8 +112,17 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         init_genesis(kv_store, validators, initial_accounts);
     }
 
-    /// Start a new MIRASET replica node.
-    pub fn start(config: NodeConfig, kv_store: K, network: N, mempool: Mempool) -> Self {
+    /// Fallible node startup that validates `NodeConfig` and fail-closed storage recovery
+    /// metadata before participating in consensus (PRD R05).
+    pub fn try_start(
+        config: NodeConfig,
+        kv_store: K,
+        network: N,
+        mempool: Mempool,
+    ) -> Result<Self, String> {
+        config.validate().map_err(|e| e.to_string())?;
+        validate_recovery_state(&kv_store, config.chain_id, None)?;
+
         let app = MirasetApp::new(mempool.clone());
         let hs_config = config.to_hotstuff_config();
 
@@ -95,6 +145,8 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
 
                 let camera = BlockTreeCamera::new(kv_for_event.clone());
                 let snapshot = camera.snapshot();
+                // Only publish finalized CommitEvent after verifying the block is durably
+                // readable from the block tree snapshot.
                 let (tx_count, receipt_count) = match snapshot.block_data(&event.block) {
                     Ok(Some(data)) if !data.vec().is_empty() => {
                         let datum = &data.vec()[0];
@@ -102,10 +154,11 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                             Ok(payload) => {
                                 (payload.transactions.len(), payload.compute_receipts.len())
                             }
-                            Err(_) => (0, 0),
+                            Err(_) => return,
                         }
                     }
-                    _ => (0, 0),
+                    Ok(Some(_)) => (0, 0),
+                    _ => return,
                 };
 
                 let _ = commit_tx.send(CommitEvent {
@@ -118,13 +171,19 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             .build()
             .start();
 
-        Self {
+        Ok(Self {
             replica,
             mempool,
             kv_store,
             network,
             commit_sender,
-        }
+        })
+    }
+
+    /// Start a new MIRASET replica node after fail-closed recovery validation.
+    pub fn start(config: NodeConfig, kv_store: K, network: N, mempool: Mempool) -> Self {
+        Self::try_start(config, kv_store, network, mempool)
+            .expect("node startup failed recovery or config validation")
     }
 
     /// Subscribe to committed block events.

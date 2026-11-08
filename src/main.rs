@@ -3,7 +3,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use miraset_chain::core::types::{ComputeReceipt, Transaction};
 use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub, TcpNetwork};
-use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
+use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis, init_genesis_with_chain_id};
 use miraset_chain::rpc::start_rpc_server;
 use miraset_chain::storage::{MemKVStore, RedbKVStore};
 use rand::RngExt;
@@ -153,9 +153,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let kv_store = RedbKVStore::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
     let (network, runtime) = TcpNetwork::bind(vk, p2p_addr, peer_addresses)?;
 
-    // If database is freshly created, initialize genesis
-    init_genesis(
+    // If database is freshly created, initialize genesis with configured chain_id
+    init_genesis_with_chain_id(
         kv_store.clone(),
+        cli.chain_id,
         &initial_validators,
         &[("alice", 1_000_000), ("bob", 500_000)],
     );
@@ -164,7 +165,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.chain_id = cli.chain_id;
 
     let mempool = Mempool::new();
-    let node = Arc::new(MirasetNode::start(config, kv_store, network, mempool));
+    let node = Arc::new(
+        MirasetNode::try_start(config, kv_store, network, mempool)
+            .map_err(|e| anyhow::anyhow!("{e}"))?,
+    );
 
     let rpc_node = Arc::clone(&node);
     let rpc_addr = cli.rpc_addr;
