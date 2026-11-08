@@ -91,4 +91,95 @@ This document tracks prioritized integration tasks for connecting external and a
   - Added integration test `test_worker_bond_registration_unbonding_and_slashing` verifying end-to-end consensus transitions.
   - Added RPC test `test_rpc_worker_bond_submission` verifying client/coordinator submission of bond transactions.
 
+---
 
+## 8. HotStuff Production-Gap Closure Backlog
+
+**Traceability:** `miraset-chain-hardening` (PRD R01–R13)
+**Status:** Open; this backlog is not a production-readiness declaration or approval to change the settlement architecture. HotStuff remains experimental/devnet-only while protocol ADR-0016 is Proposed and ADR-0013 remains the accepted settlement decision. The checked items above record delivered foundations; they do not mean the production gaps below are closed.
+
+Do not mark an item complete based only on a module existing. Record its acceptance evidence (tests, reviewed source, and required gate) in the linked PRD/requirements artifacts. Do not start high-risk protocol, key-safety, persistence, membership, or settlement changes until their requirements and architecture/security/review approvals are resolved.
+
+### 8.1. Requirements and architecture gates — prerequisite
+
+- [ ] **8.1.1. Reconcile this roadmap with the authoritative protocol and engineering sources** (PRD R01, R02, R13).
+  - Verify ADR-0013/0016 status and scope; keep unapproved HotStuff isolated from production settlement.
+  - Verify original engineering ADRs and relevant SOW, REWARDS, crypto, and public/private-boundary decisions; record exact sources and conflicts in `docs/business/miraset-chain-requirements-baseline.md`.
+  - Correct stale or conflicting claims in this file and `docs/HotStuff-rs.md`, including the PoCC terminology and whether a proposal is an approved decision.
+  - **Accept:** source matrix and Requirement Gate are reviewed; no unresolved economic or production-scope assumptions are treated as decisions.
+- [ ] **8.1.2. Complete architecture and implementation gates before production hardening** (PRD R03–R12).
+  - Specify the canonical encoding, deterministic execution, durable commit/recovery, exact consensus variant, validator authorization, network identity, sync trust model, and RPC security contracts.
+  - Resolve architecture proposals and required human approvals before implementation; keep the experimental boundary explicit in startup/configuration and docs.
+  - **Accept:** approved decisions are recorded in the existing architecture/ADR workflow; no proposed design is represented as implemented or accepted.
+
+### 8.2. Deterministic execution and durable state
+
+- [ ] **8.2.1. Canonicalize protocol payloads and commitments** (PRD R03).
+  - Define versioned canonical encodings and domain-separated transaction, block, receipt, and state commitments; add golden vectors and reject noncanonical or unsupported encodings.
+  - **Accept:** golden-byte, round-trip, malformed-input, and cross-version tests pass.
+- [ ] **8.2.2. Harden deterministic state transitions** (PRD R04).
+  - Replace saturating arithmetic in consensus-visible accounting with the source-approved checked/error behavior; specify transaction ordering, timestamps, epoch transitions, and reward rounding from authoritative sources.
+  - Add the approved state commitment to block validation; do not add a gas model until its limits and accounting are specified.
+  - **Accept:** replay from the same finalized inputs produces identical commitments; invalid input leaves candidate state unchanged; overflow and ordering edge cases are tested.
+- [ ] **8.2.3. Implement atomic durable application commit and fail-closed recovery** (PRD R05).
+  - Persist application records and versioned recovery metadata as one approved commit bundle; flush successfully before publishing finalized state or events.
+  - Validate schema/version, chain/genesis identity, height continuity, ancestry, and commitments on restart; stop on uncertain writes or inconsistent history.
+  - **Accept:** crash/fault injection at write and flush boundaries preserves acknowledged commits; corrupt or incomplete history prevents voting/readiness.
+- [ ] **8.2.4. Separate storage responsibilities and define retention/snapshot behavior** (HotStuff-rs.md §5.2; PRD R05/R10).
+  - Decide the backend based on the approved durability/compatibility review; separate consensus, canonical history, application state, and receipt/index data as required.
+  - Specify pruning and snapshot format, integrity, migration, and rollback behavior before implementing them.
+  - **Accept:** restart, migration, pruning, and snapshot tests preserve verifiable finalized state and fail closed on corruption.
+
+### 8.3. Consensus safety, validator membership, and key custody
+
+- [ ] **8.3.1. Verify the exact HotStuff variant and its safety/liveness contract** (PRD R06).
+  - Compare the pinned `hotstuff_rs` behavior with a reviewed specification for proposal ancestry, vote eligibility, QC/TC meaning, lock/unlock rules, commit rule, view changes, and quorum assumptions.
+  - Keep HotStuff non-production if the library cannot be shown to satisfy the approved contract; do not infer safety from the crate name or passing happy-path tests.
+  - **Accept:** independent review and fault simulations establish no conflicting finality within the stated fault bound and progress after network stabilization.
+- [ ] **8.3.2. Persist vote and lock safety state before emitting signatures** (PRD R07; HotStuff-rs.md §5.8).
+  - Add crash-safe safety storage for the required view/phase/block and lock state; fail closed if persistence fails or recovery is ambiguous.
+  - **Accept:** crash/restart tests cannot produce conflicting votes for the same view/phase; key material is never logged.
+- [ ] **8.3.3. Keep validator reconfiguration disabled until a safe activation protocol is approved** (PRD R08).
+  - Specify on-chain authorization, old/new committee transition, quorum safety, bootstrap, and state catch-up. Do not treat CLI peer changes as validator-set changes.
+  - **Accept:** unauthorized updates are rejected and transition tests cover old/new committee overlap, boundary cases, and lagging nodes.
+- [ ] **8.3.4. Define protected validator key custody** (PRD R12; HotStuff-rs.md §5.8).
+  - Remove deterministic production fallback keys; specify file permissions and a reviewed signer boundary before adding an external signer/KMS integration.
+  - **Accept:** missing/invalid key configuration fails explicitly; key generation and signing tests do not expose secrets in output or logs.
+
+### 8.4. Networking, synchronization, RPC, and operations
+
+- [ ] **8.4.1. Harden transport identity, authorization, and resource bounds** (PRD R09; HotStuff-rs.md §5.1).
+  - Authenticate claimed validator identity against the configured/authorized peer; specify encrypted transport, admission, message/queue/work limits, backpressure, and disconnect behavior.
+  - Decide whether static TCP is sufficient for the approved deployment or whether libp2p/QUIC is required; do not add discovery/gossip by assumption.
+  - **Accept:** forged identity, unauthorized peers, malformed/oversized frames, replay, overload, and queue saturation are rejected observably and within configured limits.
+- [ ] **8.4.2. Add authenticated history and state synchronization** (PRD R10; HotStuff-rs.md §5.7).
+  - Specify checkpoint trust, finalized proof/ancestry validation, state-root verification, byte/request/concurrency budgets, and recovery before voting.
+  - **Accept:** forged finality, incomplete ancestry, corrupt snapshots, and wrong chain/committee identity are rejected; valid lagging-node recovery is tested.
+- [ ] **8.4.3. Complete the public node RPC contract** (PRD R11; HotStuff-rs.md §5.9).
+  - Define versioned, authenticated/rate-limited transaction and receipt admission and finalized-state queries; expose projection height/freshness and distinguish admission from finality.
+  - Decide and document the supported transport and endpoint names. Add missing query/event operations only where required by the approved scope.
+  - **Accept:** unauthorized/over-limit requests are rejected; replayed settlement is rejected; stale projections are labeled; API tests cover success and failure behavior.
+- [ ] **8.4.4. Add safe operational observability and lifecycle behavior** (PRD R12; HotStuff-rs.md §5.10).
+  - Add secret-safe structured logs, bounded-cardinality metrics, distinct liveness/readiness checks, and shutdown that stops admission and resolves or reports pending durable work.
+  - **Accept:** startup, error, readiness, shutdown, and secret-redaction tests pass; recovering/non-quorate nodes do not report ready to finalize.
+- [ ] **8.4.5. Complete CLI/genesis operations only within the approved public-node scope** (HotStuff-rs.md §5.11).
+  - Specify and implement genesis/config validation, explicit node start modes, and safe database maintenance commands; remove ambiguous implicit production startup behavior.
+  - **Accept:** invalid/mismatched genesis and configuration fail before voting; maintenance commands cannot silently discard state.
+
+### 8.5. PoCC boundary and production evidence
+
+- [ ] **8.5.1. Align receipt validation and economics with authoritative PoCC sources** (PRD R13; HotStuff-rs.md §5.6).
+  - Treat PoCC as Proof of Compute & Capacity, not proof of cryptographic inference correctness. Verify receipt authorization, worker/client/coordinator roles, replay/challenge rules, and accounting against SOW, REWARDS, and accepted decisions.
+  - Do not claim a `proof_hash` proves correct inference or payment; keep expensive verification out of synchronous consensus execution unless a reviewed bounded verification design explicitly requires otherwise.
+  - **Accept:** source-backed accounting properties and adversarial receipt tests pass; unsupported proof claims are removed from docs.
+- [ ] **8.5.2. Close consensus, storage, and network audit checklist items** (HotStuff-rs.md §7.3).
+  - Independently review HotStuff safety/locking/QCs, pacemaker/view sync, block sync, block-tree persistence, and application validator-set updates.
+  - **Accept:** findings and dispositions are recorded; no unresolved critical/high issue is treated as production-approved.
+- [ ] **8.5.3. Establish measured performance and fault-test evidence** (HotStuff-rs.md §§7.1–7.2).
+  - Define representative workload, hardware, WAN conditions, and repeatable measurement procedure before accepting throughput/finality targets.
+  - Add leader-failure, selective-message, equivocation, partition, restart, and lagging-validator/reconfiguration scenarios. Run 72-hour stability testing only after the workload and environment are defined.
+  - **Accept:** reproducible results meet targets approved through the requirements gate; no unmeasured target or happy-path test is presented as production evidence.
+- [ ] **8.5.4. Gate testnet and release on independent verification** (HotStuff-rs.md §8).
+  - Run a private multi-validator devnet with the approved fault suite, then obtain explicit authorization before any public testnet or production settlement use.
+  - Complete independent security and code reviews and the DoD audit; hand off to CI/CD only after all required gates pass. Do not deploy from this checklist.
+  - **Accept:** gate evidence, human approvals where required, test results, and remaining limitations are recorded; deployment remains a separate authorized decision.
