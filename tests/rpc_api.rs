@@ -236,3 +236,40 @@ async fn test_rpc_worker_bond_submission() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn test_rpc_epoch_endpoints() {
+    let (node, chain_id) = setup_test_node();
+    let state = RpcState { node, chain_id };
+    let app = create_router(state);
+
+    // 1. Query current active epoch (epoch 0 from genesis)
+    let req_epoch = Request::builder()
+        .uri("/epoch/current")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_epoch = app.clone().oneshot(req_epoch).await.unwrap();
+    assert_eq!(resp_epoch.status(), StatusCode::OK);
+
+    let body = resp_epoch.into_body().collect().await.unwrap().to_bytes();
+    let epoch_resp: ApiResponse<miraset_chain::core::types::EpochInfo> =
+        serde_json::from_slice(&body).unwrap();
+    let current = epoch_resp.data.expect("epoch info expected");
+    assert_eq!(current.epoch_id, 0);
+    assert_eq!(
+        current.status,
+        miraset_chain::core::types::EpochStatus::Active
+    );
+
+    // 2. Query non-existent historical epoch
+    let req_historical = Request::builder()
+        .uri("/epoch/999")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp_historical = app.oneshot(req_historical).await.unwrap();
+    assert_eq!(resp_historical.status(), StatusCode::NOT_FOUND);
+}

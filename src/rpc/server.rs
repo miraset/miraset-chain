@@ -109,6 +109,8 @@ where
         .route("/receipt/submit", post(submit_receipt_handler))
         .route("/account/{address}", get(get_account_handler))
         .route("/worker/{worker_id}", get(get_worker_handler))
+        .route("/epoch/current", get(get_current_epoch_handler))
+        .route("/epoch/{epoch_id}", get(get_epoch_handler))
         .route("/task/{task_id}", get(get_task_handler))
         .route("/block/latest", get(latest_block_handler))
         .route("/mempool/status", get(mempool_status_handler))
@@ -198,6 +200,42 @@ where
         None => (
             StatusCode::NOT_FOUND,
             Json(ApiResponse::err("Worker not found in committed state")),
+        ),
+    }
+}
+
+async fn get_current_epoch_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    match state.node.get_current_epoch() {
+        Some(epoch) => (StatusCode::OK, Json(ApiResponse::ok(epoch))),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::err(
+                "Current epoch not found in committed state",
+            )),
+        ),
+    }
+}
+
+async fn get_epoch_handler<K, N>(
+    State(state): State<RpcState<K, N>>,
+    Path(epoch_id): Path<u64>,
+) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    match state.node.get_epoch(epoch_id) {
+        Some(epoch) => (StatusCode::OK, Json(ApiResponse::ok(epoch))),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::err(format!(
+                "Epoch {} not found in committed state",
+                epoch_id
+            ))),
         ),
     }
 }

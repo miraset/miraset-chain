@@ -109,6 +109,25 @@ impl Transaction {
         })
     }
 
+    /// Construct a transaction that triggers epoch finalization and rollover.
+    pub fn new_epoch_advance(
+        sender: impl Into<String>,
+        nonce: u64,
+        fee: u64,
+        epoch_id: u64,
+    ) -> Self {
+        Self {
+            sender: sender.into(),
+            nonce,
+            recipient: "system:epoch_manager".to_string(),
+            amount: 0,
+            fee,
+            payload: epoch_id.to_be_bytes().to_vec(),
+            pubkey: String::new(),
+            signature: String::new(),
+        }
+    }
+
     /// Canonical message bytes for cryptographic signature verification.
     pub fn canonical_sign_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -520,6 +539,57 @@ impl EpochRewardConfig {
             capacity_pool,
             worker_rewards,
         }
+    }
+}
+
+/// Status of an accounting epoch in MIRASET L1 (ADR-0003 & REWARDS.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EpochStatus {
+    /// Active submission window (~40 mins): workers submit compute receipts.
+    Active,
+    /// Challenge window (~10-20 mins): receipts can be disputed or audited.
+    Challenge,
+    /// Finalized: PoCC reward distribution is computed and settled on-chain.
+    Finalized,
+}
+
+/// Metadata and state for an on-chain 60-minute accounting epoch (ADR-0003).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochInfo {
+    pub epoch_id: u64,
+    pub status: EpochStatus,
+    /// Unix timestamp when epoch began.
+    pub start_timestamp: u64,
+    /// Total compute tokens settled during this epoch.
+    pub total_tokens: u64,
+    /// Total compute receipts submitted in this epoch.
+    pub total_receipts: u64,
+    /// Total protocol reward budget allocated for this epoch.
+    pub reward_budget: u64,
+    /// Finalized distribution (if finalized).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<EpochRewardDistribution>,
+}
+
+impl EpochInfo {
+    pub fn new(epoch_id: u64, start_timestamp: u64, reward_budget: u64) -> Self {
+        Self {
+            epoch_id,
+            status: EpochStatus::Active,
+            start_timestamp,
+            total_tokens: 0,
+            total_receipts: 0,
+            reward_budget,
+            distribution: None,
+        }
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(bytes)
     }
 }
 

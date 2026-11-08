@@ -1,5 +1,6 @@
 use crate::core::types::{
-    AccountState, BlockPayload, MIN_WORKER_BOND, Transaction, WorkerBondAction, WorkerInfo,
+    AccountState, BlockPayload, EpochInfo, EpochRewardConfig, EpochStatus, MIN_WORKER_BOND,
+    Transaction, WorkerBondAction, WorkerInfo,
 };
 use crate::mempool::Mempool;
 use hotstuff_rs::app::{
@@ -43,6 +44,48 @@ impl MirasetApp {
         key
     }
 
+    pub fn worker_index_key(worker_id: &str) -> Vec<u8> {
+        let mut key = b"workers:idx:".to_vec();
+        key.extend_from_slice(worker_id.as_bytes());
+        key
+    }
+
+    pub fn read_all_registered_workers<K: KVStore>(
+        tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
+    ) -> Vec<WorkerInfo> {
+        let key = b"workers:all_ids".to_vec();
+        let ids: Vec<String> = tree
+            .app_state(&key)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let mut workers = Vec::new();
+        for id in ids {
+            if let Some(w) = Self::read_worker(tree, &id) {
+                workers.push(w);
+            }
+        }
+        workers
+    }
+
+    fn add_worker_id(worker_ids: &mut Vec<String>, worker_id: &str) -> bool {
+        if worker_ids.iter().any(|id| id == worker_id) {
+            return false;
+        }
+
+        worker_ids.push(worker_id.to_string());
+        true
+    }
+
+    pub fn current_epoch_key() -> Vec<u8> {
+        b"epoch:current".to_vec()
+    }
+
+    pub fn epoch_key(epoch_id: u64) -> Vec<u8> {
+        let mut key = b"epoch:info:".to_vec();
+        key.extend_from_slice(&epoch_id.to_be_bytes());
+        key
+    }
+
     /// Read account state from block tree view or default to 0.
     fn read_account<K: KVStore>(
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
@@ -62,6 +105,26 @@ impl MirasetApp {
         let key = Self::worker_key(worker_id);
         tree.app_state(&key)
             .and_then(|bytes| serde_json::from_slice::<WorkerInfo>(&bytes).ok())
+    }
+
+    /// Read an epoch state from block tree view.
+    pub fn read_epoch<K: KVStore>(
+        tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
+        epoch_id: u64,
+    ) -> Option<EpochInfo> {
+        let key = Self::epoch_key(epoch_id);
+        tree.app_state(&key)
+            .and_then(|bytes| serde_json::from_slice::<EpochInfo>(&bytes).ok())
+    }
+
+    /// Read the currently active epoch from block tree view.
+    pub fn read_current_epoch<K: KVStore>(
+        tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
+    ) -> EpochInfo {
+        let key = Self::current_epoch_key();
+        tree.app_state(&key)
+            .and_then(|bytes| serde_json::from_slice::<EpochInfo>(&bytes).ok())
+            .unwrap_or_else(|| EpochInfo::new(0, 0, 100_000))
     }
 
     /// Pure state transition for one transaction against its sender's current account:
@@ -103,6 +166,14 @@ impl MirasetApp {
         let mut local_accounts = std::collections::HashMap::<String, AccountState>::new();
         let mut local_workers = std::collections::HashMap::<String, WorkerInfo>::new();
         let mut local_tasks = std::collections::HashSet::<String>::new();
+        let all_ids_key = b"workers:all_ids".to_vec();
+        let mut worker_ids: Vec<String> = tree
+            .app_state(&all_ids_key)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let mut worker_ids_modified = false;
+        let mut current_epoch = Self::read_current_epoch(tree);
+        let mut epoch_modified = false;
 
         for tx in &payload.transactions {
             let sender_acc = local_accounts
@@ -160,7 +231,9 @@ impl MirasetApp {
                         if worker.stake >= MIN_WORKER_BOND {
                             worker.active = true;
                         }
-                        local_workers.insert(worker_id, worker);
+                        local_workers.insert(worker_id.clone(), worker);
+
+                        worker_ids_modified |= Self::add_worker_id(&mut worker_ids, &worker_id);
                     }
                     WorkerBondAction::Unbond { worker_id, amount } => {
                         let mut worker = local_workers
@@ -202,6 +275,91 @@ impl MirasetApp {
                         local_workers.insert(worker_id, worker);
                     }
                 }
+            } else if tx.recipient == "system:epoch_manager" && !tx.payload.is_empty() {
+                // Handle epoch rollover and reward distribution
+                if tx.payload.len() != 8 {
+                    return None;
+                }
+                let mut epoch_bytes = [0u8; 8];
+                epoch_bytes.copy_from_slice(&tx.payload);
+                let target_epoch_id = u64::from_be_bytes(epoch_bytes);
+
+                // Target epoch must match current active epoch
+                if target_epoch_id != current_epoch.epoch_id {
+                    return None;
+                }
+
+                // Load all registered workers from state, augmented by locally updated workers
+                let mut all_workers = Self::read_all_registered_workers(tree);
+                for local_w in local_workers.values() {
+                    if let Some(pos) = all_workers
+                        .iter()
+                        .position(|w| w.worker_id == local_w.worker_id)
+                    {
+                        all_workers[pos] = local_w.clone();
+                    } else {
+                        all_workers.push(local_w.clone());
+                    }
+                }
+
+                // Compute canonical PoCC reward distribution across all registered workers
+                let reward_config = EpochRewardConfig::default();
+                let distribution =
+                    reward_config.distribute(current_epoch.reward_budget, &all_workers);
+
+                // Credit distributed rewards to worker owners / balances
+                for (w_id, reward_amount) in &distribution.worker_rewards {
+                    if *reward_amount > 0 {
+                        let worker = local_workers
+                            .remove(w_id)
+                            .or_else(|| Self::read_worker(tree, w_id));
+
+                        if let Some(mut worker) = worker {
+                            worker.rewards_accumulated =
+                                worker.rewards_accumulated.saturating_add(*reward_amount);
+                            if !worker.owner_address.is_empty() {
+                                let mut owner_acc =
+                                    local_accounts.remove(&worker.owner_address).unwrap_or_else(
+                                        || Self::read_account(tree, &worker.owner_address),
+                                    );
+                                owner_acc.balance =
+                                    owner_acc.balance.saturating_add(*reward_amount);
+                                local_accounts.insert(worker.owner_address.clone(), owner_acc);
+                            }
+                            local_workers.insert(w_id.clone(), worker);
+                        }
+                    }
+                }
+
+                // Finalize current epoch
+                current_epoch.status = EpochStatus::Finalized;
+                current_epoch.distribution = Some(distribution);
+
+                // Write finalized epoch to historical index: epoch:info:{epoch_id}
+                let hist_key = Self::epoch_key(current_epoch.epoch_id);
+                let hist_val = current_epoch
+                    .to_bytes()
+                    .expect("epoch serialization failed");
+                updates.insert(hist_key, hist_val);
+
+                // Reset worker epoch_tokens for the next epoch across all workers
+                for mut worker in all_workers {
+                    if let Some(local_w) = local_workers.get_mut(&worker.worker_id) {
+                        local_w.epoch_tokens = 0;
+                    } else {
+                        worker.epoch_tokens = 0;
+                        local_workers.insert(worker.worker_id.clone(), worker);
+                    }
+                }
+
+                // Advance to next active epoch
+                let next_epoch = EpochInfo::new(
+                    current_epoch.epoch_id.saturating_add(1),
+                    current_epoch.start_timestamp.saturating_add(3600),
+                    current_epoch.reward_budget,
+                );
+                current_epoch = next_epoch;
+                epoch_modified = true;
             } else {
                 let mut recipient_acc = local_accounts
                     .remove(&tx.recipient)
@@ -279,6 +437,36 @@ impl MirasetApp {
             worker.rewards_accumulated = worker.rewards_accumulated.saturating_add(reward);
             worker.epoch_tokens = worker.epoch_tokens.saturating_add(receipt.tokens_computed);
             local_workers.insert(receipt.worker_id.clone(), worker);
+
+            // Accumulate tokens and receipt counts into active epoch
+            current_epoch.total_tokens = current_epoch
+                .total_tokens
+                .saturating_add(receipt.tokens_computed);
+            current_epoch.total_receipts = current_epoch.total_receipts.saturating_add(1);
+            epoch_modified = true;
+        }
+
+        if worker_ids_modified {
+            let val = serde_json::to_vec(&worker_ids).expect("worker ids serialization failed");
+            updates.insert(all_ids_key, val);
+        }
+
+        // Apply epoch state updates
+        if epoch_modified {
+            let key = Self::current_epoch_key();
+            let val = current_epoch
+                .to_bytes()
+                .expect("current epoch serialization failed");
+            updates.insert(key, val);
+
+            // Also keep current epoch synced under its indexed key epoch:info:{epoch_id}
+            let info_key = Self::epoch_key(current_epoch.epoch_id);
+            updates.insert(
+                info_key,
+                current_epoch
+                    .to_bytes()
+                    .expect("epoch serialization failed"),
+            );
         }
 
         // Apply worker updates
@@ -380,6 +568,17 @@ mod tests {
 
         let task_k = MirasetApp::task_key("task_99");
         assert_eq!(task_k, b"task:task_99".to_vec());
+    }
+
+    #[test]
+    fn test_worker_index_accumulates_multiple_registrations() {
+        let mut worker_ids = Vec::new();
+
+        assert!(MirasetApp::add_worker_id(&mut worker_ids, "worker_a"));
+        assert!(MirasetApp::add_worker_id(&mut worker_ids, "worker_b"));
+        assert!(!MirasetApp::add_worker_id(&mut worker_ids, "worker_a"));
+
+        assert_eq!(worker_ids, ["worker_a", "worker_b"]);
     }
 
     #[test]

@@ -259,3 +259,118 @@ fn test_worker_bond_registration_unbonding_and_slashing() {
 
     drop(node);
 }
+
+#[test]
+fn test_epoch_token_accumulation_and_system_rollover() {
+    let keypair = SigningKey::from_bytes(&[10u8; 32]);
+    let vk = keypair.verifying_key();
+
+    let owner_key = SigningKey::from_bytes(&[11u8; 32]);
+    let owner_addr = hex::encode(owner_key.verifying_key().to_bytes());
+
+    let client_key = SigningKey::from_bytes(&[12u8; 32]);
+    let client_addr = hex::encode(client_key.verifying_key().to_bytes());
+
+    let coord_key = SigningKey::from_bytes(&[13u8; 32]);
+
+    let hub = ChannelNetworkHub::new();
+    let network = ChannelNetwork::new(vk, hub);
+    let kv_store = MemKVStore::new();
+
+    let validators = vec![(vk, 100)];
+    let initial_accounts = vec![(owner_addr.as_str(), 10_000), (client_addr.as_str(), 5_000)];
+
+    init_genesis(kv_store.clone(), &validators, &initial_accounts);
+
+    let mempool = Mempool::new();
+    let config = NodeConfig::devnet(keypair);
+
+    let node = MirasetNode::start(config, kv_store, network, mempool);
+
+    // 1. Register worker with bond
+    let bond_action = miraset_chain::core::types::WorkerBondAction::Register {
+        worker_id: "epoch_worker_1".to_string(),
+        bond_amount: 500,
+        vram_gib: 80,
+        endpoint: "127.0.0.1:9090".to_string(),
+    };
+    let mut reg_tx = Transaction::new_worker_bond(&owner_addr, 0, 10, bond_action).unwrap();
+    reg_tx.sign_with(&owner_key);
+    assert!(node.submit_transaction(reg_tx).is_ok());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    // Verify worker registered
+    let worker = node
+        .get_worker("epoch_worker_1")
+        .expect("worker should exist");
+    assert_eq!(worker.stake, 500);
+    assert_eq!(worker.epoch_tokens, 0);
+
+    // 2. Submit compute receipt (1000 tokens computed)
+    let mut receipt = ComputeReceipt::new(
+        "task_epoch_001",
+        &client_addr,
+        "epoch_worker_1",
+        "coord_1",
+        "model_llama_3",
+        "zkp_proof",
+        1000, // tokens_computed
+        50,   // client_cost
+        40,   // worker_reward
+    );
+    receipt.sign_with(&coord_key);
+    assert!(node.submit_receipt(receipt).is_ok());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    // Verify worker epoch_tokens and epoch accumulation
+    let worker = node.get_worker("epoch_worker_1").unwrap();
+    assert_eq!(worker.epoch_tokens, 1000);
+
+    let epoch = node
+        .get_current_epoch()
+        .expect("current epoch should exist");
+    assert_eq!(epoch.epoch_id, 0);
+    assert_eq!(epoch.total_tokens, 1000);
+    assert_eq!(epoch.total_receipts, 1);
+
+    // 3. Submit epoch rollover transaction to system:epoch_manager with target epoch 0
+    let mut rollover_tx = Transaction::new(
+        &owner_addr,
+        1,
+        "system:epoch_manager",
+        0,  // amount
+        10, // fee
+    );
+    rollover_tx.payload = 0u64.to_be_bytes().to_vec();
+    rollover_tx.sign_with(&owner_key);
+    assert!(node.submit_transaction(rollover_tx).is_ok());
+
+    thread::sleep(Duration::from_millis(1500));
+
+    // Verify epoch has advanced to 1
+    let next_epoch = node.get_current_epoch().expect("next epoch should exist");
+    assert_eq!(next_epoch.epoch_id, 1);
+    assert_eq!(next_epoch.total_tokens, 0);
+    assert_eq!(
+        next_epoch.status,
+        miraset_chain::core::types::EpochStatus::Active
+    );
+
+    // Verify historical epoch 0 is stored and finalized
+    let finalized_epoch = node.get_epoch(0).expect("finalized epoch 0 should exist");
+    assert_eq!(finalized_epoch.epoch_id, 0);
+    assert_eq!(
+        finalized_epoch.status,
+        miraset_chain::core::types::EpochStatus::Finalized
+    );
+    assert!(finalized_epoch.distribution.is_some());
+
+    // Verify worker's epoch_tokens reset to 0 for epoch 1
+    let worker_after = node.get_worker("epoch_worker_1").unwrap();
+    assert_eq!(worker_after.epoch_tokens, 0);
+    assert!(worker_after.rewards_accumulated > 0);
+
+    drop(node);
+}

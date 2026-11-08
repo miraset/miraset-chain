@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 
 use crate::app::MirasetApp;
 use crate::core::types::{
-    AccountState, BlockPayload, CommitEvent, ComputeReceipt, Transaction, WorkerInfo,
+    AccountState, BlockPayload, CommitEvent, ComputeReceipt, EpochInfo, Transaction, WorkerInfo,
 };
 use crate::mempool::Mempool;
 use crate::node::config::NodeConfig;
@@ -50,6 +50,13 @@ pub fn init_genesis<K: KVStore>(
                 .expect("Serialization of genesis account failed"),
         );
     }
+
+    let initial_epoch = EpochInfo::new(0, 0, 100_000);
+    let epoch_bytes = initial_epoch
+        .to_bytes()
+        .expect("Serialization of genesis epoch failed");
+    app_updates.insert(MirasetApp::current_epoch_key(), epoch_bytes.clone());
+    app_updates.insert(MirasetApp::epoch_key(initial_epoch.epoch_id), epoch_bytes);
 
     Replica::initialize(kv_store, app_updates, val_set_state);
 }
@@ -147,6 +154,20 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         let snapshot = self.block_tree_camera().snapshot();
         let raw = snapshot.committed_app_state(&MirasetApp::worker_key(worker_id))?;
         WorkerInfo::from_bytes(&raw).ok()
+    }
+
+    /// Read the currently active accounting epoch from the committed state.
+    pub fn get_current_epoch(&self) -> Option<EpochInfo> {
+        let snapshot = self.block_tree_camera().snapshot();
+        let raw = snapshot.committed_app_state(&MirasetApp::current_epoch_key())?;
+        EpochInfo::from_bytes(&raw).ok()
+    }
+
+    /// Read a specific historical or active epoch from the committed state.
+    pub fn get_epoch(&self, epoch_id: u64) -> Option<EpochInfo> {
+        let snapshot = self.block_tree_camera().snapshot();
+        let raw = snapshot.committed_app_state(&MirasetApp::epoch_key(epoch_id))?;
+        EpochInfo::from_bytes(&raw).ok()
     }
 
     /// Check if a compute task has been settled on-chain.
