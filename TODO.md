@@ -116,9 +116,10 @@ Do not mark an item complete based only on a module existing. Record its accepta
 
 ### 8.2. Deterministic execution and durable state
 
-- [ ] **8.2.1. Canonicalize protocol payloads and commitments** (PRD R03).
+- [x] **8.2.1. Canonicalize protocol payloads and commitments** (PRD R03).
   - Define versioned canonical encodings and domain-separated transaction, block, receipt, and state commitments; add golden vectors and reject noncanonical or unsupported encodings.
   - **Accept:** golden-byte, round-trip, malformed-input, and cross-version tests pass.
+  - **Evidence (2026-11-08):** `src/core/types.rs` defines `PROTOCOL_ENCODING_VERSION = 1`, domain tags (`DOMAIN_TX_SIGN_V1`, `DOMAIN_TX_COMMIT_V1`, `DOMAIN_RECEIPT_SIGN_V1`, `DOMAIN_RECEIPT_COMMIT_V1`, `DOMAIN_BLOCK_COMMIT_V1`, `DOMAIN_STATE_COMMIT_V1`), canonical binary envelopes (`to_canonical_bytes`/`from_canonical_bytes`), and tests (`test_canonical_encoding_golden_vectors_and_commitments`, `test_canonical_encoding_rejects_malformed_and_trailing_bytes`, `test_canonical_encoding_rejects_unsupported_version`); `src/app/chain_app.rs` enforces canonical round-trip and domain-separated block commitment hashes.
 - [ ] **8.2.2. Harden deterministic state transitions** (PRD R04).
   - Replace saturating arithmetic in consensus-visible accounting with the source-approved checked/error behavior; specify transaction ordering, timestamps, epoch transitions, and reward rounding from authoritative sources.
   - Add the approved state commitment to block validation; do not add a gas model until its limits and accounting are specified.

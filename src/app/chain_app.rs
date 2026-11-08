@@ -9,7 +9,6 @@ use hotstuff_rs::app::{
 use hotstuff_rs::block_tree::pluggables::KVStore;
 use hotstuff_rs::types::data_types::{CryptoHash, Data, Datum};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
-use sha2::{Digest, Sha256};
 
 /// Application state machine implementing `hotstuff_rs::app::App`.
 pub struct MirasetApp {
@@ -493,9 +492,9 @@ impl<K: KVStore> App<K> for MirasetApp {
         let payload = BlockPayload::new(txs, receipts);
         let payload_bytes = payload.to_bytes();
 
-        let mut hasher = Sha256::new();
-        hasher.update(&payload_bytes);
-        let hash_arr: [u8; 32] = hasher.finalize().into();
+        let hash_arr = payload
+            .commitment_hash()
+            .expect("canonical block commitment hash failed");
         let data_hash = CryptoHash::new(hash_arr);
 
         let data = Data::new(vec![Datum::new(payload_bytes)]);
@@ -516,8 +515,8 @@ impl<K: KVStore> App<K> for MirasetApp {
     ) -> ValidateBlockResponse {
         let block = request.proposed_block();
 
-        // Extract payload from data
-        if block.data.vec().is_empty() {
+        // Extract payload from data (must contain exactly one canonical BlockPayload datum)
+        if block.data.vec().len() != 1 {
             return ValidateBlockResponse::Invalid;
         }
 
@@ -527,10 +526,18 @@ impl<K: KVStore> App<K> for MirasetApp {
             Err(_) => return ValidateBlockResponse::Invalid,
         };
 
-        // Verify hash integrity
-        let mut hasher = Sha256::new();
-        hasher.update(datum.bytes());
-        let expected_hash: [u8; 32] = hasher.finalize().into();
+        // Reject any noncanonical representation
+        let Ok(canonical_bytes) = payload.to_canonical_bytes() else {
+            return ValidateBlockResponse::Invalid;
+        };
+        if canonical_bytes.as_slice() != datum.bytes() {
+            return ValidateBlockResponse::Invalid;
+        }
+
+        // Verify domain-separated commitment hash integrity
+        let Ok(expected_hash) = payload.commitment_hash() else {
+            return ValidateBlockResponse::Invalid;
+        };
         if block.data_hash.bytes() != expected_hash {
             return ValidateBlockResponse::Invalid;
         }

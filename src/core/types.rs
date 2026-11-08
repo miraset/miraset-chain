@@ -1,4 +1,24 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Current canonical protocol encoding version (PRD R03).
+pub const PROTOCOL_ENCODING_VERSION: u8 = 1;
+
+/// Domain-separation tags for cryptographic signing and commitments (PRD R03).
+pub const DOMAIN_TX_SIGN_V1: &[u8] = b"MIRASET:TX:SIGN:v1";
+pub const DOMAIN_TX_COMMIT_V1: &[u8] = b"MIRASET:TX:COMMIT:v1";
+pub const DOMAIN_RECEIPT_SIGN_V1: &[u8] = b"MIRASET:RECEIPT:SIGN:v1";
+pub const DOMAIN_RECEIPT_COMMIT_V1: &[u8] = b"MIRASET:RECEIPT:COMMIT:v1";
+pub const DOMAIN_BLOCK_COMMIT_V1: &[u8] = b"MIRASET:BLOCK:COMMIT:v1";
+pub const DOMAIN_STATE_COMMIT_V1: &[u8] = b"MIRASET:STATE:COMMIT:v1";
+
+const TX_MAGIC: &[u8; 4] = b"MTX1";
+const RECEIPT_MAGIC: &[u8; 4] = b"MRCP";
+const BLOCK_MAGIC: &[u8; 4] = b"MBLK";
+
+fn default_protocol_version() -> u8 {
+    PROTOCOL_ENCODING_VERSION
+}
 
 /// Transaction representing a state transfer or interaction in MIRASET L1.
 ///
@@ -7,6 +27,8 @@ use serde::{Deserialize, Serialize};
 /// so account identity is the signing key itself; there is no separate address registry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transaction {
+    #[serde(default = "default_protocol_version")]
+    pub version: u8,
     pub sender: String,
     pub nonce: u64,
     pub recipient: String,
@@ -27,6 +49,68 @@ pub struct Transaction {
 fn write_length_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     buf.extend_from_slice(bytes);
+}
+
+fn read_u8(input: &mut &[u8]) -> Result<u8, &'static str> {
+    if input.is_empty() {
+        return Err("unexpected end of canonical input (u8)");
+    }
+    let v = input[0];
+    *input = &input[1..];
+    Ok(v)
+}
+
+fn read_u32(input: &mut &[u8]) -> Result<u32, &'static str> {
+    if input.len() < 4 {
+        return Err("unexpected end of canonical input (u32)");
+    }
+    let mut arr = [0u8; 4];
+    arr.copy_from_slice(&input[..4]);
+    *input = &input[4..];
+    Ok(u32::from_be_bytes(arr))
+}
+
+fn read_u64(input: &mut &[u8]) -> Result<u64, &'static str> {
+    if input.len() < 8 {
+        return Err("unexpected end of canonical input (u64)");
+    }
+    let mut arr = [0u8; 8];
+    arr.copy_from_slice(&input[..8]);
+    *input = &input[8..];
+    Ok(u64::from_be_bytes(arr))
+}
+
+fn read_length_prefixed_bytes(input: &mut &[u8]) -> Result<Vec<u8>, &'static str> {
+    let len = read_u32(input)? as usize;
+    if input.len() < len {
+        return Err("unexpected end of canonical input (length-prefixed bytes)");
+    }
+    let out = input[..len].to_vec();
+    *input = &input[len..];
+    Ok(out)
+}
+
+fn read_length_prefixed_string(input: &mut &[u8]) -> Result<String, &'static str> {
+    let bytes = read_length_prefixed_bytes(input)?;
+    String::from_utf8(bytes).map_err(|_| "invalid UTF-8 in canonical string field")
+}
+
+/// Computes a deterministic domain-separated state commitment root over key-value entries.
+pub fn compute_state_commitment(entries: &[(&[u8], &[u8])]) -> [u8; 32] {
+    let mut sorted: Vec<(&[u8], &[u8])> = entries.to_vec();
+    sorted.sort_by(|(ka, va), (kb, vb)| ka.cmp(kb).then_with(|| va.cmp(vb)));
+
+    let mut hasher = Sha256::new();
+    hasher.update(DOMAIN_STATE_COMMIT_V1);
+    hasher.update([PROTOCOL_ENCODING_VERSION]);
+    hasher.update((sorted.len() as u32).to_be_bytes());
+    for (k, v) in sorted {
+        hasher.update((k.len() as u32).to_be_bytes());
+        hasher.update(k);
+        hasher.update((v.len() as u32).to_be_bytes());
+        hasher.update(v);
+    }
+    hasher.finalize().into()
 }
 
 /// Minimum worker bond required to register and serve tasks (ADR-0007 / protocol/model.md: 100 MIR).
@@ -74,6 +158,7 @@ impl Transaction {
         fee: u64,
     ) -> Self {
         Self {
+            version: PROTOCOL_ENCODING_VERSION,
             sender: sender.into(),
             nonce,
             recipient: recipient.into(),
@@ -98,6 +183,7 @@ impl Transaction {
             _ => 0,
         };
         Ok(Self {
+            version: PROTOCOL_ENCODING_VERSION,
             sender: sender.into(),
             nonce,
             recipient: "system:worker_registry".to_string(),
@@ -117,6 +203,7 @@ impl Transaction {
         epoch_id: u64,
     ) -> Self {
         Self {
+            version: PROTOCOL_ENCODING_VERSION,
             sender: sender.into(),
             nonce,
             recipient: "system:epoch_manager".to_string(),
@@ -128,9 +215,11 @@ impl Transaction {
         }
     }
 
-    /// Canonical message bytes for cryptographic signature verification.
+    /// Canonical message bytes for cryptographic signature verification (domain-separated).
     pub fn canonical_sign_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
+        bytes.extend_from_slice(DOMAIN_TX_SIGN_V1);
+        bytes.push(self.version);
         write_length_prefixed(&mut bytes, self.sender.as_bytes());
         bytes.extend_from_slice(&self.nonce.to_be_bytes());
         write_length_prefixed(&mut bytes, self.recipient.as_bytes());
@@ -138,6 +227,69 @@ impl Transaction {
         bytes.extend_from_slice(&self.fee.to_be_bytes());
         write_length_prefixed(&mut bytes, &self.payload);
         bytes
+    }
+
+    /// Serialize transaction into versioned canonical binary format.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        if self.version != PROTOCOL_ENCODING_VERSION {
+            return Err("unsupported transaction encoding version");
+        }
+        let mut buf = Vec::new();
+        buf.extend_from_slice(TX_MAGIC);
+        buf.push(self.version);
+        write_length_prefixed(&mut buf, self.sender.as_bytes());
+        buf.extend_from_slice(&self.nonce.to_be_bytes());
+        write_length_prefixed(&mut buf, self.recipient.as_bytes());
+        buf.extend_from_slice(&self.amount.to_be_bytes());
+        buf.extend_from_slice(&self.fee.to_be_bytes());
+        write_length_prefixed(&mut buf, &self.payload);
+        write_length_prefixed(&mut buf, self.pubkey.as_bytes());
+        write_length_prefixed(&mut buf, self.signature.as_bytes());
+        Ok(buf)
+    }
+
+    /// Deserialize transaction from versioned canonical binary format, rejecting
+    /// unsupported versions, malformed lengths, or trailing bytes.
+    pub fn from_canonical_bytes(mut input: &[u8]) -> Result<Self, &'static str> {
+        if input.len() < 4 || &input[..4] != TX_MAGIC {
+            return Err("invalid transaction canonical magic");
+        }
+        input = &input[4..];
+        let version = read_u8(&mut input)?;
+        if version != PROTOCOL_ENCODING_VERSION {
+            return Err("unsupported transaction encoding version");
+        }
+        let sender = read_length_prefixed_string(&mut input)?;
+        let nonce = read_u64(&mut input)?;
+        let recipient = read_length_prefixed_string(&mut input)?;
+        let amount = read_u64(&mut input)?;
+        let fee = read_u64(&mut input)?;
+        let payload = read_length_prefixed_bytes(&mut input)?;
+        let pubkey = read_length_prefixed_string(&mut input)?;
+        let signature = read_length_prefixed_string(&mut input)?;
+        if !input.is_empty() {
+            return Err("noncanonical trailing bytes in transaction");
+        }
+        Ok(Self {
+            version,
+            sender,
+            nonce,
+            recipient,
+            amount,
+            fee,
+            payload,
+            pubkey,
+            signature,
+        })
+    }
+
+    /// Domain-separated cryptographic commitment hash for this transaction.
+    pub fn commitment_hash(&self) -> Result<[u8; 32], &'static str> {
+        let canonical = self.to_canonical_bytes()?;
+        let mut hasher = Sha256::new();
+        hasher.update(DOMAIN_TX_COMMIT_V1);
+        hasher.update(&canonical);
+        Ok(hasher.finalize().into())
     }
 
     /// Sign this transaction using an Ed25519 signing key. Sets `sender` and `pubkey`
@@ -157,6 +309,10 @@ impl Transaction {
     /// be authenticated.
     pub fn verify_signature(&self) -> Result<(), &'static str> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        if self.version != PROTOCOL_ENCODING_VERSION {
+            return Err("unsupported transaction encoding version");
+        }
 
         if self.signature.is_empty() || self.pubkey.is_empty() {
             return Err("missing transaction signature");
@@ -190,7 +346,7 @@ impl Transaction {
     }
 }
 
-/// Compute receipt for MIRASET Proof-of-Correct-Compute (PoCC).
+/// Compute receipt for MIRASET Proof of Compute & Capacity (PoCC).
 ///
 /// Workflow:
 /// 1. GPU Worker runs as an independent client-side program on the provider node, executes LLM
@@ -202,6 +358,8 @@ impl Transaction {
 ///    credits the worker, and marks the task as settled (anti-replay).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputeReceipt {
+    #[serde(default = "default_protocol_version")]
+    pub version: u8,
     pub task_id: String,
     pub worker_id: String,
     pub model_hash: String,
@@ -248,6 +406,7 @@ impl ComputeReceipt {
         worker_reward: u64,
     ) -> Self {
         Self {
+            version: PROTOCOL_ENCODING_VERSION,
             task_id: task_id.into(),
             worker_id: worker_id.into(),
             model_hash: model_hash.into(),
@@ -264,25 +423,105 @@ impl ComputeReceipt {
         }
     }
 
-    /// Canonical message bytes for cryptographic signature verification.
+    /// Canonical message bytes for cryptographic signature verification (domain-separated, length-prefixed).
     pub fn canonical_sign_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(self.task_id.as_bytes());
-        bytes.extend_from_slice(b":");
-        bytes.extend_from_slice(self.client_address.as_bytes());
-        bytes.extend_from_slice(b":");
-        bytes.extend_from_slice(self.worker_id.as_bytes());
-        bytes.extend_from_slice(b":");
-        bytes.extend_from_slice(self.model_hash.as_bytes());
-        bytes.extend_from_slice(b":");
-        bytes.extend_from_slice(self.proof_hash.as_bytes());
-        bytes.extend_from_slice(b":");
+        bytes.extend_from_slice(DOMAIN_RECEIPT_SIGN_V1);
+        bytes.push(self.version);
+        write_length_prefixed(&mut bytes, self.task_id.as_bytes());
+        write_length_prefixed(&mut bytes, self.client_address.as_bytes());
+        write_length_prefixed(&mut bytes, self.worker_id.as_bytes());
+        write_length_prefixed(&mut bytes, self.coordinator_id.as_bytes());
+        write_length_prefixed(&mut bytes, self.model_hash.as_bytes());
+        write_length_prefixed(&mut bytes, self.proof_hash.as_bytes());
         bytes.extend_from_slice(&self.tokens_computed.to_be_bytes());
-        bytes.extend_from_slice(b":");
         bytes.extend_from_slice(&self.client_cost.to_be_bytes());
-        bytes.extend_from_slice(b":");
         bytes.extend_from_slice(&self.worker_reward.to_be_bytes());
+        bytes.push(u8::from(self.client_confirmed));
         bytes
+    }
+
+    /// Serialize compute receipt into versioned canonical binary format.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        if self.version != PROTOCOL_ENCODING_VERSION {
+            return Err("unsupported receipt encoding version");
+        }
+        let mut buf = Vec::new();
+        buf.extend_from_slice(RECEIPT_MAGIC);
+        buf.push(self.version);
+        write_length_prefixed(&mut buf, self.task_id.as_bytes());
+        write_length_prefixed(&mut buf, self.worker_id.as_bytes());
+        write_length_prefixed(&mut buf, self.model_hash.as_bytes());
+        write_length_prefixed(&mut buf, self.proof_hash.as_bytes());
+        buf.extend_from_slice(&self.gas_reward.to_be_bytes());
+        write_length_prefixed(&mut buf, self.client_address.as_bytes());
+        write_length_prefixed(&mut buf, self.coordinator_id.as_bytes());
+        buf.extend_from_slice(&self.tokens_computed.to_be_bytes());
+        buf.extend_from_slice(&self.client_cost.to_be_bytes());
+        buf.extend_from_slice(&self.worker_reward.to_be_bytes());
+        buf.push(u8::from(self.client_confirmed));
+        write_length_prefixed(&mut buf, self.signature.as_bytes());
+        write_length_prefixed(&mut buf, self.coordinator_pubkey.as_bytes());
+        Ok(buf)
+    }
+
+    /// Deserialize compute receipt from versioned canonical binary format, rejecting
+    /// unsupported versions, invalid boolean flags, or trailing bytes.
+    pub fn from_canonical_bytes(mut input: &[u8]) -> Result<Self, &'static str> {
+        if input.len() < 4 || &input[..4] != RECEIPT_MAGIC {
+            return Err("invalid receipt canonical magic");
+        }
+        input = &input[4..];
+        let version = read_u8(&mut input)?;
+        if version != PROTOCOL_ENCODING_VERSION {
+            return Err("unsupported receipt encoding version");
+        }
+        let task_id = read_length_prefixed_string(&mut input)?;
+        let worker_id = read_length_prefixed_string(&mut input)?;
+        let model_hash = read_length_prefixed_string(&mut input)?;
+        let proof_hash = read_length_prefixed_string(&mut input)?;
+        let gas_reward = read_u64(&mut input)?;
+        let client_address = read_length_prefixed_string(&mut input)?;
+        let coordinator_id = read_length_prefixed_string(&mut input)?;
+        let tokens_computed = read_u64(&mut input)?;
+        let client_cost = read_u64(&mut input)?;
+        let worker_reward = read_u64(&mut input)?;
+        let confirmed_byte = read_u8(&mut input)?;
+        let client_confirmed = match confirmed_byte {
+            0 => false,
+            1 => true,
+            _ => return Err("noncanonical boolean value in receipt"),
+        };
+        let signature = read_length_prefixed_string(&mut input)?;
+        let coordinator_pubkey = read_length_prefixed_string(&mut input)?;
+        if !input.is_empty() {
+            return Err("noncanonical trailing bytes in receipt");
+        }
+        Ok(Self {
+            version,
+            task_id,
+            worker_id,
+            model_hash,
+            proof_hash,
+            gas_reward,
+            client_address,
+            coordinator_id,
+            tokens_computed,
+            client_cost,
+            worker_reward,
+            client_confirmed,
+            signature,
+            coordinator_pubkey,
+        })
+    }
+
+    /// Domain-separated cryptographic commitment hash for this receipt.
+    pub fn commitment_hash(&self) -> Result<[u8; 32], &'static str> {
+        let canonical = self.to_canonical_bytes()?;
+        let mut hasher = Sha256::new();
+        hasher.update(DOMAIN_RECEIPT_COMMIT_V1);
+        hasher.update(&canonical);
+        Ok(hasher.finalize().into())
     }
 
     /// Sign this receipt using an Ed25519 signing key.
@@ -297,6 +536,10 @@ impl ComputeReceipt {
     /// Verify signature if signature and coordinator_pubkey are provided.
     pub fn verify_signature(&self) -> Result<(), &'static str> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        if self.version != PROTOCOL_ENCODING_VERSION {
+            return Err("unsupported receipt encoding version");
+        }
 
         if self.signature.is_empty() || self.coordinator_pubkey.is_empty() {
             return Err("missing coordinator signature");
@@ -337,26 +580,109 @@ pub struct CommitEvent {
 }
 
 /// Consolidated block payload containing transactions and PoCC receipts.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockPayload {
+    #[serde(default = "default_protocol_version")]
+    pub version: u8,
     pub transactions: Vec<Transaction>,
     pub compute_receipts: Vec<ComputeReceipt>,
+}
+
+impl Default for BlockPayload {
+    fn default() -> Self {
+        Self {
+            version: PROTOCOL_ENCODING_VERSION,
+            transactions: Vec::new(),
+            compute_receipts: Vec::new(),
+        }
+    }
 }
 
 impl BlockPayload {
     pub fn new(transactions: Vec<Transaction>, compute_receipts: Vec<ComputeReceipt>) -> Self {
         Self {
+            version: PROTOCOL_ENCODING_VERSION,
             transactions,
             compute_receipts,
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("serialization never fails")
+    /// Encode block payload into versioned canonical binary format.
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, &'static str> {
+        if self.version != PROTOCOL_ENCODING_VERSION {
+            return Err("unsupported block payload encoding version");
+        }
+        let mut buf = Vec::new();
+        buf.extend_from_slice(BLOCK_MAGIC);
+        buf.push(self.version);
+        buf.extend_from_slice(&(self.transactions.len() as u32).to_be_bytes());
+        for tx in &self.transactions {
+            let tx_bytes = tx.to_canonical_bytes()?;
+            write_length_prefixed(&mut buf, &tx_bytes);
+        }
+        buf.extend_from_slice(&(self.compute_receipts.len() as u32).to_be_bytes());
+        for receipt in &self.compute_receipts {
+            let r_bytes = receipt.to_canonical_bytes()?;
+            write_length_prefixed(&mut buf, &r_bytes);
+        }
+        Ok(buf)
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+    /// Decode block payload from versioned canonical binary format, rejecting
+    /// unsupported versions, malformed inner entries, or trailing bytes.
+    pub fn from_canonical_bytes(mut input: &[u8]) -> Result<Self, &'static str> {
+        if input.len() < 4 || &input[..4] != BLOCK_MAGIC {
+            return Err("invalid block payload canonical magic");
+        }
+        input = &input[4..];
+        let version = read_u8(&mut input)?;
+        if version != PROTOCOL_ENCODING_VERSION {
+            return Err("unsupported block payload encoding version");
+        }
+        let tx_count = read_u32(&mut input)? as usize;
+        if tx_count > 10_000 {
+            return Err("block transaction count exceeds safety limit");
+        }
+        let mut transactions = Vec::with_capacity(tx_count);
+        for _ in 0..tx_count {
+            let raw_tx = read_length_prefixed_bytes(&mut input)?;
+            transactions.push(Transaction::from_canonical_bytes(&raw_tx)?);
+        }
+        let receipt_count = read_u32(&mut input)? as usize;
+        if receipt_count > 10_000 {
+            return Err("block receipt count exceeds safety limit");
+        }
+        let mut compute_receipts = Vec::with_capacity(receipt_count);
+        for _ in 0..receipt_count {
+            let raw_rcpt = read_length_prefixed_bytes(&mut input)?;
+            compute_receipts.push(ComputeReceipt::from_canonical_bytes(&raw_rcpt)?);
+        }
+        if !input.is_empty() {
+            return Err("noncanonical trailing bytes in block payload");
+        }
+        Ok(Self {
+            version,
+            transactions,
+            compute_receipts,
+        })
+    }
+
+    /// Domain-separated cryptographic commitment hash for this block payload.
+    pub fn commitment_hash(&self) -> Result<[u8; 32], &'static str> {
+        let canonical = self.to_canonical_bytes()?;
+        let mut hasher = Sha256::new();
+        hasher.update(DOMAIN_BLOCK_COMMIT_V1);
+        hasher.update(&canonical);
+        Ok(hasher.finalize().into())
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_canonical_bytes()
+            .expect("canonical block payload serialization failed")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, &'static str> {
+        Self::from_canonical_bytes(bytes)
     }
 }
 
@@ -717,5 +1043,88 @@ mod tests {
         let u_bytes = unbond.to_bytes().unwrap();
         let u_decoded = WorkerBondAction::from_bytes(&u_bytes).unwrap();
         assert_eq!(unbond, u_decoded);
+    }
+
+    #[test]
+    fn test_canonical_encoding_golden_vectors_and_commitments() {
+        let tx = Transaction::new("alice", 1, "bob", 500, 10);
+        let tx_bytes = tx.to_canonical_bytes().unwrap();
+        assert_eq!(&tx_bytes[..4], b"MTX1");
+        assert_eq!(tx_bytes[4], PROTOCOL_ENCODING_VERSION);
+        assert_eq!(
+            hex::encode(&tx_bytes),
+            "4d5458310100000005616c696365000000000000000100000003626f6200000000000001f4000000000000000a000000000000000000000000"
+        );
+        assert_eq!(Transaction::from_canonical_bytes(&tx_bytes).unwrap(), tx);
+
+        let receipt = ComputeReceipt::new(
+            "t1", "alice", "w1", "c1", "m1", "p1", 100, 25, 20,
+        );
+        let r_bytes = receipt.to_canonical_bytes().unwrap();
+        assert_eq!(&r_bytes[..4], b"MRCP");
+        assert_eq!(r_bytes[4], PROTOCOL_ENCODING_VERSION);
+        assert_eq!(
+            ComputeReceipt::from_canonical_bytes(&r_bytes).unwrap(),
+            receipt
+        );
+
+        let tx_commit = tx.commitment_hash().unwrap();
+        let r_commit = receipt.commitment_hash().unwrap();
+        let block = BlockPayload::new(vec![tx], vec![receipt]);
+        let block_commit = block.commitment_hash().unwrap();
+        let state_commit = compute_state_commitment(&[(b"acc:alice", b"1000"), (b"acc:bob", b"500")]);
+        let state_commit_reordered =
+            compute_state_commitment(&[(b"acc:bob", b"500"), (b"acc:alice", b"1000")]);
+
+        assert_eq!(state_commit, state_commit_reordered);
+        assert_ne!(tx_commit, r_commit);
+        assert_ne!(tx_commit, block_commit);
+        assert_ne!(block_commit, state_commit);
+    }
+
+    #[test]
+    fn test_canonical_encoding_rejects_malformed_and_trailing_bytes() {
+        let tx = Transaction::new("alice", 1, "bob", 500, 10);
+        let mut tx_bytes = tx.to_canonical_bytes().unwrap();
+        tx_bytes.push(0xFF); // noncanonical trailing byte
+        assert!(Transaction::from_canonical_bytes(&tx_bytes).is_err());
+
+        // Truncated input
+        assert!(Transaction::from_canonical_bytes(&tx_bytes[..10]).is_err());
+        // Bad magic
+        assert!(Transaction::from_canonical_bytes(b"BAD!01").is_err());
+
+        let receipt = ComputeReceipt::new("t1", "alice", "w1", "c1", "m1", "p1", 10, 5, 4);
+        let mut r_bytes = receipt.to_canonical_bytes().unwrap();
+        r_bytes.push(0x00);
+        assert!(ComputeReceipt::from_canonical_bytes(&r_bytes).is_err());
+
+        let block = BlockPayload::new(vec![tx], vec![receipt]);
+        let mut b_bytes = block.to_canonical_bytes().unwrap();
+        b_bytes.push(0x42);
+        assert!(BlockPayload::from_canonical_bytes(&b_bytes).is_err());
+    }
+
+    #[test]
+    fn test_canonical_encoding_rejects_unsupported_version() {
+        let mut tx = Transaction::new("alice", 1, "bob", 500, 10);
+        tx.version = 2;
+        assert!(tx.to_canonical_bytes().is_err());
+        assert!(tx.verify_signature().is_err());
+
+        let mut valid_tx_bytes = Transaction::new("alice", 1, "bob", 500, 10)
+            .to_canonical_bytes()
+            .unwrap();
+        valid_tx_bytes[4] = 99; // tamper version byte
+        assert!(Transaction::from_canonical_bytes(&valid_tx_bytes).is_err());
+
+        let mut receipt = ComputeReceipt::new("t1", "alice", "w1", "c1", "m1", "p1", 10, 5, 4);
+        receipt.version = 0;
+        assert!(receipt.to_canonical_bytes().is_err());
+        assert!(receipt.verify_signature().is_err());
+
+        let mut block = BlockPayload::default();
+        block.version = 2;
+        assert!(block.to_canonical_bytes().is_err());
     }
 }
