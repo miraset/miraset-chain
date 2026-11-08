@@ -130,10 +130,11 @@ Do not mark an item complete based only on a module existing. Record its accepta
   - Validate schema/version, chain/genesis identity, height continuity, ancestry, and commitments on restart; stop on uncertain writes or inconsistent history.
   - **Accept:** crash/fault injection at write and flush boundaries preserves acknowledged commits; corrupt or incomplete history prevents voting/readiness.
   - **Evidence (2026-11-08):** `src/storage/redb.rs` (`RecoveryMetadata`, `try_write`, `validate_recovery_state`, `test_redb_fault_injection_preserves_acknowledged_commits`, `test_recovery_validation_fails_closed_on_mismatch_or_corruption`), `src/node/runner.rs` (`init_genesis_with_chain_id`, `MirasetNode::try_start`), and `tests/durable_storage.rs` verify atomic commit sequencing, fault-injection rollback, and fail-closed startup recovery.
-- [ ] **8.2.4. Separate storage responsibilities and define retention/snapshot behavior** (HotStuff-rs.md §5.2; PRD R05/R10).
+- [x] **8.2.4. Separate storage responsibilities and define retention/snapshot behavior** (HotStuff-rs.md §5.2; PRD R05/R10).
   - Decide the backend based on the approved durability/compatibility review; separate consensus, canonical history, application state, and receipt/index data as required.
   - Specify pruning and snapshot format, integrity, migration, and rollback behavior before implementing them.
   - **Accept:** restart, migration, pruning, and snapshot tests preserve verifiable finalized state and fail closed on corruption.
+  - **Evidence (2026-11-08):** `src/storage/redb.rs` separates `blocktree`, `cf_state`, `cf_receipts`, and `cf_snapshots` tables, implements `StateSnapshot` with `state_root` and `integrity_hash` verification, protected-prefix pruning (`prune_keys_with_prefix`), and fail-closed schema migration (`migrate_schema`), verified by `test_redb_separated_tables_snapshot_restore_and_corruption_rejection` and `test_redb_pruning_and_schema_migration_fail_closed`.
 
 ### 8.3. Consensus safety, validator membership, and key custody
 
