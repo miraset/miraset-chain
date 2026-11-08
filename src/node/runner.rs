@@ -129,6 +129,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         let (commit_sender, _) = broadcast::channel(1024);
         let commit_tx = commit_sender.clone();
         let kv_for_event = kv_store.clone();
+        let mempool_for_event = mempool.clone();
 
         let replica = ReplicaSpec::builder()
             .app(app)
@@ -152,6 +153,12 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                         let datum = &data.vec()[0];
                         match BlockPayload::from_bytes(datum.bytes()) {
                             Ok(payload) => {
+                                for tx in &payload.transactions {
+                                    mempool_for_event.remove_tx(&tx.sender, tx.nonce);
+                                }
+                                for receipt in &payload.compute_receipts {
+                                    mempool_for_event.remove_receipt(&receipt.task_id);
+                                }
                                 (payload.transactions.len(), payload.compute_receipts.len())
                             }
                             Err(_) => return,

@@ -3,21 +3,26 @@ use hotstuff_rs::networking::network::Network;
 use hotstuff_rs::types::crypto_primitives::VerifyingKey;
 use hotstuff_rs::types::update_sets::ValidatorSetUpdates;
 use hotstuff_rs::types::validator_set::ValidatorSet;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 
 type MailboxMap = HashMap<VerifyingKey, VecDeque<(VerifyingKey, Message)>>;
 
-/// Shared in-memory hub routing messages between replicas.
+/// Shared in-memory hub routing messages between replicas, supporting deterministic
+/// partition and fault simulation (PRD R06).
 #[derive(Default, Clone)]
 pub struct ChannelNetworkHub {
     mailboxes: Arc<Mutex<MailboxMap>>,
+    isolated_peers: Arc<Mutex<HashSet<VerifyingKey>>>,
+    blocked_links: Arc<Mutex<HashSet<(VerifyingKey, VerifyingKey)>>>,
 }
 
 impl ChannelNetworkHub {
     pub fn new() -> Self {
         Self {
             mailboxes: Arc::new(Mutex::new(HashMap::new())),
+            isolated_peers: Arc::new(Mutex::new(HashSet::new())),
+            blocked_links: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -26,7 +31,65 @@ impl ChannelNetworkHub {
         lock.entry(key).or_default();
     }
 
+    /// Isolate a validator peer so all non-self messages to/from it are dropped.
+    pub fn isolate_peer(&self, peer: VerifyingKey) {
+        self.isolated_peers
+            .lock()
+            .expect("isolated_peers lock poisoned")
+            .insert(peer);
+    }
+
+    /// Restore connectivity for a previously isolated validator peer.
+    pub fn heal_peer(&self, peer: &VerifyingKey) {
+        self.isolated_peers
+            .lock()
+            .expect("isolated_peers lock poisoned")
+            .remove(peer);
+    }
+
+    /// Block directional link `from -> to`.
+    pub fn block_link(&self, from: VerifyingKey, to: VerifyingKey) {
+        self.blocked_links
+            .lock()
+            .expect("blocked_links lock poisoned")
+            .insert((from, to));
+    }
+
+    /// Clear all simulated network faults and partitions.
+    pub fn clear_faults(&self) {
+        self.isolated_peers
+            .lock()
+            .expect("isolated_peers lock poisoned")
+            .clear();
+        self.blocked_links
+            .lock()
+            .expect("blocked_links lock poisoned")
+            .clear();
+    }
+
+    fn is_delivery_allowed(&self, from: &VerifyingKey, to: &VerifyingKey) -> bool {
+        if from == to {
+            return true;
+        }
+        let isolated = self
+            .isolated_peers
+            .lock()
+            .expect("isolated_peers lock poisoned");
+        if isolated.contains(from) || isolated.contains(to) {
+            return false;
+        }
+        drop(isolated);
+        let blocked = self
+            .blocked_links
+            .lock()
+            .expect("blocked_links lock poisoned");
+        !blocked.contains(&(*from, *to))
+    }
+
     pub fn send_to(&self, from: VerifyingKey, to: &VerifyingKey, msg: Message) {
+        if !self.is_delivery_allowed(&from, to) {
+            return;
+        }
         let mut lock = self.mailboxes.lock().expect("hub lock poisoned");
         if let Some(queue) = lock.get_mut(to) {
             queue.push_back((from, msg));
@@ -34,10 +97,12 @@ impl ChannelNetworkHub {
     }
 
     pub fn broadcast(&self, from: VerifyingKey, recipients: &[VerifyingKey], msg: Message) {
-        let mut lock = self.mailboxes.lock().expect("hub lock poisoned");
         for peer in recipients {
-            if let Some(queue) = lock.get_mut(peer) {
-                queue.push_back((from, msg.clone()));
+            if self.is_delivery_allowed(&from, peer) {
+                let mut lock = self.mailboxes.lock().expect("hub lock poisoned");
+                if let Some(queue) = lock.get_mut(peer) {
+                    queue.push_back((from, msg.clone()));
+                }
             }
         }
     }

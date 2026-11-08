@@ -505,9 +505,34 @@ impl MirasetApp {
 
 impl<K: KVStore> App<K> for MirasetApp {
     fn produce_block(&mut self, request: ProduceBlockRequest<'_, K>) -> ProduceBlockResponse {
-        let (txs, receipts) = self.mempool.drain_for_block(100, 20);
-        let mut payload = BlockPayload::new(txs, receipts);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (candidate_txs, candidate_receipts) = self.mempool.peek_for_block(100, 20);
+        let mut selected_txs = Vec::new();
+        let mut selected_receipts = Vec::new();
 
+        for tx in candidate_txs {
+            let mut trial_txs = selected_txs.clone();
+            trial_txs.push(tx.clone());
+            let trial_payload = BlockPayload::new(trial_txs, selected_receipts.clone());
+            if Self::compute_state_updates_with_commitment(request.block_tree(), &trial_payload)
+                .is_some()
+            {
+                selected_txs.push(tx);
+            }
+        }
+
+        for receipt in candidate_receipts {
+            let mut trial_receipts = selected_receipts.clone();
+            trial_receipts.push(receipt.clone());
+            let trial_payload = BlockPayload::new(selected_txs.clone(), trial_receipts);
+            if Self::compute_state_updates_with_commitment(request.block_tree(), &trial_payload)
+                .is_some()
+            {
+                selected_receipts.push(receipt);
+            }
+        }
+
+        let mut payload = BlockPayload::new(selected_txs, selected_receipts);
         let app_state_updates =
             match Self::compute_state_updates_with_commitment(request.block_tree(), &payload) {
                 Some((updates, state_root)) => {
@@ -515,8 +540,6 @@ impl<K: KVStore> App<K> for MirasetApp {
                     Some(updates)
                 }
                 None => {
-                    // If drained mempool batch fails validation, fall back to an empty valid block
-                    // so a single bad mempool entry cannot stall block production.
                     payload = BlockPayload::default();
                     let (updates, state_root) =
                         Self::compute_state_updates_with_commitment(request.block_tree(), &payload)

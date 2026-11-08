@@ -374,3 +374,100 @@ fn test_epoch_token_accumulation_and_system_rollover() {
 
     drop(node);
 }
+
+#[test]
+fn test_four_validator_fault_bound_and_partition_healing() {
+    // n = 4 validators: 3 honest validators (power 3 each = 9) and 1 faulty/isolated
+    // validator (power 1, < 1/3 of total 10 stake; quorum >= 7).
+    // With InterleavedWrr, threshold=2 (views 4..7) and threshold=3 (views 7..10)
+    // guarantee 6 consecutive honest leader slots regardless of VerifyingKey sort order.
+    let hub = ChannelNetworkHub::new();
+
+    let keypairs: Vec<SigningKey> = (21..=24)
+        .map(|i| SigningKey::from_bytes(&[i as u8; 32]))
+        .collect();
+    let vks: Vec<_> = keypairs.iter().map(|kp| kp.verifying_key()).collect();
+    let validators = vec![
+        (vks[0], 3),
+        (vks[1], 3),
+        (vks[2], 3),
+        (vks[3], 1),
+    ];
+
+    let alice_key = SigningKey::from_bytes(&[25u8; 32]);
+    let alice_addr = hex::encode(alice_key.verifying_key().to_bytes());
+    let initial_accounts = vec![(alice_addr.as_str(), 100_000), ("bob", 1_000)];
+
+    // Isolate validator 3 (faulty/unreachable, within < 1/3 stake bound)
+    hub.isolate_peer(vks[3]);
+
+    let mut nodes = Vec::new();
+    for kp in keypairs {
+        let vk = kp.verifying_key();
+        let kv = MemKVStore::new();
+        init_genesis(kv.clone(), &validators, &initial_accounts);
+        let net = ChannelNetwork::new(vk, hub.clone());
+        let pool = Mempool::new();
+        let mut config = NodeConfig::devnet(kp);
+        config.max_view_time = Duration::from_millis(350);
+        nodes.push(MirasetNode::start(config, kv, net, pool));
+    }
+
+    // Gossip transaction to the honest validators' mempools while validator 3 is isolated
+    let mut tx = Transaction::new(&alice_addr, 0, "bob", 2_000, 50);
+    tx.sign_with(&alice_key);
+    for honest_node in &nodes[..3] {
+        assert!(honest_node.submit_transaction(tx.clone()).is_ok());
+    }
+
+    // Wait for honest 3-of-4 quorum to advance views around the isolated validator and commit
+    let deadline = std::time::Instant::now() + Duration::from_millis(6000);
+    while std::time::Instant::now() < deadline {
+        if nodes[..3]
+            .iter()
+            .all(|n| n.get_account("bob").map(|a| a.balance) == Some(3_000))
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Verify all 3 honest validators finalized the transaction identically with no conflicting finality
+    for honest_node in &nodes[..3] {
+        let bob = honest_node.get_account("bob").expect("bob should exist");
+        assert_eq!(bob.balance, 3_000);
+        let alice = honest_node.get_account(&alice_addr).expect("alice should exist");
+        assert_eq!(alice.balance, 97_950);
+        assert!(honest_node.highest_committed_block().is_some());
+    }
+
+    // Heal the partition so validator 3 rejoins and catches up via BlockSync/consensus
+    hub.clear_faults();
+    let mut tx2 = Transaction::new(&alice_addr, 1, "bob", 1_000, 50);
+    tx2.sign_with(&alice_key);
+    for honest_node in &nodes[..3] {
+        assert!(honest_node.submit_transaction(tx2.clone()).is_ok());
+    }
+
+    let heal_deadline = std::time::Instant::now() + Duration::from_millis(6000);
+    while std::time::Instant::now() < heal_deadline {
+        if nodes
+            .iter()
+            .all(|n| n.get_account("bob").map(|a| a.balance) == Some(4_000))
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+
+    // Verify all 4 validators (including the healed lagging validator) converge on the finalized state
+    for node in &nodes {
+        let bob = node.get_account("bob").expect("bob should exist on all nodes");
+        assert_eq!(bob.balance, 4_000);
+        let alice = node.get_account(&alice_addr).expect("alice should exist on all nodes");
+        assert_eq!(alice.balance, 96_900);
+        assert_eq!(alice.nonce, 2);
+    }
+
+    drop(nodes);
+}

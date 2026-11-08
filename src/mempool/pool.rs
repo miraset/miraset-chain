@@ -95,6 +95,66 @@ impl Mempool {
         (txs, receipts)
     }
 
+    /// Non-destructively snapshot candidate transactions and receipts for block production
+    /// so view timeouts / orphaned proposals do not lose uncommitted transactions.
+    pub fn peek_for_block(
+        &self,
+        max_txs: usize,
+        max_receipts: usize,
+    ) -> (Vec<Transaction>, Vec<ComputeReceipt>) {
+        let tx_lock = self.pending_txs.lock().expect("mempool lock poisoned");
+        let tx_count = max_txs.min(tx_lock.len());
+        let mut txs: Vec<Transaction> = tx_lock.iter().take(tx_count).cloned().collect();
+        drop(tx_lock);
+
+        let mut by_sender: std::collections::BTreeMap<String, Vec<Transaction>> =
+            std::collections::BTreeMap::new();
+        let mut sender_order: Vec<String> = Vec::new();
+        for tx in txs.drain(..) {
+            if !by_sender.contains_key(&tx.sender) {
+                sender_order.push(tx.sender.clone());
+            }
+            by_sender.entry(tx.sender.clone()).or_default().push(tx);
+        }
+        for sender in sender_order {
+            if let Some(mut sender_txs) = by_sender.remove(&sender) {
+                sender_txs.sort_by_key(|t| t.nonce);
+                txs.extend(sender_txs);
+            }
+        }
+
+        let receipt_lock = self
+            .pending_receipts
+            .lock()
+            .expect("receipts lock poisoned");
+        let receipt_count = max_receipts.min(receipt_lock.len());
+        let receipts: Vec<ComputeReceipt> =
+            receipt_lock.iter().take(receipt_count).cloned().collect();
+
+        (txs, receipts)
+    }
+
+    /// Remove transactions from `sender` with `nonce < min_pending_nonce`.
+    pub fn prune_sender_up_to_nonce(&self, sender: &str, min_pending_nonce: u64) {
+        let mut tx_lock = self.pending_txs.lock().expect("mempool lock poisoned");
+        tx_lock.retain(|t| t.sender != sender || t.nonce >= min_pending_nonce);
+    }
+
+    /// Remove a specific transaction `(sender, nonce)` from the mempool.
+    pub fn remove_tx(&self, sender: &str, nonce: u64) {
+        let mut tx_lock = self.pending_txs.lock().expect("mempool lock poisoned");
+        tx_lock.retain(|t| !(t.sender == sender && t.nonce == nonce));
+    }
+
+    /// Remove a specific compute receipt `task_id` from the mempool.
+    pub fn remove_receipt(&self, task_id: &str) {
+        let mut receipt_lock = self
+            .pending_receipts
+            .lock()
+            .expect("receipts lock poisoned");
+        receipt_lock.retain(|r| r.task_id != task_id);
+    }
+
     pub fn tx_count(&self) -> usize {
         self.pending_txs
             .lock()

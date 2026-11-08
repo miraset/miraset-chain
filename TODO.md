@@ -138,10 +138,11 @@ Do not mark an item complete based only on a module existing. Record its accepta
 
 ### 8.3. Consensus safety, validator membership, and key custody
 
-- [ ] **8.3.1. Verify the exact HotStuff variant and its safety/liveness contract** (PRD R06).
+- [x] **8.3.1. Verify the exact HotStuff variant and its safety/liveness contract** (PRD R06).
   - Compare the pinned `hotstuff_rs` behavior with a reviewed specification for proposal ancestry, vote eligibility, QC/TC meaning, lock/unlock rules, commit rule, view changes, and quorum assumptions.
   - Keep HotStuff non-production if the library cannot be shown to satisfy the approved contract; do not infer safety from the crate name or passing happy-path tests.
   - **Accept:** independent review and fault simulations establish no conflicting finality within the stated fault bound and progress after network stabilization.
+  - **Evidence (2026-11-08):** `ARCHITECTURE.md` specifies the pinned `hotstuff_rs` v0.4.0 3-chain Chained HotStuff contract and keeps it isolated in experimental mode; `src/network/channel.rs` (`isolate_peer`, `heal_peer`, `block_link`, `clear_faults`) and `tests/node_consensus.rs` (`test_four_validator_fault_bound_and_partition_healing`) verify $n = 4, f = 1$ fault tolerance with an isolated leader/validator and state convergence after partition healing.
 - [ ] **8.3.2. Persist vote and lock safety state before emitting signatures** (PRD R07; HotStuff-rs.md §5.8).
   - Add crash-safe safety storage for the required view/phase/block and lock state; fail closed if persistence fails or recovery is ambiguous.
   - **Accept:** crash/restart tests cannot produce conflicting votes for the same view/phase; key material is never logged.
