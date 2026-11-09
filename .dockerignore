@@ -1,0 +1,6 @@
+target
+node_modules
+.git
+.idea
+.miraset_data
+**/*.rs.bk

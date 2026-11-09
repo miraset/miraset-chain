@@ -142,7 +142,9 @@ Do not mark an item complete based only on a module existing. Record its accepta
   - Compare the pinned `hotstuff_rs` behavior with a reviewed specification for proposal ancestry, vote eligibility, QC/TC meaning, lock/unlock rules, commit rule, view changes, and quorum assumptions.
   - Keep HotStuff non-production if the library cannot be shown to satisfy the approved contract; do not infer safety from the crate name or passing happy-path tests.
   - **Accept:** independent review and fault simulations establish no conflicting finality within the stated fault bound and progress after network stabilization.
-  - **Evidence (2026-11-08):** `ARCHITECTURE.md` specifies the pinned `hotstuff_rs` v0.4.0 3-chain Chained HotStuff contract and keeps it isolated in experimental mode; `src/network/channel.rs` (`isolate_peer`, `heal_peer`, `block_link`, `clear_faults`) and `tests/node_consensus.rs` (`test_four_validator_fault_bound_and_partition_healing`) verify $n = 4, f = 1$ fault tolerance with an isolated leader/validator and state convergence after partition healing.
+  - **Evidence (2026-11-09):** `ARCHITECTURE.md` specifies the pinned `hotstuff_rs` v0.4.0 3-chain Chained HotStuff contract and keeps it isolated in experimental mode. `src/network/channel.rs` (`isolate_peer`, `heal_peer`, `block_link`, `clear_faults`) and `tests/node_consensus.rs` (`test_four_validator_fault_bound_and_partition_healing`) verify $n = 4, f = 1$ (power 3/3/3/1) progress with an isolated validator, identical finalized state on the honest quorum, and catch-up via block sync after healing.
+  - **Library defects found and contained:** (1) `KVGet::block_data` returns empty block data (consumed iterator), which broke block sync and commit-time payload reads — overridden in every `KVGet` impl via `src/storage/kv_compat.rs` (`test_block_data_round_trips_all_datums`, `test_block_data_missing_block_and_torn_write`); (2) the pacemaker truncates `max_view_time` to whole seconds — `NodeConfig::validate()` now rejects sub-second/fractional values (`test_node_config_rejects_sub_second_max_view_time`). Both must be re-checked on any `hotstuff_rs` upgrade and reported upstream. This is fault-simulation evidence only; independent safety review remains open under 8.5.2.
+  - **Multi-process evidence and liveness limitation (2026-11-09):** `tests/tcp_cluster.rs` runs validators over the real TCP transport (persistent per-peer connections, `src/network/tcp.rs`) with durable Redb storage, checking identical committed hashes at every height. `test_five_validator_tcp_redb_progress_with_one_crashed` shows $n = 5$ keeps finalizing with one crashed validator; `test_four_validator_tcp_redb_crash_restart_and_catch_up` shows $n = 4$ stays consistent and resumes after restart. **Equal-power $n = 4$ cannot finalize while any one validator is down:** strict leader rotation, votes to the leader of `view + 1`, and the consecutive-view 3-chain commit rule require four consecutive live leaders. Any devnet/testnet fault suite must use $n \ge 5$ (or account for this) until a leader-selection/commit-rule decision is made.
 - [ ] **8.3.2. Persist vote and lock safety state before emitting signatures** (PRD R07; HotStuff-rs.md §5.8).
   - Add crash-safe safety storage for the required view/phase/block and lock state; fail closed if persistence fails or recovery is ambiguous.
   - **Accept:** crash/restart tests cannot produce conflicting votes for the same view/phase; key material is never logged.
@@ -152,6 +154,7 @@ Do not mark an item complete based only on a module existing. Record its accepta
 - [ ] **8.3.4. Define protected validator key custody** (PRD R12; HotStuff-rs.md §5.8).
   - Remove deterministic production fallback keys; specify file permissions and a reviewed signer boundary before adding an external signer/KMS integration.
   - **Accept:** missing/invalid key configuration fails explicitly; key generation and signing tests do not expose secrets in output or logs.
+  - **Progress (2026-11-09, not complete):** the `[42;32]` fallback key is removed; `--genesis` mode requires `--key-file`, and `src/devnet.rs` creates key files with mode 0600 (`create_new`), refuses group/world-readable or malformed keys, and never prints secrets (`test_key_files_fail_closed`). Open: signer boundary/KMS design; the devnet compose mounts all keys in every container.
 
 ### 8.4. Networking, synchronization, RPC, and operations
 
@@ -159,6 +162,7 @@ Do not mark an item complete based only on a module existing. Record its accepta
   - Authenticate claimed validator identity against the configured/authorized peer; specify encrypted transport, admission, message/queue/work limits, backpressure, and disconnect behavior.
   - Decide whether static TCP is sufficient for the approved deployment or whether libp2p/QUIC is required; do not add discovery/gossip by assumption.
   - **Accept:** forged identity, unauthorized peers, malformed/oversized frames, replay, overload, and queue saturation are rejected observably and within configured limits.
+  - **Progress (2026-11-09, not complete):** `src/network/tcp.rs` now uses persistent per-peer connections with bounded per-peer queues (a dead peer only drops its own messages), `host:port` peers resolved on reconnect, `TCP_USER_TIMEOUT`/keepalive and an inbound idle timeout to clear half-open connections, and a dropped-message counter. Open: authenticated/encrypted identity (sender key is still self-declared), replay protection, configurable limits.
 - [ ] **8.4.2. Add authenticated history and state synchronization** (PRD R10; HotStuff-rs.md §5.7).
   - Specify checkpoint trust, finalized proof/ancestry validation, state-root verification, byte/request/concurrency budgets, and recovery before voting.
   - **Accept:** forged finality, incomplete ancestry, corrupt snapshots, and wrong chain/committee identity are rejected; valid lagging-node recovery is tested.
@@ -172,6 +176,7 @@ Do not mark an item complete based only on a module existing. Record its accepta
 - [ ] **8.4.5. Complete CLI/genesis operations only within the approved public-node scope** (HotStuff-rs.md §5.11).
   - Specify and implement genesis/config validation, explicit node start modes, and safe database maintenance commands; remove ambiguous implicit production startup behavior.
   - **Accept:** invalid/mismatched genesis and configuration fail before voting; maintenance commands cannot silently discard state.
+  - **Progress (2026-11-09, not complete):** `src/node/genesis.rs` adds a validated JSON genesis (chain ID, validators with P2P addresses, accounts); startup fails on a non-validator key, a stored validator set or genesis state commitment that differs from the file, and the node handles SIGTERM. `devnet-init`, `pubkey`, and `sign-transfer` subcommands support the Docker devnet (`docs/devnet.md`). Open: database maintenance commands, production start modes.
 
 ### 8.5. PoCC boundary and production evidence
 
@@ -186,6 +191,7 @@ Do not mark an item complete based only on a module existing. Record its accepta
   - Define representative workload, hardware, WAN conditions, and repeatable measurement procedure before accepting throughput/finality targets.
   - Add leader-failure, selective-message, equivocation, partition, restart, and lagging-validator/reconfiguration scenarios. Run 72-hour stability testing only after the workload and environment are defined.
   - **Accept:** reproducible results meet targets approved through the requirements gate; no unmeasured target or happy-path test is presented as production evidence.
+  - **Progress (2026-11-09, not complete):** `docker-compose.yml` runs a private 5-validator devnet; `scripts/devnet/fault_suite.sh` covers crash/restart, pause, and network partition with `scripts/devnet/check_consensus.py` asserting per-height agreement, quorum progress, and catch-up (passing locally). Open: equivocation, selective-message and lagging-validator scenarios, defined workload/hardware, measurements, 72-hour run.
 - [ ] **8.5.4. Gate testnet and release on independent verification** (HotStuff-rs.md §8).
   - Run a private multi-validator devnet with the approved fault suite, then obtain explicit authorization before any public testnet or production settlement use.
   - Complete independent security and code reviews and the DoD audit; hand off to CI/CD only after all required gates pass. Do not deploy from this checklist.

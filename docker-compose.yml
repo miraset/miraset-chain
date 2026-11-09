@@ -1,0 +1,71 @@
+# Experimental 5-validator devnet (f = 1). See docs/devnet.md.
+#
+# Five validators, not four: hotstuff_rs v0.4.0 needs four consecutive live leaders to commit,
+# so an equal-power 4-validator set stops finalizing while any one validator is down.
+name: miraset-devnet
+
+x-validator: &validator
+  image: miraset-chain:devnet
+  build: .
+  depends_on:
+    devnet-init:
+      condition: service_completed_successfully
+  stop_grace_period: 30s
+  networks: [devnet]
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8545/health"]
+    interval: 5s
+    timeout: 2s
+    retries: 12
+
+services:
+  # One-shot: generates validator keys, a funded faucet key, and genesis.json into the shared
+  # volume. A no-op once genesis exists, so `docker compose down -v` is needed for a fresh chain.
+  devnet-init:
+    image: miraset-chain:devnet
+    build: .
+    command: ["devnet-init", "--out", "/devnet", "--validators", "5", "--p2p-addr-template", "node{i}:9948"]
+    volumes: [devnet-config:/devnet]
+    networks: [devnet]
+
+  node0:
+    <<: *validator
+    hostname: node0
+    command: [--key-file=/devnet/node0.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node0-data:/var/lib/miraset]
+    ports: ["127.0.0.1:8545:8545"]
+  node1:
+    <<: *validator
+    hostname: node1
+    command: [--key-file=/devnet/node1.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node1-data:/var/lib/miraset]
+    ports: ["127.0.0.1:8546:8545"]
+  node2:
+    <<: *validator
+    hostname: node2
+    command: [--key-file=/devnet/node2.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node2-data:/var/lib/miraset]
+    ports: ["127.0.0.1:8547:8545"]
+  node3:
+    <<: *validator
+    hostname: node3
+    command: [--key-file=/devnet/node3.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node3-data:/var/lib/miraset]
+    ports: ["127.0.0.1:8548:8545"]
+  node4:
+    <<: *validator
+    hostname: node4
+    command: [--key-file=/devnet/node4.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node4-data:/var/lib/miraset]
+    ports: ["127.0.0.1:8549:8545"]
+
+networks:
+  devnet: {}
+
+volumes:
+  devnet-config: {}
+  node0-data: {}
+  node1-data: {}
+  node2-data: {}
+  node3-data: {}
+  node4-data: {}
