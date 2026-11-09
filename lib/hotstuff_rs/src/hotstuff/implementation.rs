@@ -433,10 +433,12 @@ impl<N: Network> HotStuff<N> {
                     vote_phase,
                 );
                 let vote_recipient = phase_vote_recipient(&phase_vote, &validator_set_state);
+                // MIRASET PATCH #7: durably record the vote before it can leave the replica
+                // (vote safety, TODO 8.3.2). Upstream sent first and recorded afterwards.
+                block_tree.set_highest_view_phase_voted(self.view_info.view)?;
                 self.sender_handle
                     .send::<HotStuffMessage>(vote_recipient, phase_vote.clone().into());
 
-                block_tree.set_highest_view_phase_voted(self.view_info.view)?;
                 Event::PhaseVote(PhaseVoteEvent {
                     timestamp: SystemTime::now(),
                     vote: phase_vote.clone(),
@@ -542,10 +544,12 @@ impl<N: Network> HotStuff<N> {
                 vote_phase,
             );
             let vote_recipient = phase_vote_recipient(&vote, &validator_set_state);
+            // MIRASET PATCH #7: durably record the vote before it can leave the replica
+            // (vote safety, TODO 8.3.2). Upstream sent first and recorded afterwards.
+            block_tree.set_highest_view_phase_voted(self.view_info.view)?;
             self.sender_handle
                 .send::<HotStuffMessage>(vote_recipient, vote.clone().into());
 
-            block_tree.set_highest_view_phase_voted(self.view_info.view)?;
             Event::PhaseVote(PhaseVoteEvent {
                 timestamp: SystemTime::now(),
                 vote: vote.clone(),

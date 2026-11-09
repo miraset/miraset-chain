@@ -16,22 +16,28 @@ upstream, re-apply each patch below and re-run both the upstream tests and the m
 | 3 | `src/event_bus.rs` | `recv_timeout(10ms)` instead of a `try_recv` loop with no wait. | Spun a full CPU core per replica. | Docker devnet CPU profile (`docs/devnet.md`). |
 | 4 | `src/networking/receiving.rs` (`BlockSyncServerStub::recv_request`), `src/block_sync/server.rs` | Request receive waits until the next advertisement is due (max 10ms) instead of `try_recv` + `yield_now`. | Spun a full CPU core per replica. | Docker devnet CPU profile. |
 | 5 | `src/algorithm.rs`, `src/event_bus.rs`, `src/networking/receiving.rs`, `src/block_sync/server.rs` | Named threads (`hs-algorithm`, `hs-event-bus`, `hs-poller`, `hs-sync-server`); spawn failures panic with a message. | Per-thread CPU/debug attribution. | — |
+| 7 | `src/hotstuff/implementation.rs` (`on_receive_proposal`, `on_receive_nudge`) | `set_highest_view_phase_voted(view)` runs **before** the phase vote is sent instead of after. | Vote safety (TODO 8.3.2, `docs/adr/proposal-vote-safety-state.md` D1): the replica's own vote record must be durable before a signature can leave the process. | `tests/vote_safety.rs` `test_phase_vote_is_recorded_before_it_is_sent` (fails on upstream with "vote for view 1 sent with no vote record", passes patched). |
+| 8 | `src/pacemaker/implementation.rs` (`on_receive_timeout_vote`, fallback-TC branch) | Enter `tc.view + 1` only if it is above the current view; `highest_tc` is still updated. | Upstream called `update_view` unconditionally, so a replica that advanced through phase certificates without storing that TC (e.g. after a chain-data wipe, `highest_tc = None`) got `NonIncreasingViewError { cur_view: 6, next_view: 1 }` and the `hs-algorithm` thread panicked ("Pacemaker failure!"). | `tests/vote_safety_cluster.rs::test_restarts_and_single_wipe_never_equivocate`: before the patch, 2 failures in 3 runs with that panic; with it, 5 of 5 runs passed with no pacemaker panic. Statistical evidence; no deterministic unit test yet. |
 | 6 | `Cargo.toml` | `[lints.rust]` allows `dead_code` and `mismatched_lifetime_syntaxes`. | Keep upstream warnings out of miraset-chain's clippy gate; no code change. | — |
 
-## Upstream test suite (2026-11-09)
+## Upstream test suite
 
-Run with `CARGO_TARGET_DIR=target/hotstuff_rs cargo test --manifest-path lib/hotstuff_rs/Cargo.toml`,
-compared against a pristine 0.4.0 copy:
+Run with `CARGO_TARGET_DIR=target/hotstuff_rs cargo test --manifest-path lib/hotstuff_rs/Cargo.toml`.
+The first column is a pristine 0.4.0 copy. The later columns add patches in order.
 
-| Test | Upstream 0.4.0 | Patched |
-|---|---|---|
-| lib unit tests | pass | pass |
-| `block_sync_test` | pass | pass |
-| `multiple_validator_set_updates_test` | pass (30s) | pass (20s) |
-| `pacemaker_initial_view_sync_test` | pass | pass |
-| `progress_and_validator_set_update_test` | **hangs** (no progress after growing 1 -> 3 validators; the test polls without a timeout) | **hangs** at the same step |
+| Test | Upstream 0.4.0 | Patches #1–#6 | Patches #1–#7 | Patches #1–#8 (2026-11-09) |
+|---|---|---|---|---|
+| lib unit tests | pass | pass | pass | pass |
+| `block_sync_test` | pass | pass | pass (7s) | pass (10s) |
+| `multiple_validator_set_updates_test` | pass (30s) | pass (20s) | pass (38s) | pass (10s) |
+| `pacemaker_initial_view_sync_test` | pass | pass | pass (10s) | pass (10s) |
+| `progress_and_validator_set_update_test` | **hangs** | **flaky**: 1 pass (10s), 1 hang (>90s) in 2 runs | **flaky**: 1 pass (10s), 2 hangs (>90s) in 3 runs | not re-run (known flaky) |
 
-The `progress_and_validator_set_update_test` hang is pre-existing upstream behaviour around
+The test stops making progress after the validator set grows from 1 to 3, and it polls with no
+timeout. It sometimes passes, sometimes hangs, with or without patch #7, so the patch does not
+cause it.
+
+The `progress_and_validator_set_update_test` hang is pre-existing upstream behaviour (intermittent) around
 validator-set expansion and is relevant to TODO 8.3.3 (reconfiguration stays disabled).
 
 ## Known upstream behaviour intentionally left unchanged

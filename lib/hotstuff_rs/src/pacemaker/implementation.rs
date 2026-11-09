@@ -304,8 +304,17 @@ impl<N: Network> Pacemaker<N> {
                     .publish(&self.event_publisher);
 
                     // Check if about to enter a new epoch, and if so then set the timeouts for the new epoch.
+                    //
+                    // MIRASET PATCH #8: the fallback TC can be older than the current view (this
+                    // replica advanced through phase certificates without storing that TC, e.g.
+                    // after a chain-data wipe). Upstream called `update_view` unconditionally,
+                    // violating its `next_view > cur_view` precondition; the error killed the
+                    // algorithm thread ("Pacemaker failure!"). Keep the newer `highest_tc`, but only
+                    // move forward.
                     let next_view = tc.view + 1;
-                    self.update_view(next_view, &validator_set_state)?
+                    if next_view > self.view_info.view {
+                        self.update_view(next_view, &validator_set_state)?
+                    }
                 }
             }
         }
