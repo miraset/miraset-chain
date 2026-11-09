@@ -7,8 +7,8 @@ use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub};
 use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
 use miraset_chain::rpc::{
-    ApiResponse, HealthResponse, MempoolStatusResponse, RpcState, TaskSettlementResponse,
-    create_router,
+    ApiResponse, BlockAtHeightResponse, HealthResponse, LatestBlockResponse, MempoolStatusResponse,
+    RpcState, TaskSettlementResponse, create_router,
 };
 use miraset_chain::storage::MemKVStore;
 use std::sync::Arc;
@@ -272,4 +272,58 @@ async fn test_rpc_epoch_endpoints() {
 
     let resp_historical = app.oneshot(req_historical).await.unwrap();
     assert_eq!(resp_historical.status(), StatusCode::NOT_FOUND);
+}
+
+async fn get_json<T: serde::de::DeserializeOwned>(
+    app: &axum::Router,
+    uri: &str,
+) -> (StatusCode, ApiResponse<T>) {
+    let req = Request::builder()
+        .uri(uri)
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+#[tokio::test]
+async fn test_rpc_block_height_queries_match_latest() {
+    let (node, chain_id) = setup_test_node();
+    let app = create_router(RpcState {
+        node: Arc::clone(&node),
+        chain_id,
+    });
+
+    // Wait for the single validator to commit at least one block.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let latest = loop {
+        let (_, resp) = get_json::<LatestBlockResponse>(&app, "/block/latest").await;
+        let latest = resp.data.unwrap();
+        if latest.height.is_some() || std::time::Instant::now() >= deadline {
+            break latest;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    let height = latest.height.expect("a block should be committed");
+    let latest_hash = latest.highest_committed_block.expect("hash with height");
+
+    // The committed hash at that height is stable and equals the latest committed hash.
+    let (status, at) =
+        get_json::<BlockAtHeightResponse>(&app, &format!("/block/height/{height}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let at = at.data.unwrap();
+    assert_eq!((at.height, at.hash), (height, latest_hash));
+
+    let (status, genesis_block) = get_json::<BlockAtHeightResponse>(&app, "/block/height/0").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(genesis_block.data.unwrap().height, 0);
+
+    // Heights above the committed tip are not served.
+    let (status, missing) =
+        get_json::<BlockAtHeightResponse>(&app, "/block/height/18446744073709551615").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(!missing.success);
 }

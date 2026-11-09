@@ -1,17 +1,21 @@
 use clap::{Parser, Subcommand};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
 use miraset_chain::core::types::{ComputeReceipt, Transaction};
+use miraset_chain::devnet::{self, DevnetSpec};
 use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub, TcpNetwork};
-use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis, init_genesis_with_chain_id};
+use miraset_chain::node::{
+    GenesisConfig, MirasetNode, NodeConfig, genesis_state_commitment, init_genesis,
+    init_genesis_with_chain_id,
+};
 use miraset_chain::rpc::start_rpc_server;
 use miraset_chain::storage::{MemKVStore, RedbKVStore};
-use rand::RngExt;
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+type CliResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Parser, Debug)]
 #[command(name = "miraset-chain")]
@@ -22,169 +26,246 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Run with in-memory devnet demonstration
+    /// Run the in-memory single-validator demo (default when --genesis is not given)
     #[arg(long, default_value_t = false)]
     dev: bool,
+
+    /// Genesis file (JSON); required to run a persistent validator node
+    #[arg(long)]
+    genesis: Option<PathBuf>,
+
+    /// Hex-encoded Ed25519 validator secret key file (mode 0600); required with --genesis
+    #[arg(long)]
+    key_file: Option<PathBuf>,
+
+    /// Directory holding the node's Redb database
+    #[arg(long, default_value = ".miraset_data")]
+    data_dir: PathBuf,
 
     /// RPC listen address
     #[arg(long, default_value = "127.0.0.1:8545")]
     rpc_addr: SocketAddr,
 
     /// P2P TCP listen address for HotStuff consensus
-    #[arg(long)]
-    p2p_addr: Option<SocketAddr>,
-
-    /// Comma-separated list of validator peers in format <pubkey_hex>@<ip:port>
-    #[arg(long)]
-    peers: Option<String>,
-
-    /// Path to persistent Redb database directory
-    #[arg(long)]
-    data_dir: Option<PathBuf>,
-
-    /// Path to hex-encoded Ed25519 validator private key file
-    #[arg(long)]
-    key_file: Option<PathBuf>,
-
-    /// Chain ID
-    #[arg(long, default_value_t = 1337)]
-    chain_id: u64,
+    #[arg(long, default_value = "127.0.0.1:9948")]
+    p2p_addr: SocketAddr,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Generate a fresh validator Ed25519 keypair
+    /// Generate a validator Ed25519 keypair; the secret is written to --out (mode 0600)
     Keygen {
-        /// Optional path to save the private key hex
         #[arg(long)]
-        out: Option<PathBuf>,
+        out: PathBuf,
+    },
+    /// Print the hex public key (account address) for a key file
+    Pubkey {
+        #[arg(long)]
+        key_file: PathBuf,
+    },
+    /// Create validator keys, a funded faucet key, and genesis.json (no-op if genesis exists)
+    DevnetInit {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long, default_value_t = 5)]
+        validators: usize,
+        #[arg(long, default_value_t = 1337)]
+        chain_id: u64,
+        /// P2P address template; `{i}` is replaced with the validator index
+        #[arg(long, default_value = "node{i}:9948")]
+        p2p_addr_template: String,
+        #[arg(long, default_value_t = 1_000_000_000)]
+        faucet_balance: u64,
+    },
+    /// Print a signed transfer as JSON, ready to POST to /tx/submit
+    SignTransfer {
+        #[arg(long)]
+        key_file: PathBuf,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        amount: u64,
+        #[arg(long, default_value_t = 10)]
+        fee: u64,
+        #[arg(long)]
+        nonce: u64,
     },
     /// Run the interactive in-memory devnet demo
     Demo,
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> CliResult {
     let cli = Cli::parse();
-
     match cli.command {
-        Some(Commands::Keygen { out }) => {
-            let mut rng = rand::rng();
-            let mut secret = [0u8; 32];
-            rng.fill(&mut secret);
-            let signing_key = SigningKey::from_bytes(&secret);
-            let vk = signing_key.verifying_key();
-            let priv_hex = hex::encode(signing_key.to_bytes());
-            let pub_hex = hex::encode(vk.to_bytes());
-
-            println!("Generated Ed25519 Keypair:");
-            println!("  Public Key (VerifyingKey): {}", pub_hex);
-            println!("  Private Key (Secret):       {}", priv_hex);
-
-            if let Some(path) = out {
-                std::fs::write(&path, &priv_hex)?;
-                println!("Saved private key to {}", path.display());
-            }
-            return Ok(());
+        Some(Commands::Keygen { out }) => keygen(&out),
+        Some(Commands::Pubkey { key_file }) => {
+            let key = devnet::read_key_file(&key_file)?;
+            println!("{}", hex::encode(key.verifying_key().to_bytes()));
+            Ok(())
         }
+        Some(Commands::DevnetInit {
+            out,
+            validators,
+            chain_id,
+            p2p_addr_template,
+            faucet_balance,
+        }) => devnet_init(&DevnetSpec {
+            out_dir: &out,
+            validators,
+            chain_id,
+            p2p_addr_template: &p2p_addr_template,
+            faucet_balance,
+        }),
+        Some(Commands::SignTransfer {
+            key_file,
+            to,
+            amount,
+            fee,
+            nonce,
+        }) => sign_transfer(&key_file, &to, amount, fee, nonce),
         Some(Commands::Demo) => {
             run_devnet_demo().await;
-            return Ok(());
+            Ok(())
         }
-        None => {}
-    }
-
-    if cli.dev || (cli.p2p_addr.is_none() && cli.data_dir.is_none()) {
-        run_devnet_demo().await;
-        return Ok(());
-    }
-
-    // Persistent node mode
-    let data_dir = cli
-        .data_dir
-        .unwrap_or_else(|| PathBuf::from(".miraset_data"));
-    std::fs::create_dir_all(&data_dir)?;
-    let db_path = data_dir.join("chain.redb");
-
-    let signing_key = if let Some(key_path) = cli.key_file {
-        let content = std::fs::read_to_string(key_path)?;
-        let bytes = hex::decode(content.trim())?;
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&bytes);
-        SigningKey::from_bytes(&arr)
-    } else {
-        // Fallback to dev key or generate
-        SigningKey::from_bytes(&[42u8; 32])
-    };
-
-    let vk = signing_key.verifying_key();
-    let p2p_addr = cli
-        .p2p_addr
-        .unwrap_or_else(|| "127.0.0.1:9948".parse().unwrap());
-
-    println!("Starting MIRASET Experimental/Devnet Node (ADR-0016 Proposed / ADR-0013 Accepted):");
-    println!("  Mode:       experimental-devnet (not canonical production settlement)");
-    println!("  Public Key: {}", hex::encode(vk.to_bytes()));
-    println!("  Data Dir:   {}", data_dir.display());
-    println!("  P2P Addr:   {}", p2p_addr);
-    println!("  RPC Addr:   {}", cli.rpc_addr);
-
-    let mut peer_addresses = HashMap::new();
-    let mut initial_validators = vec![(vk, 100)];
-
-    if let Some(peers_str) = cli.peers {
-        for entry in peers_str
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if let Some((pk_hex, addr_str)) = entry.split_once('@') {
-                let pk_bytes = hex::decode(pk_hex)?;
-                let mut pk_arr = [0u8; 32];
-                pk_arr.copy_from_slice(&pk_bytes);
-                let peer_vk = VerifyingKey::from_bytes(&pk_arr)?;
-                let peer_addr: SocketAddr = addr_str.parse()?;
-                peer_addresses.insert(peer_vk, peer_addr);
-                initial_validators.push((peer_vk, 100));
+        None => match (cli.dev, cli.genesis.as_deref()) {
+            (false, Some(genesis)) => run_validator(&cli, genesis).await,
+            _ => {
+                run_devnet_demo().await;
+                Ok(())
             }
-        }
+        },
+    }
+}
+
+fn keygen(out: &Path) -> CliResult {
+    let key = devnet::generate_signing_key();
+    devnet::write_key_file(out, &key)?;
+    println!(
+        "Public key: {}",
+        hex::encode(key.verifying_key().to_bytes())
+    );
+    println!("Secret key written to {} (mode 0600)", out.display());
+    Ok(())
+}
+
+fn devnet_init(spec: &DevnetSpec<'_>) -> CliResult {
+    let created = devnet::init_devnet(spec)?;
+    let path = spec.out_dir.join(devnet::GENESIS_FILE);
+    if created {
+        println!(
+            "Created devnet with {} validators at {}",
+            spec.validators,
+            path.display()
+        );
+    } else {
+        println!(
+            "Devnet already initialized at {}; leaving it unchanged",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn sign_transfer(key_file: &Path, to: &str, amount: u64, fee: u64, nonce: u64) -> CliResult {
+    let key = devnet::read_key_file(key_file)?;
+    let sender = hex::encode(key.verifying_key().to_bytes());
+    let mut tx = Transaction::new(&sender, nonce, to, amount, fee);
+    tx.sign_with(&key);
+    println!("{}", serde_json::to_string(&tx)?);
+    Ok(())
+}
+
+/// Run a persistent validator from a genesis file until SIGINT or SIGTERM.
+async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
+    let genesis = GenesisConfig::load(genesis_path)?;
+    let key_path = cli
+        .key_file
+        .as_deref()
+        .ok_or("--key-file is required when running with --genesis")?;
+    let signing_key: SigningKey = devnet::read_key_file(key_path)?;
+    let vk = signing_key.verifying_key();
+    if !genesis.is_validator(&vk) {
+        return Err(format!(
+            "key {} is not a validator in {}",
+            hex::encode(vk.to_bytes()),
+            genesis_path.display()
+        )
+        .into());
     }
 
-    let kv_store = RedbKVStore::open(&db_path).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let (network, runtime) = TcpNetwork::bind(vk, p2p_addr, peer_addresses)?;
-
-    // If database is freshly created, initialize genesis with configured chain_id
+    std::fs::create_dir_all(&cli.data_dir)?;
+    let kv_store = RedbKVStore::open(cli.data_dir.join("chain.redb"))
+        .map_err(|e| format!("cannot open database: {e}"))?;
     init_genesis_with_chain_id(
         kv_store.clone(),
-        cli.chain_id,
-        &initial_validators,
-        &[("alice", 1_000_000), ("bob", 500_000)],
+        genesis.chain_id,
+        &genesis.validator_powers()?,
+        &genesis.initial_accounts(),
     );
+    genesis.verify_store_validator_set(&kv_store)?;
+
+    let peers = genesis.peer_addresses(&vk)?;
+    let (network, runtime) = TcpNetwork::bind_with_hosts(vk, cli.p2p_addr, peers)?;
 
     let mut config = NodeConfig::devnet(signing_key);
-    config.chain_id = cli.chain_id;
+    config.chain_id = genesis.chain_id;
+    config.expected_genesis_hash = Some(genesis_state_commitment(&genesis.initial_accounts()));
+    let node = Arc::new(MirasetNode::try_start(
+        config,
+        kv_store,
+        network,
+        Mempool::new(),
+    )?);
 
-    let mempool = Mempool::new();
-    let node = Arc::new(
-        MirasetNode::try_start(config, kv_store, network, mempool)
-            .map_err(|e| anyhow::anyhow!("{e}"))?,
-    );
+    println!("Starting MIRASET experimental/devnet validator (ADR-0016 Proposed):");
+    println!("  Chain ID:   {}", genesis.chain_id);
+    println!("  Public Key: {}", hex::encode(vk.to_bytes()));
+    println!("  Validators: {}", genesis.validators.len());
+    println!("  Data Dir:   {}", cli.data_dir.display());
+    println!("  P2P Addr:   {}", cli.p2p_addr);
+    println!("  RPC Addr:   {}", cli.rpc_addr);
 
-    let rpc_node = Arc::clone(&node);
-    let rpc_addr = cli.rpc_addr;
-    tokio::spawn(async move {
-        if let Err(e) = start_rpc_server(rpc_node, cli.chain_id, rpc_addr).await {
-            eprintln!("RPC server error: {}", e);
-        }
-    });
+    let mut rpc = tokio::spawn(start_rpc_server(
+        Arc::clone(&node),
+        genesis.chain_id,
+        cli.rpc_addr,
+    ));
+    let outcome: CliResult = tokio::select! {
+        signal = shutdown_signal() => signal.map_err(Into::into),
+        result = &mut rpc => match result {
+            Ok(Ok(())) => Err("RPC server exited unexpectedly".into()),
+            Ok(Err(e)) => Err(format!("RPC server failed: {e}").into()),
+            Err(e) => Err(format!("RPC task failed: {e}").into()),
+        },
+    };
 
-    println!("Node initialized successfully. Press Ctrl+C to terminate.");
-    tokio::signal::ctrl_c().await?;
+    // Stop admission first so the RPC task releases its handle to the node, then stop consensus
+    // (joins replica threads; Redb commits are atomic) and finally the transport.
+    rpc.abort();
+    let _ = rpc.await;
     println!("Shutting down node...");
     drop(node);
     drop(runtime);
+    println!("Shutdown complete.");
+    outcome
+}
 
-    Ok(())
+/// Resolve on SIGINT (Ctrl+C) or, on Unix, SIGTERM (`docker stop`).
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
 
 async fn run_devnet_demo() {

@@ -68,6 +68,16 @@ pub struct MempoolStatusResponse {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LatestBlockResponse {
     pub highest_committed_block: Option<String>,
+    /// Height of `highest_committed_block` (additive field; absent before the first commit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u64>,
+}
+
+/// Committed block at a specific height.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BlockAtHeightResponse {
+    pub height: u64,
+    pub hash: String,
 }
 
 /// Task settlement status response for Coordinator / client tracking.
@@ -113,6 +123,7 @@ where
         .route("/epoch/{epoch_id}", get(get_epoch_handler))
         .route("/task/{task_id}", get(get_task_handler))
         .route("/block/latest", get(latest_block_handler))
+        .route("/block/height/{height}", get(block_at_height_handler))
         .route("/mempool/status", get(mempool_status_handler))
         .route("/events/blocks", get(sse_block_events_handler))
         .layer(cors)
@@ -267,7 +278,31 @@ where
 
     Json(ApiResponse::ok(LatestBlockResponse {
         highest_committed_block: highest_block,
+        height: state.node.highest_committed_height(),
     }))
+}
+
+async fn block_at_height_handler<K, N>(
+    State(state): State<RpcState<K, N>>,
+    Path(height): Path<u64>,
+) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    match state.node.committed_block_at_height(height) {
+        Some(hash) => (
+            StatusCode::OK,
+            Json(ApiResponse::ok(BlockAtHeightResponse {
+                height,
+                hash: hex::encode(hash.bytes()),
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::err("no committed block at this height")),
+        ),
+    }
 }
 
 async fn mempool_status_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse

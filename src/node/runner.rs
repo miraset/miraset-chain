@@ -3,7 +3,7 @@ use hotstuff_rs::block_tree::pluggables::KVStore;
 use hotstuff_rs::events::CommitBlockEvent;
 use hotstuff_rs::networking::network::Network;
 use hotstuff_rs::replica::{Replica, ReplicaSpec};
-use hotstuff_rs::types::data_types::{CryptoHash, Power};
+use hotstuff_rs::types::data_types::{BlockHeight, CryptoHash, Power};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
 use hotstuff_rs::types::validator_set::{ValidatorSet, ValidatorSetState, VerifyingKey};
 use std::time::UNIX_EPOCH;
@@ -30,6 +30,46 @@ pub struct MirasetNode<K: KVStore, N: Network + 'static> {
     pub commit_sender: broadcast::Sender<CommitEvent>,
 }
 
+/// Canonical genesis application entries (accounts and epoch 0), in deterministic order.
+fn genesis_app_entries(initial_accounts: &[(&str, u64)]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut entries: Vec<(Vec<u8>, Vec<u8>)> = initial_accounts
+        .iter()
+        .map(|(address, balance)| {
+            let account = AccountState {
+                balance: *balance,
+                nonce: 0,
+            };
+            let value = account
+                .to_bytes()
+                .expect("Serialization of genesis account failed");
+            (MirasetApp::account_key(address), value)
+        })
+        .collect();
+
+    let initial_epoch = EpochInfo::new(0, 0, 100_000);
+    let epoch_bytes = initial_epoch
+        .to_bytes()
+        .expect("Serialization of genesis epoch failed");
+    entries.push((MirasetApp::current_epoch_key(), epoch_bytes.clone()));
+    entries.push((MirasetApp::epoch_key(initial_epoch.epoch_id), epoch_bytes));
+    entries
+}
+
+fn genesis_commitment_of(entries: &[(Vec<u8>, Vec<u8>)]) -> [u8; 32] {
+    let refs: Vec<(&[u8], &[u8])> = entries
+        .iter()
+        .map(|(k, v)| (k.as_slice(), v.as_slice()))
+        .collect();
+    compute_state_commitment(&refs)
+}
+
+/// Genesis state commitment recorded in recovery metadata for the given initial accounts.
+/// Nodes started from a genesis file pass this as `NodeConfig::expected_genesis_hash` so a
+/// store initialized from a different genesis fails closed.
+pub fn genesis_state_commitment(initial_accounts: &[(&str, u64)]) -> [u8; 32] {
+    genesis_commitment_of(&genesis_app_entries(initial_accounts))
+}
+
 /// Initialize genesis block tree storage with the given chain ID, validators, and initial accounts.
 pub fn init_genesis_with_chain_id<K: KVStore>(
     mut kv_store: K,
@@ -49,37 +89,12 @@ pub fn init_genesis_with_chain_id<K: KVStore>(
 
     let val_set_state = ValidatorSetState::new(val_set.clone(), val_set, None, true);
 
+    let genesis_entries = genesis_app_entries(initial_accounts);
+    let genesis_hash = genesis_commitment_of(&genesis_entries);
     let mut app_updates = AppStateUpdates::new();
-    let mut genesis_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    for (address, balance) in initial_accounts {
-        let acc = AccountState {
-            balance: *balance,
-            nonce: 0,
-        };
-        let key = MirasetApp::account_key(address);
-        let val = acc
-            .to_bytes()
-            .expect("Serialization of genesis account failed");
-        genesis_entries.push((key.clone(), val.clone()));
-        app_updates.insert(key, val);
+    for (key, value) in genesis_entries {
+        app_updates.insert(key, value);
     }
-
-    let initial_epoch = EpochInfo::new(0, 0, 100_000);
-    let epoch_bytes = initial_epoch
-        .to_bytes()
-        .expect("Serialization of genesis epoch failed");
-    let current_key = MirasetApp::current_epoch_key();
-    let epoch0_key = MirasetApp::epoch_key(initial_epoch.epoch_id);
-    genesis_entries.push((current_key.clone(), epoch_bytes.clone()));
-    genesis_entries.push((epoch0_key.clone(), epoch_bytes.clone()));
-    app_updates.insert(current_key, epoch_bytes.clone());
-    app_updates.insert(epoch0_key, epoch_bytes);
-
-    let refs: Vec<(&[u8], &[u8])> = genesis_entries
-        .iter()
-        .map(|(k, v)| (k.as_slice(), v.as_slice()))
-        .collect();
-    let genesis_hash = compute_state_commitment(&refs);
     app_updates.insert(MirasetApp::state_commitment_key(), genesis_hash.to_vec());
 
     Replica::initialize(kv_store.clone(), app_updates, val_set_state);
@@ -121,7 +136,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         mempool: Mempool,
     ) -> Result<Self, String> {
         config.validate().map_err(|e| e.to_string())?;
-        validate_recovery_state(&kv_store, config.chain_id, None)?;
+        validate_recovery_state(&kv_store, config.chain_id, config.expected_genesis_hash)?;
 
         let app = MirasetApp::new(mempool.clone());
         let hs_config = config.to_hotstuff_config();
@@ -249,6 +264,25 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         self.block_tree_camera()
             .snapshot()
             .highest_committed_block()
+            .ok()
+            .flatten()
+    }
+
+    /// Height of the highest committed block, if any block has been committed.
+    pub fn highest_committed_height(&self) -> Option<u64> {
+        let snapshot = self.block_tree_camera().snapshot();
+        let hash = snapshot.highest_committed_block().ok().flatten()?;
+        snapshot.block_height(&hash).ok().flatten().map(|h| h.int())
+    }
+
+    /// Hash of the committed block at `height`; `None` above the highest committed height.
+    pub fn committed_block_at_height(&self, height: u64) -> Option<CryptoHash> {
+        if height > self.highest_committed_height()? {
+            return None;
+        }
+        self.block_tree_camera()
+            .snapshot()
+            .block_at_height(BlockHeight::new(height))
             .ok()
             .flatten()
     }
