@@ -5,6 +5,7 @@ FROM rust:1.97-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY lib ./lib
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked --bin miraset-chain \

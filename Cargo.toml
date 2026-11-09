@@ -10,7 +10,7 @@ borsh = "0.10.4"
 clap = { version = "4.6.7", features = ["derive"] }
 ed25519-dalek = "2.2.0"
 hex = "0.4"
-hotstuff_rs = "0.4.0"
+hotstuff_rs = { path = "lib/hotstuff_rs" }
 rand = "0.10.3"
 redb = "4.5.0"
 serde = { version = "1.0", features = ["derive"] }

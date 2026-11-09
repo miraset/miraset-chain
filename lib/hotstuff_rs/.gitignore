@@ -1,0 +1,6 @@
+# macOS filesystem artifacts
+*.DS_Store
+
+*target
+*Cargo.lock
+.vscode/*
