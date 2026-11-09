@@ -159,6 +159,7 @@ Do not mark an item complete based only on a module existing. Record its accepta
 - [ ] **8.3.4. Define protected validator key custody** (PRD R12; HotStuff-rs.md §5.8).
   - Remove deterministic production fallback keys; specify file permissions and a reviewed signer boundary before adding an external signer/KMS integration.
   - **Accept:** missing/invalid key configuration fails explicitly; key generation and signing tests do not expose secrets in output or logs.
+  - **Design (2026-11-09, Proposed, awaiting approval):** `docs/adr/proposal-validator-key-custody.md`. It covers a purpose-bound `ValidatorSigner` seam (vendored patch #9), slashing protection inside the signer, local and remote signers (the remote signer closes cross-host double signing), key-file and process hardening, and per-validator key volumes in the devnet.
   - **Progress (2026-11-09, not complete):** the `[42;32]` fallback key is removed; `--genesis` mode requires `--key-file`, and `src/devnet.rs` creates key files with mode 0600 (`create_new`), refuses group/world-readable or malformed keys, and never prints secrets (`test_key_files_fail_closed`). Open: signer boundary/KMS design; the devnet compose mounts all keys in every container.
 
 ### 8.4. Networking, synchronization, RPC, and operations
