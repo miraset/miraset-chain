@@ -16,6 +16,7 @@ use crate::{
         crypto_primitives::Keypair,
         data_types::*,
         signed_messages::{SignedMessage, Vote},
+        signer::{SignError, SignRequest},
     },
 };
 
@@ -40,16 +41,16 @@ impl PacemakerMessage {
         chain_id: ChainID,
         view: ViewNumber,
         highest_tc: Option<TimeoutCertificate>,
-    ) -> PacemakerMessage {
-        let message = &(chain_id, view).try_to_vec().unwrap();
-        let signature = keypair.sign(message);
+    ) -> Result<PacemakerMessage, SignError> {
+        // MIRASET PATCH #9: typed request through the validator signer; same signed bytes.
+        let signature = keypair.sign(&SignRequest::TimeoutVote { chain_id, view })?;
 
-        PacemakerMessage::TimeoutVote(TimeoutVote {
+        Ok(PacemakerMessage::TimeoutVote(TimeoutVote {
             chain_id,
             view,
             signature,
             highest_tc,
-        })
+        }))
     }
 
     /// Create a [`PacemakerMessage::AdvanceView`] which that to get other replicas to leave

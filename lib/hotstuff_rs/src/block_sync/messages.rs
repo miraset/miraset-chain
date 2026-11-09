@@ -25,7 +25,13 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::{
     hotstuff::types::PhaseCertificate,
-    types::{block::*, crypto_primitives::Keypair, data_types::*, signed_messages::SignedMessage},
+    types::{
+        block::*,
+        crypto_primitives::Keypair,
+        data_types::*,
+        signed_messages::SignedMessage,
+        signer::{SignError, SignRequest},
+    },
 };
 
 /// Messages exchanged between a sync server and a sync client when syncing.
@@ -90,16 +96,17 @@ impl BlockSyncAdvertiseMessage {
         me: &Keypair,
         chain_id: ChainID,
         highest_committed_block_height: BlockHeight,
-    ) -> Self {
-        let message = &(chain_id, highest_committed_block_height)
-            .try_to_vec()
-            .unwrap();
-        let signature = me.sign(message);
-        BlockSyncAdvertiseMessage::AdvertiseBlock(AdvertiseBlock {
+    ) -> Result<Self, SignError> {
+        // MIRASET PATCH #9: typed request through the validator signer; same signed bytes.
+        let signature = me.sign(&SignRequest::AdvertiseBlock {
+            chain_id,
+            highest_committed_block_height,
+        })?;
+        Ok(BlockSyncAdvertiseMessage::AdvertiseBlock(AdvertiseBlock {
             chain_id,
             highest_committed_block_height,
             signature,
-        })
+        }))
     }
 
     pub(crate) fn advertise_pc(highest_pc: PhaseCertificate) -> Self {

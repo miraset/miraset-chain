@@ -34,6 +34,7 @@ use crate::{
         crypto_primitives::Keypair,
         data_types::{ChainID, EpochLength, ViewNumber},
         signed_messages::{ActiveCollectorPair, Certificate, SignedMessage},
+        signer::SignError,
         validator_set::{ValidatorSet, ValidatorSetState},
     },
 };
@@ -111,20 +112,30 @@ impl<N: Network> Pacemaker<N> {
             // 1.1. If the current view is an Epoch-Change view, broadcast a `TimeoutVote`, then extend the view.
             if is_epoch_change_view(&cur_view, self.config.epoch_length) {
                 if is_validator(&self.config.keypair.public(), &validator_set_state) {
-                    let pacemaker_message = PacemakerMessage::timeout_vote(
+                    // MIRASET PATCH #9: a refusing signer skips the timeout vote this round; a
+                    // signer failure is an error.
+                    let pacemaker_message = match PacemakerMessage::timeout_vote(
                         &self.config.keypair,
                         self.config.chain_id,
                         cur_view,
                         block_tree.highest_tc()?,
-                    );
-                    self.sender
-                        .broadcast(Message::from(pacemaker_message.clone()));
-                    if let PacemakerMessage::TimeoutVote(timeout_vote) = pacemaker_message {
-                        Event::TimeoutVote(TimeoutVoteEvent {
-                            timestamp: SystemTime::now(),
-                            timeout_vote,
-                        })
-                        .publish(&self.event_publisher)
+                    ) {
+                        Ok(message) => Some(message),
+                        Err(SignError::Refused(_)) => None,
+                        Err(SignError::Failed(reason)) => {
+                            return Err(PacemakerError::SignerFailed(reason));
+                        }
+                    };
+                    if let Some(pacemaker_message) = pacemaker_message {
+                        self.sender
+                            .broadcast(Message::from(pacemaker_message.clone()));
+                        if let PacemakerMessage::TimeoutVote(timeout_vote) = pacemaker_message {
+                            Event::TimeoutVote(TimeoutVoteEvent {
+                                timestamp: SystemTime::now(),
+                                timeout_vote,
+                            })
+                            .publish(&self.event_publisher)
+                        }
                     }
                 }
 
@@ -606,6 +617,9 @@ pub enum PacemakerError {
 
     /// See: [`BlockTreeError`]
     BlockTreeError(BlockTreeError),
+
+    /// MIRASET PATCH #9: the validator signer failed (not a deliberate refusal).
+    SignerFailed(String),
 }
 
 impl From<BlockTreeError> for PacemakerError {

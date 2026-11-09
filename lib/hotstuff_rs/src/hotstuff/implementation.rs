@@ -39,8 +39,9 @@ use crate::{
     types::{
         block::Block,
         crypto_primitives::Keypair,
-        data_types::{BlockHeight, ChainID},
+        data_types::{BlockHeight, ChainID, CryptoHash},
         signed_messages::{ActiveCollectorPair, Certificate, SignedMessage},
+        signer::SignError,
         validator_set::ValidatorSetState,
     },
 };
@@ -78,6 +79,27 @@ pub(crate) struct HotStuff<N: Network> {
 }
 
 impl<N: Network> HotStuff<N> {
+    /// MIRASET PATCH #9: sign a phase vote for the current view through the validator signer.
+    /// `Ok(None)` when the signer refuses on purpose (e.g. slashing protection); a signer
+    /// failure is an error.
+    fn sign_phase_vote(
+        &self,
+        block: CryptoHash,
+        phase: Phase,
+    ) -> Result<Option<PhaseVote>, HotStuffError> {
+        match PhaseVote::new(
+            &self.config.keypair,
+            self.config.chain_id,
+            self.view_info.view,
+            block,
+            phase,
+        ) {
+            Ok(vote) => Ok(Some(vote)),
+            Err(SignError::Refused(_)) => Ok(None),
+            Err(SignError::Failed(reason)) => Err(HotStuffError::SignerFailed(reason)),
+        }
+    }
+
     /// Create a new HotStuff subprotocol participant.
     pub(crate) fn new(
         config: HotStuffConfiguration,
@@ -425,25 +447,22 @@ impl<N: Network> HotStuff<N> {
                     Phase::Generic
                 };
 
-                let phase_vote = PhaseVote::new(
-                    &self.config.keypair,
-                    self.config.chain_id,
-                    self.view_info.view,
-                    proposal.block.hash,
-                    vote_phase,
-                );
-                let vote_recipient = phase_vote_recipient(&phase_vote, &validator_set_state);
-                // MIRASET PATCH #7: durably record the vote before it can leave the replica
-                // (vote safety, TODO 8.3.2). Upstream sent first and recorded afterwards.
-                block_tree.set_highest_view_phase_voted(self.view_info.view)?;
-                self.sender_handle
-                    .send::<HotStuffMessage>(vote_recipient, phase_vote.clone().into());
+                // MIRASET PATCH #9: sign through the validator signer; a refusal (e.g. slashing
+                // protection) means this replica does not vote in this view.
+                if let Some(phase_vote) = self.sign_phase_vote(proposal.block.hash, vote_phase)? {
+                    let vote_recipient = phase_vote_recipient(&phase_vote, &validator_set_state);
+                    // MIRASET PATCH #7: durably record the vote before it can leave the replica
+                    // (vote safety, TODO 8.3.2). Upstream sent first and recorded afterwards.
+                    block_tree.set_highest_view_phase_voted(self.view_info.view)?;
+                    self.sender_handle
+                        .send::<HotStuffMessage>(vote_recipient, phase_vote.clone().into());
 
-                Event::PhaseVote(PhaseVoteEvent {
-                    timestamp: SystemTime::now(),
-                    vote: phase_vote.clone(),
-                })
-                .publish(&self.event_publisher)
+                    Event::PhaseVote(PhaseVoteEvent {
+                        timestamp: SystemTime::now(),
+                        vote: phase_vote.clone(),
+                    })
+                    .publish(&self.event_publisher)
+                }
             }
         }
 
@@ -536,25 +555,21 @@ impl<N: Network> HotStuff<N> {
                 _ => unreachable!("if `safe_nudge` check passed then `vote_phase` should be either `Precommit`, `Commit`, or `Decide`"),
             };
 
-            let vote = PhaseVote::new(
-                &self.config.keypair,
-                self.config.chain_id,
-                self.view_info.view,
-                nudge.justify.block,
-                vote_phase,
-            );
-            let vote_recipient = phase_vote_recipient(&vote, &validator_set_state);
-            // MIRASET PATCH #7: durably record the vote before it can leave the replica
-            // (vote safety, TODO 8.3.2). Upstream sent first and recorded afterwards.
-            block_tree.set_highest_view_phase_voted(self.view_info.view)?;
-            self.sender_handle
-                .send::<HotStuffMessage>(vote_recipient, vote.clone().into());
+            // MIRASET PATCH #9: sign through the validator signer; a refusal means no vote.
+            if let Some(vote) = self.sign_phase_vote(nudge.justify.block, vote_phase)? {
+                let vote_recipient = phase_vote_recipient(&vote, &validator_set_state);
+                // MIRASET PATCH #7: durably record the vote before it can leave the replica
+                // (vote safety, TODO 8.3.2). Upstream sent first and recorded afterwards.
+                block_tree.set_highest_view_phase_voted(self.view_info.view)?;
+                self.sender_handle
+                    .send::<HotStuffMessage>(vote_recipient, vote.clone().into());
 
-            Event::PhaseVote(PhaseVoteEvent {
-                timestamp: SystemTime::now(),
-                vote: vote.clone(),
-            })
-            .publish(&self.event_publisher);
+                Event::PhaseVote(PhaseVoteEvent {
+                    timestamp: SystemTime::now(),
+                    vote: vote.clone(),
+                })
+                .publish(&self.event_publisher);
+            }
         }
 
         // 5. Stop accepting proposals or nudges from this leader in this view.
@@ -685,6 +700,8 @@ pub(crate) struct HotStuffConfiguration {
 #[derive(Debug)]
 pub enum HotStuffError {
     BlockTreeError(BlockTreeError),
+    /// MIRASET PATCH #9: the validator signer failed (not a deliberate refusal).
+    SignerFailed(String),
 }
 
 impl From<BlockTreeError> for HotStuffError {

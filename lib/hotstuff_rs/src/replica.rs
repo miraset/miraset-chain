@@ -114,7 +114,7 @@
 //!     .build()
 //! ```
 
-use std::{thread::JoinHandle, time::Duration};
+use std::{sync::Arc, thread::JoinHandle, time::Duration};
 
 use ed25519_dalek::SigningKey;
 use typed_builder::TypedBuilder;
@@ -138,6 +138,7 @@ use crate::{
     types::{
         crypto_primitives::Keypair,
         data_types::{BufferSize, ChainID, EpochLength},
+        signer::ValidatorSigner,
         update_sets::AppStateUpdates,
         validator_set::ValidatorSetState,
     },
@@ -200,8 +201,24 @@ use std::sync::mpsc::{self, Sender};
     - `.log_events(...)`
 "))]
 pub struct Configuration {
-    #[builder(setter(doc = "Set the replica's keypair, used to sign messages. Required."))]
-    pub me: SigningKey,
+    // MIRASET PATCH #9: exactly one of `me` (in-process key, upstream behaviour) or `signer`
+    // (any `ValidatorSigner`) must be set.
+    #[builder(
+        default,
+        setter(
+            strip_option,
+            doc = "Set the replica's keypair, used to sign messages. Required unless `.signer(...)` is set."
+        )
+    )]
+    pub me: Option<SigningKey>,
+    #[builder(
+        default,
+        setter(
+            strip_option,
+            doc = "MIRASET: sign through a `ValidatorSigner` instead of an in-process key. Mutually exclusive with `.me(...)`."
+        )
+    )]
+    pub signer: Option<Arc<dyn ValidatorSigner>>,
     #[builder(setter(doc = "Set the chain ID of the blockchain. Required."))]
     pub chain_id: ChainID,
     #[builder(setter(
@@ -261,7 +278,11 @@ impl
         BlockSyncClientConfiguration,
         BlockSyncServerConfiguration,
     ) {
-        let keypair = Keypair::new(self.me);
+        let keypair = match (self.me, self.signer) {
+            (Some(key), None) => Keypair::new(key),
+            (None, Some(signer)) => Keypair::from_signer(signer),
+            _ => panic!("Configuration needs exactly one of `.me(...)` or `.signer(...)`"),
+        };
         let hotstuff_config = HotStuffConfiguration {
             chain_id: self.chain_id,
             keypair: keypair.clone(),

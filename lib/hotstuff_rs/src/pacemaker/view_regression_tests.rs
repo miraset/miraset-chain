@@ -34,9 +34,15 @@ impl Network for NullNetwork {
     }
 }
 
-fn timeout_vote(key: &SigningKey, view: u64, highest_tc: Option<TimeoutCertificate>) -> TimeoutVote {
+fn timeout_vote(
+    key: &SigningKey,
+    view: u64,
+    highest_tc: Option<TimeoutCertificate>,
+) -> TimeoutVote {
     let keypair = Keypair::new(key.clone());
-    match PacemakerMessage::timeout_vote(&keypair, CHAIN, ViewNumber::new(view), highest_tc) {
+    match PacemakerMessage::timeout_vote(&keypair, CHAIN, ViewNumber::new(view), highest_tc)
+        .expect("local signer never refuses")
+    {
         PacemakerMessage::TimeoutVote(vote) => vote,
         PacemakerMessage::AdvanceView(_) => unreachable!("timeout_vote builds a TimeoutVote"),
     }
@@ -105,6 +111,9 @@ fn test_older_fallback_tc_does_not_move_the_view_backwards() {
         .expect("an older fallback TC must not be an error");
 
     assert_eq!(pacemaker.query().view, ViewNumber::new(CURRENT_VIEW));
-    let stored = block_tree.highest_tc().unwrap().expect("fallback TC is stored");
+    let stored = block_tree
+        .highest_tc()
+        .unwrap()
+        .expect("fallback TC is stored");
     assert_eq!(stored.view, ViewNumber::new(OLD_TC_VIEW));
 }

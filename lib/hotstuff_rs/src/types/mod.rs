@@ -14,3 +14,6 @@ pub mod block;
 pub mod validator_set;
 
 pub mod signed_messages;
+
+// MIRASET PATCH #9: purpose-bound validator signing.
+pub mod signer;

@@ -18,6 +18,7 @@ upstream, re-apply each patch below and re-run both the upstream tests and the m
 | 5 | `src/algorithm.rs`, `src/event_bus.rs`, `src/networking/receiving.rs`, `src/block_sync/server.rs` | Named threads (`hs-algorithm`, `hs-event-bus`, `hs-poller`, `hs-sync-server`); spawn failures panic with a message. | Per-thread CPU/debug attribution. | — |
 | 7 | `src/hotstuff/implementation.rs` (`on_receive_proposal`, `on_receive_nudge`) | `set_highest_view_phase_voted(view)` runs **before** the phase vote is sent instead of after. | Vote safety (TODO 8.3.2, `docs/adr/proposal-vote-safety-state.md` D1): the replica's own vote record must be durable before a signature can leave the process. | `tests/vote_safety.rs` `test_phase_vote_is_recorded_before_it_is_sent` (fails on upstream with "vote for view 1 sent with no vote record", passes patched). |
 | 8 | `src/pacemaker/implementation.rs` (`on_receive_timeout_vote`, fallback-TC branch) | Enter `tc.view + 1` only if it is above the current view; `highest_tc` is still updated. | Upstream called `update_view` unconditionally, so a replica that advanced through phase certificates without storing that TC (e.g. after a chain-data wipe, `highest_tc = None`) got `NonIncreasingViewError { cur_view: 6, next_view: 1 }` and the `hs-algorithm` thread panicked ("Pacemaker failure!"). | `src/pacemaker/view_regression_tests.rs` (deterministic: replica at view 10 with no stored TC receives a fallback TC for view 0; fails on upstream with `NonIncreasingViewError { cur_view: 10, next_view: 1 }`, passes patched; test-only `extern crate self as hotstuff_rs` in `src/lib.rs` lets it reuse `tests/common/mem_db.rs`). Also `tests/vote_safety_cluster.rs` (2 failures in 3 runs before, 5 of 5 passed after). |
+| 9 | `src/types/signer.rs` (new), `src/types/crypto_primitives.rs` (`Keypair`), `src/replica.rs` (`Configuration`), the three signing sites (`hotstuff/messages.rs` `PhaseVote::new`, `pacemaker/messages.rs` `timeout_vote`, `block_sync/messages.rs` `advertise_block`) and their callers | Purpose-bound signing. Every signature goes through a `ValidatorSigner` as a typed `SignRequest`, and `Keypair` has no raw-bytes `sign`. `SignRequest::signing_bytes()` reproduces upstream's borsh tuples, so signatures and the wire format are unchanged. `Configuration` takes exactly one of `.me(key)` (upstream behaviour, via `LocalKeySigner`) or `.signer(..)`. `SignError::Refused` skips the message; `SignError::Failed` becomes `HotStuffError::SignerFailed` / `PacemakerError::SignerFailed`, or a panic on the block-sync server thread. | Key custody D1 (TODO 8.3.4, `docs/adr/proposal-validator-key-custody.md`): a signer must see what it signs, so slashing protection can run before a signature exists, and the node can never obtain a signature over arbitrary bytes. | `src/types/signer_tests.rs`: golden signing bytes, signatures byte-identical to upstream raw signing, constructors propagate refusals. Upstream suite passes unchanged with `.me(..)`. MIRASET tests: `tests/vote_safety.rs::test_signer_refusal_sends_no_phase_vote_and_does_not_halt`, `tests/signer_fault_halt.rs`. |
 | 6 | `Cargo.toml` | `[lints.rust]` allows `dead_code` and `mismatched_lifetime_syntaxes`. | Keep upstream warnings out of miraset-chain's clippy gate; no code change. | — |
 
 ## Upstream test suite
@@ -25,13 +26,13 @@ upstream, re-apply each patch below and re-run both the upstream tests and the m
 Run with `CARGO_TARGET_DIR=target/hotstuff_rs cargo test --manifest-path lib/hotstuff_rs/Cargo.toml`.
 The first column is a pristine 0.4.0 copy. The later columns add patches in order.
 
-| Test | Upstream 0.4.0 | Patches #1–#6 | Patches #1–#7 | Patches #1–#8 (2026-11-09) |
-|---|---|---|---|---|
-| lib unit tests | pass | pass | pass | pass |
-| `block_sync_test` | pass | pass | pass (7s) | pass (10s) |
-| `multiple_validator_set_updates_test` | pass (30s) | pass (20s) | pass (38s) | pass (10s) |
-| `pacemaker_initial_view_sync_test` | pass | pass | pass (10s) | pass (10s) |
-| `progress_and_validator_set_update_test` | **hangs** | **flaky**: 1 pass (10s), 1 hang (>90s) in 2 runs | **flaky**: 1 pass (10s), 2 hangs (>90s) in 3 runs | not re-run (known flaky) |
+| Test | Upstream 0.4.0 | Patches #1–#6 | Patches #1–#7 | Patches #1–#8 | Patches #1–#9 (2026-11-09) |
+|---|---|---|---|---|---|
+| lib unit tests | pass | pass | pass | pass | pass (6) |
+| `block_sync_test` | pass | pass | pass (7s) | pass (10s) | pass (9s) |
+| `multiple_validator_set_updates_test` | pass (30s) | pass (20s) | pass (38s) | pass (10s) | pass (30s) |
+| `pacemaker_initial_view_sync_test` | pass | pass | pass (10s) | pass (10s) | pass (20s) |
+| `progress_and_validator_set_update_test` | **hangs** | **flaky**: 1 pass (10s), 1 hang (>90s) in 2 runs | **flaky**: 1 pass (10s), 2 hangs (>90s) in 3 runs | not re-run (known flaky) | not re-run (known flaky) |
 
 The test stops making progress after the validator set grows from 1 to 3, and it polls with no
 timeout. It sometimes passes, sometimes hangs, with or without patch #7, so the patch does not

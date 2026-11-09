@@ -16,6 +16,7 @@ use crate::{
         crypto_primitives::Keypair,
         data_types::*,
         signed_messages::{SignedMessage, Vote},
+        signer::{SignError, SignRequest},
     },
 };
 
@@ -197,17 +198,22 @@ impl PhaseVote {
         view: ViewNumber,
         block: CryptoHash,
         phase: Phase,
-    ) -> Self {
-        let message_bytes = &(chain_id, view, block, phase).try_to_vec().unwrap();
-        let signature = keypair.sign(message_bytes);
+    ) -> Result<Self, SignError> {
+        // MIRASET PATCH #9: typed request through the validator signer; same signed bytes.
+        let signature = keypair.sign(&SignRequest::PhaseVote {
+            chain_id,
+            view,
+            block,
+            phase,
+        })?;
 
-        Self {
+        Ok(Self {
             chain_id,
             view,
             block,
             phase,
             signature,
-        }
+        })
     }
 }
 

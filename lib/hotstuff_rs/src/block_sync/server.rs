@@ -48,6 +48,7 @@ use crate::{
     types::{
         crypto_primitives::Keypair,
         data_types::{BlockHeight, ChainID},
+        signer::SignError,
     },
 };
 
@@ -176,12 +177,20 @@ impl<N: Network + 'static, K: KVStore> BlockSyncServer<N, K> {
                 self.sender.broadcast(advertise_pc_msg);
 
                 // Broadcast an Advertise Block message.
-                let advertise_block_msg = BlockSyncAdvertiseMessage::advertise_block(
+                // MIRASET PATCH #9: skip it if the signer refuses; a signer failure is fatal for
+                // this thread (no error path here), which MIRASET's panic hook turns into a
+                // visible safety halt.
+                match BlockSyncAdvertiseMessage::advertise_block(
                     &self.config.keypair,
                     self.config.chain_id,
                     highest_committed_block_height,
-                );
-                self.sender.broadcast(advertise_block_msg);
+                ) {
+                    Ok(advertise_block_msg) => self.sender.broadcast(advertise_block_msg),
+                    Err(SignError::Refused(_)) => {}
+                    Err(SignError::Failed(reason)) => {
+                        panic!("block sync server: validator signer failed: {reason}")
+                    }
+                }
 
                 // Update time of last advertisement.
                 self.last_advertisement = Instant::now()

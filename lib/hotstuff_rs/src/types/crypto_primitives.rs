@@ -9,7 +9,10 @@
 //! 1. **Cryptographic Hashes**: provided by the [`sha2`] crate.
 //! 2. **Digital Signatures**: provided by the [`ed25519_dalek`] crate.
 
+use std::sync::Arc;
+
 use super::data_types::SignatureBytes;
+use super::signer::{LocalKeySigner, SignError, SignRequest, ValidatorSigner};
 
 // re-exports below.
 pub use sha2::Digest;
@@ -17,24 +20,34 @@ pub use sha2::Sha256 as CryptoHasher;
 
 pub use ed25519_dalek::{Signature, SignatureError, Signer, SigningKey, Verifier, VerifyingKey};
 
-/// A facade around [`SigningKey`] that implements method for [`sign`](Self::sign)-ing messages as well
-/// as a getter for the [`public`](Self::public) key associated with the signing key.
+/// MIRASET PATCH #9: the replica's signing handle. Upstream wrapped a [`SigningKey`] and signed
+/// raw bytes; it now delegates every signature to a [`ValidatorSigner`] as a typed
+/// [`SignRequest`]. There is no raw-bytes signing path.
 #[derive(Clone)]
-pub(crate) struct Keypair(pub(crate) SigningKey);
+pub(crate) struct Keypair {
+    signer: Arc<dyn ValidatorSigner>,
+    public: VerifyingKey,
+}
 
 impl Keypair {
-    /// Create a `Keypair` that wraps over `signing_key`.
+    /// A `Keypair` backed by an in-process [`LocalKeySigner`].
     pub(crate) fn new(signing_key: SigningKey) -> Keypair {
-        Keypair(signing_key)
+        Self::from_signer(Arc::new(LocalKeySigner::new(signing_key)))
     }
 
-    /// Sign an arbitrary `message` with the `Keypair`.
-    pub(crate) fn sign(&self, message: &Vec<u8>) -> SignatureBytes {
-        SignatureBytes::new(self.0.sign(message).to_bytes())
+    /// A `Keypair` backed by any [`ValidatorSigner`].
+    pub(crate) fn from_signer(signer: Arc<dyn ValidatorSigner>) -> Keypair {
+        let public = signer.public_key();
+        Keypair { signer, public }
+    }
+
+    /// Sign a typed request.
+    pub(crate) fn sign(&self, request: &SignRequest) -> Result<SignatureBytes, SignError> {
+        self.signer.sign(request)
     }
 
     /// Get the `VerifyingKey` of this `Keypair`.
     pub(crate) fn public(&self) -> VerifyingKey {
-        self.0.verifying_key()
+        self.public
     }
 }
