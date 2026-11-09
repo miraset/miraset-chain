@@ -16,8 +16,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /var/lib/miraset miraset \
-    && mkdir -p /var/lib/miraset /devnet \
-    && chown miraset:miraset /var/lib/miraset /devnet
+    && mkdir -p /var/lib/miraset /var/lib/miraset-guard /devnet \
+    && chown miraset:miraset /var/lib/miraset /var/lib/miraset-guard /devnet
 COPY --from=build /usr/local/bin/miraset-chain /usr/local/bin/miraset-chain
 USER miraset
 WORKDIR /var/lib/miraset

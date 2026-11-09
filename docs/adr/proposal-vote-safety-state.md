@@ -1,6 +1,8 @@
 # Proposal: Vote safety state persistence (TODO 8.3.2)
 
-**Status**: Proposed — awaiting approval (not a numbered ADR; see `docs/adr/README.md`)
+**Status**: Design approved by the project owner 2026-11-09 with the refinements in §10;
+implementation in progress (not a numbered ADR; see `docs/adr/README.md`). §§1–9 are kept as
+proposed; where they differ, §10 governs.
 **Date**: 2026-11-09
 **Requirement**: PRD R07 / AT07 ("crash/restart cannot produce conflicting votes for a view");
 `docs/HotStuff-rs.md` §5.8 (record each signature before it leaves the node; refuse to sign
@@ -132,3 +134,86 @@ guard only controls what leaves the node.
 - Unsigned proposals and nudges, and authenticated transport identity: 8.4.1.
 - Cross-host double-signing (failover) and the external signer: 8.3.4.
 - Readiness endpoint and structured logs: 8.4.4.
+
+## 10. Approval record and refinements (2026-11-09)
+
+**Approved by:** project owner, 2026-11-09, in the engineering session that implemented it.
+
+### Decisions (§8)
+
+| # | Decision |
+|---|---|
+| 1 | **D2 approved:** the guard sits at the transport boundary, not inside the library. |
+| 2 | **Halt and exit non-zero**, but only for guard faults and chain-store write failures (see R1). Exit code **3** after a 5s grace period; the devnet uses `restart: on-failure`. |
+| 3 | Default `<data_dir>/signing-guard.redb`; the Docker devnet gives each validator its own `nodeN-guard` volume, so `docker compose` volume operations on chain data leave it alone. |
+| 4 | **Refuse** to start with a non-empty chain database and no guard; `--init-signing-guard` overrides it. |
+
+### Refinements to §4
+
+- **R1. Refusals vs faults (supersedes D3's "any refusal halts").** A vote the guard will not
+  sign is dropped and counted, and the node keeps running. This covers both a **stale** vote
+  (view below the record) and a **conflicting** vote (same view, different block or phase).
+  The node halts only when the guard cannot decide safely: storage failure, vote for another
+  chain, poisoned lock, or a chain-store write failure (G2).
+  - *Why conflicts do not halt:* in review we first proposed halting on a same-view conflict,
+    on the theory that it only happens through a bug. T4 disproved that. After a chain-data
+    wipe, a replica legitimately reaches its last signed view again on a different block, and
+    halting there would turn the documented resync procedure into a restart loop. The guard
+    already prevents the equivocation, so the halt adds no safety.
+- **R2. Both `send` and `broadcast` are checked.** The library sends phase votes only with
+  `send` today. Checking `broadcast` as well protects against upstream changes.
+- **R3. The guard is the outermost `Network` layer.** Verified: the library sends every message
+  through `Network::send`/`broadcast` (`networking/sending.rs`), and `TcpNetwork` and
+  `ChannelNetwork` deliver self-addressed messages inside `send`. A leader's vote to itself
+  therefore passes the guard before it can end up in a phase certificate.
+- **R4. Phase-vote events stay local.** The library publishes `Event::PhaseVote` with the signed
+  vote. MIRASET does not forward these events. They must never reach RPC or logs as sendable
+  messages, because that would bypass the guard.
+- **R5. After a halt, nothing goes out.** `GuardedNetwork` forwards no further outgoing message
+  of any kind. The validator binary exits without joining replica threads, since joining a
+  panicked thread would panic again. Redb commits are atomic, so nothing durable is lost.
+
+### Implementation map
+
+| Item | Where | Test |
+|---|---|---|
+| D1 (patch #7) | `lib/hotstuff_rs/src/hotstuff/implementation.rs` | T2 `tests/vote_safety.rs::test_phase_vote_is_recorded_before_it_is_sent` (RED on upstream) |
+| Guard rules, identity, corruption, file lock | `src/consensus/signing_guard.rs` | T1 `src/consensus/signing_guard_tests.rs` |
+| Transport wrapper, R1/R2/R5 | `src/consensus/guarded_network.rs` | unit tests in the same file |
+| Halt flag, `/health` 503 | `src/consensus/safety_halt.rs`, `src/rpc/server.rs` | T5 `tests/vote_safety.rs::test_chain_store_write_failure_halts_visibly` |
+| Chain write failure → halt (G2) | `src/storage/redb.rs` (`with_safety_halt`) | T5 |
+| CLI wiring, decision 4, exit code 3 | `src/main.rs` | manual smoke run (first start, restart, missing guard refused, `--init-signing-guard`) |
+| Chain wipe with guard kept | — | T4 `tests/vote_safety.rs::test_wiped_chain_data_cannot_resign_old_views` (single validator) |
+| Devnet volumes and restart policy | `docker-compose.yml`, `Dockerfile`, `docs/devnet.md` | — |
+
+- **R6. Any consensus-thread panic halts visibly.** Found while running T3. An `hs-*` thread
+  can die for reasons other than a store write: a library error that hits `expect`, such as the
+  pacemaker defect fixed as vendored patch #8. The node then stopped participating while
+  `/health` still said `ok`. The validator binary now installs a panic hook that triggers
+  `SafetyHalt` for any panic on an `hs-*` thread (`SafetyHalt::install_consensus_panic_hook`).
+- **R7. T4 at cluster scale means restoring the whole cluster.** A single wiped validator in a
+  live cluster is pulled forward by its peers and never re-enters old views. The real risk is
+  that every validator rolls back at once, for example a snapshot restore (8.2.4) with the
+  guards kept.
+
+### Test levels
+
+| Level | What | Where |
+|---|---|---|
+| Unit | Guard rules, identity, corruption, file lock, startup rule (decision 4), identical re-send after reopen; `GuardedNetwork` refusals vs faults; `SafetyHalt` and the panic-reason filter; Redb write failure → halt | `src/consensus/*`, `src/storage/redb.rs` |
+| Integration (in-process replicas) | T2 vote recorded before send; T4 single-validator wipe; T5 store write failure → halt and `/health` 503; consensus-thread panic → halt; `/health` 503 and no `reason` when healthy | `tests/vote_safety.rs`, `tests/consensus_panic_halt.rs`, `tests/rpc_api.rs` |
+| Integration (5 validators, TCP + Redb) | T3: 20 restarts at seeded pseudo-random points plus a single-validator wipe; T4: whole-cluster restore to older chain data with guards kept. Guards refused 65–88 stale and 5 conflicting votes per run; no equivocation; finality agrees on all nodes | `tests/vote_safety_cluster.rs` |
+| E2E (real binary) | SIGKILL and restart keep the guard record; missing guard with chain data → exit 1 until `--init-signing-guard`; wiped chain data with guard kept recovers, with stale votes dropped and no halt | `tests/e2e_validator.rs` |
+| E2E (Docker devnet) | Fault suite with new SIGKILL and resync (chain-data volume deleted, guard volume kept) scenarios, plus a no-`SAFETY HALT` log check; passed 2026-11-09 in an isolated compose project | `scripts/devnet/fault_suite.sh` |
+
+Exit code 3 is not covered end to end: triggering it needs an injected fault, which the
+production binary does not expose. In-process tests cover the halt itself (T5 and the panic
+test).
+
+**Still open for 8.3.2:**
+- A deterministic regression test for vendored patch #8. Current evidence is the repeated
+  cluster runs.
+- Independent review of patches #7 and #8 (TODO 8.5.2).
+
+Cross-host double signing remains with TODO 8.3.4.
+

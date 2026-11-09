@@ -1,3 +1,4 @@
+use crate::consensus::SafetyHalt;
 use crate::core::types::compute_state_commitment;
 use hotstuff_rs::block_tree::pluggables::{KVGet, KVStore, WriteBatch};
 use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
@@ -179,6 +180,7 @@ impl KVGet for RedbSnapshot {
 pub struct RedbKVStore {
     db: Arc<Database>,
     fail_next_write: Arc<AtomicBool>,
+    safety_halt: Option<SafetyHalt>,
 }
 
 impl RedbKVStore {
@@ -197,7 +199,16 @@ impl RedbKVStore {
         Ok(Self {
             db: Arc::new(db),
             fail_next_write: Arc::new(AtomicBool::new(false)),
+            safety_halt: None,
         })
+    }
+
+    /// Report write failures through `halt` (TODO 8.3.2, gap G2) before the replica thread stops.
+    pub fn with_safety_halt(self, halt: SafetyHalt) -> Self {
+        Self {
+            safety_halt: Some(halt),
+            ..self
+        }
     }
 
     /// Access the underlying Redb Database instance.
@@ -587,14 +598,55 @@ impl KVStore for RedbKVStore {
     }
 
     fn write(&mut self, write_batch: Self::WriteBatch) {
-        self.try_write(write_batch)
-            .expect("failed to commit durable write batch");
+        // `KVStore::write` cannot return an error, so a failure must stop the replica thread.
+        // Halt first so the fault is visible (`/health` 503, process exit) instead of silent.
+        if let Err(err) = self.try_write(write_batch) {
+            if let Some(halt) = &self.safety_halt {
+                halt.trigger(format!("chain store write failed: {err}"));
+            }
+            panic!("failed to commit durable write batch: {err}");
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_write_failure_triggers_safety_halt_before_panicking() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let halt = SafetyHalt::new();
+        let mut store = RedbKVStore::open(tmp.path())
+            .unwrap()
+            .with_safety_halt(halt.clone());
+        let mut ok_batch = RedbWriteBatch::new();
+        ok_batch.set(b"k", b"v");
+        store.write(ok_batch);
+        assert!(!halt.is_halted(), "successful writes do not halt");
+
+        store.set_fail_next_write(true);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.write(RedbWriteBatch::new());
+        }));
+
+        assert!(outcome.is_err(), "write failure must still stop the caller");
+        assert!(
+            halt.reason()
+                .is_some_and(|r| r.contains("chain store write failed"))
+        );
+    }
+
+    #[test]
+    fn test_write_failure_without_halt_handle_still_panics() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut store = RedbKVStore::open(tmp.path()).unwrap();
+        store.set_fail_next_write(true);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.write(RedbWriteBatch::new());
+        }));
+        assert!(outcome.is_err());
+    }
 
     #[test]
     fn test_redb_kv_store_basic_and_persistence() {

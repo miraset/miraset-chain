@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run crash / hang / partition scenarios against the 5-validator docker compose devnet (f = 1).
+# Run crash / hang / partition / SIGKILL / resync scenarios against the 5-validator docker
+# compose devnet (f = 1).
 # After each fault: the remaining quorum must keep committing and all reachable nodes must agree
 # at every height. After each recovery: the faulted node must catch up.
 #
@@ -22,6 +23,11 @@ rpcs_without() { # $1 = index of the faulted node
 }
 
 step() { printf '\n=== %s ===\n' "$*"; }
+
+volume_at() { # $1 = service, $2 = mount path -> docker volume name
+  docker inspect "$($COMPOSE ps -q "$1")" \
+    --format "{{range .Mounts}}{{if eq .Destination \"$2\"}}{{.Name}}{{end}}{{end}}"
+}
 
 expect_quorum_progress() { # $1 = faulted node index
   $CHECK --rpc "$(rpcs_without "$1")" --min-reachable 4 \
@@ -58,6 +64,32 @@ expect_quorum_progress 2
 step "heal: reconnect node2"
 docker network connect --alias node2 "$NETWORK" "$($COMPOSE ps -q node2)"
 expect_full_recovery
+
+step "sigkill: docker compose kill node1 (no graceful shutdown)"
+$COMPOSE kill -s SIGKILL node1
+expect_quorum_progress 1
+step "recover: start node1; its signing guard keeps the votes signed before the kill"
+$COMPOSE start node1
+expect_full_recovery
+
+# Vote signing guard (TODO 8.3.2): chain data is disposable, the guard is not.
+step "resync: delete node1 chain data volume, keep its signing guard volume"
+DATA_VOLUME="$(volume_at node1 /var/lib/miraset)"
+GUARD_VOLUME="$(volume_at node1 /var/lib/miraset-guard)"
+$COMPOSE rm -sf node1
+docker volume rm "$DATA_VOLUME" >/dev/null
+docker volume inspect "$GUARD_VOLUME" >/dev/null
+$COMPOSE up -d node1
+expect_quorum_progress 1
+step "recover: node1 resyncs from genesis and catches up"
+expect_full_recovery
+
+step "no safety halts in any validator log"
+if $COMPOSE logs node0 node1 node2 node3 node4 | grep -q "SAFETY HALT"; then
+  $COMPOSE logs node0 node1 node2 node3 node4 | grep "SAFETY HALT"
+  echo "FAULT SUITE FAILED: safety halt"
+  exit 1
+fi
 
 step "final: every height agrees on all 5 validators"
 $CHECK --rpc "$ALL_RPCS" --min-reachable 5 --max-lag "${MAX_LAG:-5}"

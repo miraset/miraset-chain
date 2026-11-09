@@ -11,6 +11,8 @@ x-validator: &validator
     devnet-init:
       condition: service_completed_successfully
   stop_grace_period: 30s
+  # A consensus safety halt exits with code 3 (TODO 8.3.2); restart so the node recovers.
+  restart: on-failure
   networks: [devnet]
   healthcheck:
     test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8545/health"]
@@ -31,32 +33,32 @@ services:
   node0:
     <<: *validator
     hostname: node0
-    command: [--key-file=/devnet/node0.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node0-data:/var/lib/miraset]
+    command: [--key-file=/devnet/node0.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node0-data:/var/lib/miraset, node0-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8545:8545"]
   node1:
     <<: *validator
     hostname: node1
-    command: [--key-file=/devnet/node1.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node1-data:/var/lib/miraset]
+    command: [--key-file=/devnet/node1.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node1-data:/var/lib/miraset, node1-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8546:8545"]
   node2:
     <<: *validator
     hostname: node2
-    command: [--key-file=/devnet/node2.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node2-data:/var/lib/miraset]
+    command: [--key-file=/devnet/node2.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node2-data:/var/lib/miraset, node2-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8547:8545"]
   node3:
     <<: *validator
     hostname: node3
-    command: [--key-file=/devnet/node3.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node3-data:/var/lib/miraset]
+    command: [--key-file=/devnet/node3.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node3-data:/var/lib/miraset, node3-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8548:8545"]
   node4:
     <<: *validator
     hostname: node4
-    command: [--key-file=/devnet/node4.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node4-data:/var/lib/miraset]
+    command: [--key-file=/devnet/node4.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node4-data:/var/lib/miraset, node4-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8549:8545"]
 
 networks:
@@ -69,3 +71,10 @@ volumes:
   node2-data: {}
   node3-data: {}
   node4-data: {}
+  # Vote signing guards (TODO 8.3.2). Kept apart from chain data: wiping nodeN-data alone is a
+  # safe resync, wiping nodeN-guard for a validator that has signed is not.
+  node0-guard: {}
+  node1-guard: {}
+  node2-guard: {}
+  node3-guard: {}
+  node4-guard: {}

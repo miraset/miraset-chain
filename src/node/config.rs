@@ -3,6 +3,8 @@ use hotstuff_rs::replica::Configuration;
 use hotstuff_rs::types::data_types::{BufferSize, ChainID, EpochLength};
 use std::time::Duration;
 
+use crate::consensus::SafetyHalt;
+
 /// Lower bound that leaves room for propose/vote round trips even on a local devnet.
 const MIN_MAX_VIEW_TIME: Duration = Duration::from_millis(100);
 
@@ -29,6 +31,9 @@ pub struct NodeConfig {
     pub log_events: bool,
     /// When set, startup fails unless the store's recorded genesis commitment matches.
     pub expected_genesis_hash: Option<[u8; 32]>,
+    /// Shared consensus safety halt (TODO 8.3.2). Pass the same handle to the
+    /// `GuardedNetwork` and chain store so `/health` reports their faults.
+    pub safety_halt: SafetyHalt,
 }
 
 impl NodeConfig {
@@ -49,6 +54,7 @@ impl NodeConfig {
             max_view_time: Duration::from_millis(1000),
             log_events: false,
             expected_genesis_hash: None,
+            safety_halt: SafetyHalt::new(),
         }
     }
 

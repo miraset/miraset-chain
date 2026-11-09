@@ -10,6 +10,7 @@ use std::time::UNIX_EPOCH;
 use tokio::sync::broadcast;
 
 use crate::app::MirasetApp;
+use crate::consensus::SafetyHalt;
 use crate::core::types::{
     AccountState, BlockPayload, CommitEvent, ComputeReceipt, EpochInfo, Transaction, WorkerInfo,
     compute_state_commitment,
@@ -28,6 +29,7 @@ pub struct MirasetNode<K: KVStore, N: Network + 'static> {
     pub kv_store: K,
     pub network: N,
     pub commit_sender: broadcast::Sender<CommitEvent>,
+    pub safety_halt: SafetyHalt,
 }
 
 /// Canonical genesis application entries (accounts and epoch 0), in deterministic order.
@@ -138,6 +140,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         config.validate().map_err(|e| e.to_string())?;
         validate_recovery_state(&kv_store, config.chain_id, config.expected_genesis_hash)?;
 
+        let safety_halt = config.safety_halt.clone();
         let app = MirasetApp::new(mempool.clone());
         let hs_config = config.to_hotstuff_config();
 
@@ -199,6 +202,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             kv_store,
             network,
             commit_sender,
+            safety_halt,
         })
     }
 
@@ -206,6 +210,11 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
     pub fn start(config: NodeConfig, kv_store: K, network: N, mempool: Mempool) -> Self {
         Self::try_start(config, kv_store, network, mempool)
             .expect("node startup failed recovery or config validation")
+    }
+
+    /// Consensus safety halt shared with the guarded network and chain store.
+    pub fn safety_halt(&self) -> &SafetyHalt {
+        &self.safety_halt
     }
 
     /// Subscribe to committed block events.

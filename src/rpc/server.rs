@@ -27,6 +27,9 @@ use crate::node::MirasetNode;
 pub struct HealthResponse {
     pub status: String,
     pub chain_id: u64,
+    /// Present when consensus is halted for safety (TODO 8.3.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Generic success or rejection status.
@@ -135,10 +138,23 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
-    Json(HealthResponse {
-        status: "ok".to_string(),
-        chain_id: state.chain_id,
-    })
+    let halt = state.node.safety_halt();
+    let (code, status, reason) = match halt.reason() {
+        Some(reason) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "halted",
+            Some(reason.to_string()),
+        ),
+        None => (StatusCode::OK, "ok", None),
+    };
+    (
+        code,
+        Json(HealthResponse {
+            status: status.to_string(),
+            chain_id: state.chain_id,
+            reason,
+        }),
+    )
 }
 
 async fn submit_tx_handler<K, N>(

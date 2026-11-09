@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
+use miraset_chain::consensus::{GuardIdentity, GuardedNetwork, OpenMode, SafetyHalt, SigningGuard};
 use miraset_chain::core::types::{ComputeReceipt, Transaction};
 use miraset_chain::devnet::{self, DevnetSpec};
 use miraset_chain::mempool::Mempool;
@@ -9,13 +10,20 @@ use miraset_chain::node::{
     init_genesis_with_chain_id,
 };
 use miraset_chain::rpc::start_rpc_server;
-use miraset_chain::storage::{MemKVStore, RedbKVStore};
+use miraset_chain::storage::{MemKVStore, RedbKVStore, read_recovery_metadata};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 type CliResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+/// Time between a safety halt and process exit, so `/health` can report the reason first.
+const SAFETY_HALT_GRACE: Duration = Duration::from_secs(5);
+const SAFETY_HALT_POLL: Duration = Duration::from_millis(200);
+const SIGNING_GUARD_FILE: &str = "signing-guard.redb";
+/// Distinct exit status for a consensus safety halt (TODO 8.3.2).
+const SAFETY_HALT_EXIT_CODE: i32 = 3;
 
 #[derive(Parser, Debug)]
 #[command(name = "miraset-chain")]
@@ -41,6 +49,16 @@ struct Cli {
     /// Directory holding the node's Redb database
     #[arg(long, default_value = ".miraset_data")]
     data_dir: PathBuf,
+
+    /// Vote signing guard file (default: <data-dir>/signing-guard.redb). Keep it when wiping
+    /// chain data: it is what prevents re-signing views this validator already voted in.
+    #[arg(long)]
+    signing_guard: Option<PathBuf>,
+
+    /// Create the signing guard even though the chain database already has data. Only safe if
+    /// this validator key has never signed on this chain (or the original guard is restored).
+    #[arg(long, default_value_t = false)]
+    init_signing_guard: bool,
 
     /// RPC listen address
     #[arg(long, default_value = "127.0.0.1:8545")]
@@ -195,8 +213,13 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     }
 
     std::fs::create_dir_all(&cli.data_dir)?;
+    let safety_halt = SafetyHalt::new();
+    safety_halt.install_consensus_panic_hook();
     let kv_store = RedbKVStore::open(cli.data_dir.join("chain.redb"))
-        .map_err(|e| format!("cannot open database: {e}"))?;
+        .map_err(|e| format!("cannot open database: {e}"))?
+        .with_safety_halt(safety_halt.clone());
+    let genesis_hash = genesis_state_commitment(&genesis.initial_accounts());
+    let guard = open_signing_guard(cli, &kv_store, genesis.chain_id, &vk, genesis_hash)?;
     init_genesis_with_chain_id(
         kv_store.clone(),
         genesis.chain_id,
@@ -206,11 +229,14 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     genesis.verify_store_validator_set(&kv_store)?;
 
     let peers = genesis.peer_addresses(&vk)?;
-    let (network, runtime) = TcpNetwork::bind_with_hosts(vk, cli.p2p_addr, peers)?;
+    let (tcp, runtime) = TcpNetwork::bind_with_hosts(vk, cli.p2p_addr, peers)?;
+    // Outermost layer: TcpNetwork delivers self-addressed votes inside `send`.
+    let network = GuardedNetwork::new(tcp, guard, safety_halt.clone());
 
     let mut config = NodeConfig::devnet(signing_key);
     config.chain_id = genesis.chain_id;
-    config.expected_genesis_hash = Some(genesis_state_commitment(&genesis.initial_accounts()));
+    config.expected_genesis_hash = Some(genesis_hash);
+    config.safety_halt = safety_halt.clone();
     let node = Arc::new(MirasetNode::try_start(
         config,
         kv_store,
@@ -233,6 +259,12 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     ));
     let outcome: CliResult = tokio::select! {
         signal = shutdown_signal() => signal.map_err(Into::into),
+        reason = wait_for_safety_halt(&safety_halt) => {
+            // No graceful shutdown: the replica thread may have panicked, and joining it would
+            // panic again. Redb commits are atomic, so exiting here loses nothing durable.
+            eprintln!("consensus safety halt: {reason}; exiting with code {SAFETY_HALT_EXIT_CODE}");
+            std::process::exit(SAFETY_HALT_EXIT_CODE);
+        }
         result = &mut rpc => match result {
             Ok(Ok(())) => Err("RPC server exited unexpectedly".into()),
             Ok(Err(e)) => Err(format!("RPC server failed: {e}").into()),
@@ -249,6 +281,54 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     drop(runtime);
     println!("Shutdown complete.");
     outcome
+}
+
+/// Open the vote signing guard (TODO 8.3.2). A non-empty chain database requires an existing
+/// guard unless `--init-signing-guard` is given, so a lost guard is never silently recreated.
+fn open_signing_guard(
+    cli: &Cli,
+    kv_store: &RedbKVStore,
+    chain_id: u64,
+    vk: &ed25519_dalek::VerifyingKey,
+    genesis_hash: [u8; 32],
+) -> CliResult<SigningGuard> {
+    let path = cli
+        .signing_guard
+        .clone()
+        .unwrap_or_else(|| cli.data_dir.join(SIGNING_GUARD_FILE));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let chain_has_data = read_recovery_metadata(kv_store)
+        .map_err(|e| format!("cannot read recovery metadata: {e}"))?
+        .is_some();
+    let mode = OpenMode::for_startup(chain_has_data, cli.init_signing_guard);
+    let identity = GuardIdentity {
+        chain_id,
+        validator: vk.to_bytes(),
+        genesis_hash,
+    };
+    // `to_string` so `main` prints the guard's operator-facing message, not its Debug form.
+    let guard = SigningGuard::open(&path, identity, mode).map_err(|e| e.to_string())?;
+    let last_view = guard
+        .last_vote()
+        .map_err(|e| e.to_string())?
+        .map(|record| record.view);
+    println!(
+        "  Signing guard: {} (last signed view: {})",
+        path.display(),
+        last_view.map_or_else(|| "none".to_string(), |view| view.to_string())
+    );
+    Ok(guard)
+}
+
+/// Resolve once the safety halt fires, after a grace period that lets `/health` report it.
+async fn wait_for_safety_halt(halt: &SafetyHalt) -> String {
+    while !halt.is_halted() {
+        tokio::time::sleep(SAFETY_HALT_POLL).await;
+    }
+    tokio::time::sleep(SAFETY_HALT_GRACE).await;
+    halt.reason().unwrap_or("unknown").to_string()
 }
 
 /// Resolve on SIGINT (Ctrl+C) or, on Unix, SIGTERM (`docker stop`).

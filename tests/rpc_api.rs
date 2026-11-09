@@ -56,6 +56,50 @@ async fn test_rpc_health() {
 }
 
 #[tokio::test]
+async fn test_rpc_health_reports_safety_halt_as_503() {
+    let (node, chain_id) = setup_test_node();
+    assert!(node.safety_halt().trigger("signing guard: test fault"));
+    let app = create_router(RpcState { node, chain_id });
+
+    let req = Request::builder()
+        .uri("/health")
+        .method("GET")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let health: HealthResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(health.status, "halted");
+    assert_eq!(health.reason.as_deref(), Some("signing guard: test fault"));
+}
+
+#[tokio::test]
+async fn test_rpc_health_omits_reason_when_healthy() {
+    let (node, chain_id) = setup_test_node();
+    let app = create_router(RpcState { node, chain_id });
+    let req = Request::builder()
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+    let body = app
+        .oneshot(req)
+        .await
+        .unwrap()
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        raw.get("reason").is_none(),
+        "healthy response has no reason: {raw}"
+    );
+}
+
+#[tokio::test]
 async fn test_rpc_get_account() {
     let (node, chain_id) = setup_test_node();
     let state = RpcState { node, chain_id };

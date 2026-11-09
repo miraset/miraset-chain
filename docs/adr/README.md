@@ -19,9 +19,11 @@ The [architecture proposal](../../ARCHITECTURE.md) records:
 - Exact experimental HotStuff variant and safety-state persistence.
 - Authorized committee activation and authenticated bounded node interfaces.
 
-Design proposals awaiting approval:
+Design proposals:
 
-- [Vote safety state persistence](proposal-vote-safety-state.md) (TODO 8.3.2, PRD R07) — Proposed.
+- [Vote safety state persistence](proposal-vote-safety-state.md) (TODO 8.3.2, PRD R07) —
+  design approved by the project owner 2026-11-09 (§10); implementation in progress. Not a
+  numbered ADR until the register is recovered.
 
 Do not assign an engineering number until the original register is recovered
 and the next unused number is verified. Do not write synthetic Accepted records

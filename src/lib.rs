@@ -1,4 +1,5 @@
 pub mod app;
+pub mod consensus;
 pub mod core;
 pub mod devnet;
 pub mod mempool;
