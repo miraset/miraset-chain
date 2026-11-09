@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::e2e::{STARTUP_TIMEOUT, Validator, http_get, wait_for};
+use common::e2e::{STARTUP_TIMEOUT, Validator, http_get, sigterm, wait_for};
 use std::fs;
 use std::time::Duration;
 
@@ -18,13 +18,6 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(20);
 fn status_of(addr: std::net::SocketAddr, path: &str) -> Option<(u16, serde_json::Value)> {
     let (code, body) = http_get(addr, path)?;
     Some((code, serde_json::from_str(&body).ok()?))
-}
-
-fn sigterm(pid: u32) {
-    let pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
-    // SAFETY: plain kill(2) on a child process this test spawned and has not reaped.
-    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-    assert_eq!(rc, 0, "SIGTERM failed");
 }
 
 #[test]

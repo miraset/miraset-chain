@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod block_data_tests;
+pub mod maintenance;
 pub mod mem;
+pub mod readonly;
 pub mod redb;
 
 pub use mem::{MemKVStore, MemSnapshot, MemWriteBatch};

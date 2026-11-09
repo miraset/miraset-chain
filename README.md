@@ -1,24 +1,33 @@
 # MIRASET Chain
 
-Self-hosted permissioned blockchain development project. **Current code is
-only a Rust starter binary; blockchain functionality is not implemented.**
-The proposed HotStuff path is experimental/devnet-only, pending authoritative
-decision review. It is not an approved replacement for production settlement.
+Self-hosted permissioned blockchain development project: an **experimental,
+devnet-only** HotStuff validator node (vendored `hotstuff_rs` 0.4.0 with MIRASET
+patches). The HotStuff path is pending authoritative decision review (protocol
+ADR-0016 is Proposed); it is not an approved replacement for production
+settlement. See `TODO.md` §8 for what is and is not hardened.
 
 ## Getting started
 
-Install a Rust toolchain supporting edition 2024, then run:
+Install a Rust toolchain supporting edition 2024, then:
 
 ```sh
 cargo build
-cargo run
 cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-Currently `cargo run` prints `Hello, world!` and `cargo test` runs zero tests.
-The Node metadata supplies agent configuration, not an application build.
+Run it (`miraset-chain` with no arguments prints help):
+
+```sh
+cargo run -- demo                       # in-memory single-validator demo
+cargo run -- devnet-init --out devnet --validators 1 --p2p-addr-template 127.0.0.1:9948
+cargo run -- start --genesis devnet/genesis.json --key-file devnet/node0.key --init-signing-guard
+cargo run -- db inspect --data-dir .miraset_data   # offline maintenance, node stopped
+```
+
+A five-validator Docker devnet and its fault suite are described in
+[docs/devnet.md](docs/devnet.md).
 
 ## Development documents
 

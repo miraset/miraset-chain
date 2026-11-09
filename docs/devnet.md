@@ -87,8 +87,12 @@ progress within the window (liveness), or a node more than `--max-lag` blocks be
   The key is still inside the validator process; a separate signer process (D3) awaits the
   transport decision.
 - Each validator keeps a vote **signing guard** (`signing-guard.redb`) on its own `nodeN-guard`
-  volume, separate from chain data `nodeN-data` (TODO 8.3.2). Deleting only `nodeN-data` is a
-  safe resync: the guard stops the node re-signing views it already voted in. Never delete
+  volume, separate from chain data `nodeN-data` (TODO 8.3.2). Deleting only `nodeN-data`
+  resyncs the node, and the guard stops it re-signing any view it already voted in. The guard
+  does **not** keep HotStuff's lock (locked certificate), which lives in the chain data: until
+  the node is past the views it voted in before, it may vote without its old lock, so treat it
+  as one of the f faulty validators for that time and resync at most one validator at once
+  (see [Restoring chain data](#restoring-chain-data)). Never delete
   `nodeN-guard` for a validator that has signed; a node with chain data but no guard refuses to
   start unless `--init-signing-guard` is passed.
 - **Upgrading an existing devnet:** recreate it with `docker compose down -v`. Older devnets
@@ -102,6 +106,43 @@ progress within the window (liveness), or a node more than `--max-lag` blocks be
   (TODO 8.4.1, design in `docs/adr/proposal-transport-identity.md`). Proposals are unsigned in
   `hotstuff_rs`, so any host that reaches a P2P port can impersonate the leader. The devnet
   network must stay private.
+
+## Starting and maintaining a validator (TODO 8.4.5)
+
+Validators start only with the `start` subcommand (`miraset-chain start --genesis … --key-file …`
+or `--remote-signer …`); the earlier form without a subcommand is rejected, and running the
+binary with no arguments prints help. The in-memory demo is `miraset-chain demo`.
+
+Offline maintenance works on a **stopped** validator's `--data-dir` and prints JSON on stdout;
+errors go to stderr as `error: …` with exit code 4 (database in use), 5 (needs crash recovery,
+or verification failed) or 1 (anything else).
+
+| Command | Does | Writes |
+|---|---|---|
+| `db inspect` | chain ID, genesis commitment, schema version, commit sequence, committed height and block | nothing (read-only open) |
+| `db verify [--genesis FILE]` | recovery metadata (and the genesis file's chain ID and commitment); every committed height: the stored hash recomputes, height and parent link, the justify is for this chain with increasing views, the payload is canonical and matches its data hash; nothing indexed above the tip. A file that is unreadable or damaged fails with exit 5 or 1 instead of crashing. Does not re-verify quorum-certificate signatures (checked on insert) or redb page checksums (see `compact`) | nothing (read-only open) |
+| `db compact` | redb page-checksum check (repairs if needed; `repaired` in the report), then reclaims free pages | the database file, without changing records |
+| `db backup --out FILE` | logical copy of one read-only snapshot (every table) into a new file (mode 0600), closed cleanly, then `verify`d against the source's chain identity and tip | only the new file; never overwrites; removed again if anything fails |
+
+`inspect` and `verify` refuse a database that needs crash recovery (a validator that was killed):
+start the validator once, or run `db compact`, which repairs it. Every command refuses a database
+that a running validator holds and never creates or truncates one; this relies on the filesystem
+honouring `flock` (local disks and local Docker volumes do, some network filesystems do not).
+Inside Docker, run them on a stopped node's volumes, for example
+`docker compose run --rm --no-deps node1 db verify --data-dir /var/lib/miraset --genesis /devnet/genesis.json`.
+
+### Restoring chain data
+
+**The signing guard is never backed up.** Restoring an older guard would roll back slashing
+protection and allow double signing; always keep the current guard.
+
+Restoring an **older** chain database also rolls back state the guard does not cover: HotStuff's
+lock (locked certificate) and highest views live in the chain data. The guard still refuses every
+vote in a view the validator already signed, but in later views the restored validator may vote
+without its old lock. Until it is past the views it voted in before the restore, count it as one
+of the f faulty validators: restore (or resync) at most one validator at a time, and only while
+the rest of the set is healthy. Restoring a backup taken at the current tip (as after
+`db backup` of a stopped node) does not roll anything back.
 
 ## Known limitations
 

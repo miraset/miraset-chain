@@ -150,8 +150,11 @@ impl Validator {
 
     fn start_with_key_args(&mut self, key_args: &[&std::ffi::OsStr], extra: &[&str]) -> Running {
         let devnet = self.devnet_dir();
-        let mut args: Vec<std::ffi::OsString> =
-            vec!["--genesis".into(), devnet.join("genesis.json").into()];
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "start".into(),
+            "--genesis".into(),
+            devnet.join("genesis.json").into(),
+        ];
         args.extend(key_args.iter().map(|a| a.to_os_string()));
         args.extend(
             [
@@ -266,4 +269,22 @@ pub fn latest_height_after_start(v: &Validator, run: &Running) -> u64 {
         height.is_some()
     });
     height.unwrap()
+}
+
+/// SIGTERM a spawned process (graceful shutdown).
+pub fn sigterm(pid: u32) {
+    let pid = libc::pid_t::try_from(pid).expect("pid fits pid_t");
+    // SAFETY: plain kill(2) on a child process the test spawned and has not reaped.
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    assert_eq!(rc, 0, "SIGTERM failed");
+}
+
+/// Run the binary to completion; returns (exit code, stdout, stderr).
+pub fn run_cli(args: &[&std::ffi::OsStr]) -> (Option<i32>, String, String) {
+    let output = Command::new(BIN).args(args).output().expect("run binary");
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
 }

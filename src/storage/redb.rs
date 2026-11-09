@@ -1,7 +1,9 @@
 use crate::consensus::SafetyHalt;
 use crate::core::types::compute_state_commitment;
 use hotstuff_rs::block_tree::pluggables::{KVGet, KVStore, WriteBatch};
-use redb::{Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{
+    Database, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition, TableHandle,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -13,8 +15,16 @@ const APP_STATE_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cf_
 const RECEIPTS_INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cf_receipts");
 const SNAPSHOTS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("cf_snapshots");
 
+/// Every table of a chain database, for whole-database copies (`db backup`).
+const ALL_TABLES: [TableDefinition<&[u8], &[u8]>; 4] = [
+    BLOCKTREE_TABLE,
+    APP_STATE_TABLE,
+    RECEIPTS_INDEX_TABLE,
+    SNAPSHOTS_TABLE,
+];
+
 const RECOVERY_META_KEY: &[u8] = b"meta:recovery_v1";
-const COMMIT_SEQ_KEY: &[u8] = b"meta:commit_seq_v1";
+pub(crate) const COMMIT_SEQ_KEY: &[u8] = b"meta:commit_seq_v1";
 
 /// Current durable storage schema version (PRD R05).
 pub const STORAGE_SCHEMA_VERSION: u32 = 1;
@@ -165,6 +175,53 @@ impl WriteBatch for RedbWriteBatch {
 /// Point-in-time snapshot of Redb table.
 pub struct RedbSnapshot {
     read_txn: ReadTransaction,
+}
+
+impl RedbSnapshot {
+    /// Snapshot over an existing read transaction (also from a read-only database).
+    pub(crate) fn from_read_txn(read_txn: ReadTransaction) -> Self {
+        Self { read_txn }
+    }
+}
+
+/// Read one chain-database key in `read_txn`, the same way `RedbKVStore` does.
+pub(crate) fn get_in(read_txn: &ReadTransaction, key: &[u8]) -> Option<Vec<u8>> {
+    let table = read_txn.open_table(BLOCKTREE_TABLE).ok()?;
+    let val = table.get(key).ok()??;
+    Some(val.value().to_vec())
+}
+
+/// Copy every table visible in `source` into `target` in one write transaction, returning the
+/// number of entries copied. Tables absent from `source` are skipped.
+pub(crate) fn copy_all_tables(source: &ReadTransaction, target: &Database) -> Result<u64, String> {
+    let write_txn = target
+        .begin_write()
+        .map_err(|e| format!("cannot write backup: {e}"))?;
+    let mut copied = 0u64;
+    for definition in ALL_TABLES {
+        let from = match source.open_table(definition) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => continue,
+            Err(e) => return Err(format!("cannot read table {}: {e}", definition.name())),
+        };
+        let mut to = write_txn
+            .open_table(definition)
+            .map_err(|e| format!("cannot create table {}: {e}", definition.name()))?;
+        let entries = from
+            .iter()
+            .map_err(|e| format!("cannot scan table {}: {e}", definition.name()))?;
+        for entry in entries {
+            let (key, value) =
+                entry.map_err(|e| format!("cannot read table {}: {e}", definition.name()))?;
+            to.insert(key.value(), value.value())
+                .map_err(|e| format!("cannot copy into {}: {e}", definition.name()))?;
+            copied += 1;
+        }
+    }
+    write_txn
+        .commit()
+        .map_err(|e| format!("cannot commit backup: {e}"))?;
+    Ok(copied)
 }
 
 impl KVGet for RedbSnapshot {
@@ -557,10 +614,7 @@ pub fn validate_recovery_state<K: KVStore>(
 
 impl KVGet for RedbKVStore {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let read_txn = self.db.begin_read().ok()?;
-        let table = read_txn.open_table(BLOCKTREE_TABLE).ok()?;
-        let val = table.get(key).ok()??;
-        Some(val.value().to_vec())
+        get_in(&self.db.begin_read().ok()?, key)
     }
 }
 

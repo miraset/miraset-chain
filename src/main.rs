@@ -20,6 +20,7 @@ use miraset_chain::signer::process::{
     SIGNER_HALT_EXIT_CODE, SignerExit, SignerOptions, run_signer,
 };
 use miraset_chain::signer::{RemoteSigner, RemoteSignerExpectation};
+use miraset_chain::storage::maintenance::{self, ExpectedChain, MaintenanceError};
 use miraset_chain::storage::{MemKVStore, RedbKVStore, read_recovery_metadata};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ type CliResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const SAFETY_HALT_GRACE: Duration = Duration::from_secs(5);
 const SAFETY_HALT_POLL: Duration = Duration::from_millis(200);
 const SIGNING_GUARD_FILE: &str = "signing-guard.redb";
+const CHAIN_DB_FILE: &str = "chain.redb";
 /// How long a validator waits for its remote signer to come up at startup.
 const SIGNER_CONNECT_WINDOW: Duration = Duration::from_secs(10);
 const SIGNER_CONNECT_RETRY: Duration = Duration::from_millis(250);
@@ -43,20 +45,25 @@ const SAFETY_HALT_EXIT_CODE: i32 = 3;
 #[command(
     about = "MIRASET L1 experimental/devnet blockchain node (HotStuff-rs consensus & PoCC accounting; ADR-0016 Proposed)"
 )]
+#[command(arg_required_else_help = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Commands,
 
-    /// Run the in-memory single-validator demo (default when --genesis is not given)
-    #[arg(long, default_value_t = false)]
-    dev: bool,
+    /// Diagnostic log format on stderr (`RUST_LOG` sets the filter, default `info`)
+    #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
+    log_format: LogFormat,
+}
 
-    /// Genesis file (JSON); required to run a persistent validator node
+/// `start`: run a persistent validator (TODO 8.4.5: the only way to start one).
+#[derive(clap::Args, Debug)]
+struct StartArgs {
+    /// Genesis file (JSON)
     #[arg(long)]
-    genesis: Option<PathBuf>,
+    genesis: PathBuf,
 
-    /// Hex-encoded Ed25519 validator secret key file (mode 0600). With --genesis, exactly one
-    /// of --key-file or --remote-signer is required
+    /// Hex-encoded Ed25519 validator secret key file (mode 0600). Exactly one of --key-file or
+    /// --remote-signer is required
     #[arg(long, conflicts_with = "remote_signer")]
     key_file: Option<PathBuf>,
 
@@ -91,10 +98,6 @@ struct Cli {
     #[arg(long, default_value = "127.0.0.1:9948")]
     p2p_addr: SocketAddr,
 
-    /// Diagnostic log format on stderr (`RUST_LOG` sets the filter, default `info`)
-    #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
-    log_format: LogFormat,
-
     /// `/readyz` reports not ready when no block was committed within this many seconds
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=86_400))]
     ready_max_commit_age_secs: u64,
@@ -105,8 +108,51 @@ struct Cli {
     shutdown_drain_ms: u64,
 }
 
+/// Offline maintenance of a stopped validator's chain database (TODO 8.4.5).
+#[derive(Subcommand, Debug)]
+enum DbCommand {
+    /// Print the database's chain identity and committed tip as JSON (read-only)
+    Inspect(DbPath),
+    /// Check page checksums, recovery metadata and every committed block; exit 1 on a problem
+    Verify {
+        #[command(flatten)]
+        db: DbPath,
+        /// Also require the chain ID and genesis commitment of this genesis file
+        #[arg(long)]
+        genesis: Option<PathBuf>,
+    },
+    /// Reclaim free space in the database file; records are not changed
+    Compact(DbPath),
+    /// Copy the chain database to a new file (never overwrites). The signing guard is never
+    /// backed up: restoring an older guard would allow double signing
+    Backup {
+        #[command(flatten)]
+        db: DbPath,
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(clap::Args, Debug)]
+struct DbPath {
+    /// Directory holding the node's Redb database (as passed to `start`)
+    #[arg(long, default_value = ".miraset_data")]
+    data_dir: PathBuf,
+}
+
+impl DbPath {
+    fn chain_file(&self) -> PathBuf {
+        self.data_dir.join(CHAIN_DB_FILE)
+    }
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Run a persistent validator from a genesis file until SIGINT or SIGTERM
+    Start(Box<StartArgs>),
+    /// Offline database maintenance (the validator must be stopped)
+    #[command(subcommand)]
+    Db(DbCommand),
     /// Generate a validator Ed25519 keypair; the secret is written to --out (mode 0600)
     Keygen {
         #[arg(long)]
@@ -175,20 +221,20 @@ async fn main() -> CliResult {
     // Before any key is read: no core dumps, no same-user ptrace (key custody D4).
     process_hardening::disable_core_dumps()?;
     match cli.command {
-        Some(Commands::Keygen { out }) => keygen(&out),
-        Some(Commands::Pubkey { key_file }) => {
+        Commands::Keygen { out } => keygen(&out),
+        Commands::Pubkey { key_file } => {
             let key = devnet::read_key_file(&key_file)?;
             println!("{}", hex::encode(key.verifying_key().to_bytes()));
             Ok(())
         }
-        Some(Commands::DevnetInit {
+        Commands::DevnetInit {
             out,
             validators,
             chain_id,
             p2p_addr_template,
             faucet_balance,
             keys_dir,
-        }) => devnet_init(&DevnetSpec {
+        } => devnet_init(&DevnetSpec {
             out_dir: &out,
             validators,
             chain_id,
@@ -196,20 +242,20 @@ async fn main() -> CliResult {
             faucet_balance,
             keys_dir: keys_dir.as_deref(),
         }),
-        Some(Commands::SignTransfer {
+        Commands::SignTransfer {
             key_file,
             to,
             amount,
             fee,
             nonce,
-        }) => sign_transfer(&key_file, &to, amount, fee, nonce),
-        Some(Commands::Signer {
+        } => sign_transfer(&key_file, &to, amount, fee, nonce),
+        Commands::Signer {
             genesis,
             key_file,
             signing_guard,
             socket,
             init_signing_guard,
-        }) => {
+        } => {
             let options = SignerOptions {
                 genesis,
                 key_file,
@@ -233,18 +279,48 @@ async fn main() -> CliResult {
                 }
             }
         }
-        Some(Commands::Demo) => {
+        Commands::Demo => {
             run_devnet_demo().await;
             Ok(())
         }
-        None => match (cli.dev, cli.genesis.as_deref()) {
-            (false, Some(genesis)) => run_validator(&cli, genesis).await,
-            _ => {
-                run_devnet_demo().await;
-                Ok(())
-            }
-        },
+        Commands::Start(args) => run_validator(&args).await,
+        Commands::Db(command) => {
+            run_db(&command).unwrap_or_else(|error| {
+                eprintln!("error: {error}");
+                std::process::exit(error.exit_code());
+            });
+            Ok(())
+        }
     }
+}
+
+/// Run one offline maintenance command and print its JSON report on stdout. Errors carry their
+/// exit code (`MaintenanceError::exit_code`).
+fn run_db(command: &DbCommand) -> Result<(), MaintenanceError> {
+    let report = match command {
+        DbCommand::Inspect(db) => to_json(&maintenance::inspect(&db.chain_file())?),
+        DbCommand::Verify { db, genesis } => {
+            let expected = genesis.as_deref().map(expected_chain).transpose()?;
+            to_json(&maintenance::verify(&db.chain_file(), expected)?)
+        }
+        DbCommand::Compact(db) => to_json(&maintenance::compact(&db.chain_file())?),
+        DbCommand::Backup { db, out } => to_json(&maintenance::backup(&db.chain_file(), out)?),
+    };
+    println!("{report}");
+    Ok(())
+}
+
+fn expected_chain(path: &Path) -> Result<ExpectedChain, MaintenanceError> {
+    let genesis = GenesisConfig::load(path)
+        .map_err(|e| MaintenanceError::Io(format!("cannot load {}: {e}", path.display())))?;
+    Ok(ExpectedChain {
+        chain_id: genesis.chain_id,
+        genesis_hash: genesis_state_commitment(&genesis.initial_accounts()),
+    })
+}
+
+fn to_json(report: &impl serde::Serialize) -> String {
+    serde_json::to_string_pretty(report).expect("maintenance reports serialize")
 }
 
 fn keygen(out: &Path) -> CliResult {
@@ -286,7 +362,8 @@ fn sign_transfer(key_file: &Path, to: &str, amount: u64, fee: u64, nonce: u64) -
 }
 
 /// Run a persistent validator from a genesis file until SIGINT or SIGTERM.
-async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
+async fn run_validator(cli: &StartArgs) -> CliResult {
+    let genesis_path = cli.genesis.as_path();
     let genesis = GenesisConfig::load(genesis_path)?;
     let node_key = load_node_key(cli, genesis.chain_id).await?;
     let vk = node_key.public_key();
@@ -302,7 +379,7 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     std::fs::create_dir_all(&cli.data_dir)?;
     let safety_halt = SafetyHalt::new();
     safety_halt.install_consensus_panic_hook();
-    let kv_store = RedbKVStore::open(cli.data_dir.join("chain.redb"))
+    let kv_store = RedbKVStore::open(cli.data_dir.join(CHAIN_DB_FILE))
         .map_err(|e| format!("cannot open database: {e}"))?
         .with_safety_halt(safety_halt.clone());
     let genesis_hash = genesis_state_commitment(&genesis.initial_accounts());
@@ -450,7 +527,7 @@ impl NodeKey {
     }
 }
 
-async fn load_node_key(cli: &Cli, chain_id: u64) -> CliResult<NodeKey> {
+async fn load_node_key(cli: &StartArgs, chain_id: u64) -> CliResult<NodeKey> {
     match (&cli.key_file, &cli.remote_signer) {
         (Some(key_path), None) => Ok(NodeKey::Local(Box::new(devnet::read_key_file(key_path)?))),
         (None, Some(socket)) => {
@@ -469,7 +546,7 @@ async fn load_node_key(cli: &Cli, chain_id: u64) -> CliResult<NodeKey> {
                 tokio::task::spawn_blocking(move || connect_signer(&socket, &expect)).await??;
             Ok(NodeKey::Remote(Arc::new(remote)))
         }
-        _ => Err("with --genesis, pass exactly one of --key-file or --remote-signer".into()),
+        _ => Err("`start` needs exactly one of --key-file or --remote-signer".into()),
     }
 }
 
@@ -498,7 +575,7 @@ fn parse_pubkey(hex_key: &str) -> CliResult<[u8; 32]> {
 /// Open the vote signing guard (TODO 8.3.2). A non-empty chain database requires an existing
 /// guard unless `--init-signing-guard` is given, so a lost guard is never silently recreated.
 fn open_signing_guard(
-    cli: &Cli,
+    cli: &StartArgs,
     kv_store: &RedbKVStore,
     chain_id: u64,
     vk: &ed25519_dalek::VerifyingKey,
