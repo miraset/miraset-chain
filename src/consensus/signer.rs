@@ -47,6 +47,16 @@ impl GuardedSigner {
         self.conflicting_refused.load(Ordering::Relaxed)
     }
 
+    /// Last phase-vote view recorded by the guard, if any.
+    pub fn last_signed_view(&self) -> Result<Option<u64>, super::SigningGuardError> {
+        Ok(self.guard.last_vote()?.map(|record| record.view))
+    }
+
+    /// The chain this signer (and its guard) is bound to.
+    pub fn chain_id(&self) -> u64 {
+        self.guard.identity().chain_id
+    }
+
     fn authorize_phase_vote(&self, request: &SignRequest) -> Result<(), SignError> {
         let SignRequest::PhaseVote {
             chain_id,
@@ -91,6 +101,14 @@ impl ValidatorSigner for GuardedSigner {
     }
 
     fn sign(&self, request: &SignRequest) -> Result<SignatureBytes, SignError> {
+        // Purpose binding: never sign anything for another chain, vote or not.
+        let found = request.chain_id().int();
+        if found != self.chain_id() {
+            return Err(SignError::Failed(format!(
+                "request for chain {found}, signer is bound to chain {}",
+                self.chain_id()
+            )));
+        }
         self.authorize_phase_vote(request)?;
         self.inner.sign(request)
     }

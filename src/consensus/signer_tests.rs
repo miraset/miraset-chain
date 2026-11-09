@@ -102,6 +102,17 @@ fn test_non_vote_requests_bypass_the_guard() {
 }
 
 #[test]
+fn test_any_request_for_another_chain_is_a_failure() {
+    let dir = TempDir::new().unwrap();
+    let signer = signer(&dir);
+    let timeout = SignRequest::TimeoutVote {
+        chain_id: ChainID::new(CHAIN + 1),
+        view: ViewNumber::new(1),
+    };
+    assert!(matches!(signer.sign(&timeout), Err(SignError::Failed(_))));
+}
+
+#[test]
 fn test_guard_for_another_key_is_rejected() {
     let dir = TempDir::new().unwrap();
     assert!(GuardedSigner::new(key(), guard(&dir, [9u8; 32])).is_err());

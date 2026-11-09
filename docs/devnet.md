@@ -51,6 +51,10 @@ progress within the window (liveness), or a node more than `--max-lag` blocks be
   created from a different genesis (accounts or validator set).
 - Every `miraset-chain` process disables core dumps and marks itself non-dumpable on Linux, so
   other processes of the same user cannot read its memory or environment (key custody D4).
+- Outside the devnet, the key can live in a separate signer process instead: run
+  `miraset-chain signer --genesis … --key-file … --signing-guard … --socket …` (the first start
+  needs `--init-signing-guard`), then start the validator with `--remote-signer <socket>` and no
+  `--key-file`. Both must run as the same user.
 - Each validator signs through `GuardedSigner`, the only holder of its key. It checks the signing
   guard before it signs a phase vote, and it never signs arbitrary bytes (key custody D1+D2).
   The key is still inside the validator process; a separate signer process (D3) awaits the

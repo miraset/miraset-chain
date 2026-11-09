@@ -8,4 +8,5 @@ pub mod network;
 pub mod node;
 pub mod process_hardening;
 pub mod rpc;
+pub mod signer;
 pub mod storage;

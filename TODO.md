@@ -170,7 +170,11 @@ Do not mark an item complete based only on a module existing. Record its accepta
     - `src/consensus/signer.rs` `GuardedSigner` checks the signing guard before a phase-vote signature exists.
     - `NodeConfig` holds a signer, not a key.
     - Evidence: library golden and identical-signature tests; unit tests; integration tests for refusal and failure; the cluster harness on `GuardedSigner`; e2e on the real binary; the Docker fault suite (proposal §10).
-    - Open: D3, the remote signer process, which closes K1 and K3. It waits for decision 2 (transport).
+  - **D3 delivered (2026-11-09, decision 2 = gRPC):**
+    - `miraset-chain signer` holds the key and guard and serves gRPC (`proto/signer.proto`) on a Unix socket: mode 0600, same-uid peers only.
+    - Validators started with `--remote-signer` hold no key. They verify every returned signature, check the chain and an optional pinned key, and halt visibly when the signer fails.
+    - Evidence: unit, integration (`tests/remote_signer.rs`, including concurrent clients never getting two votes signed per view) and e2e (`tests/e2e_remote_signer.rs`, including SIGKILL of the signer leading to node exit 3). Proposal §11.
+    - Open: a cross-host signer (gRPC over mTLS), which depends on 8.4.1. Key rotation (D6) depends on 8.3.3.
   - **Progress (2026-11-09, not complete):** the `[42;32]` fallback key is removed; `--genesis` mode requires `--key-file`, and `src/devnet.rs` creates key files with mode 0600 (`create_new`), refuses group/world-readable or malformed keys, and never prints secrets (`test_key_files_fail_closed`). Open: signer boundary/KMS design; the devnet compose mounts all keys in every container.
 
 ### 8.4. Networking, synchronization, RPC, and operations

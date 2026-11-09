@@ -3,7 +3,8 @@
 
 FROM rust:1.97-slim-bookworm AS build
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY proto ./proto
 COPY src ./src
 COPY lib ./lib
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

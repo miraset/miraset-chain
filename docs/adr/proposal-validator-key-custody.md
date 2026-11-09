@@ -1,8 +1,8 @@
 # Proposal: Validator key custody (TODO 8.3.4)
 
-**Status**: Partly approved 2026-11-09. Decisions 1, 3 and 4 are approved, and D1, D2, D4 and
-D5 are implemented (§9, §10). Decision 2 (remote signer transport) is open, so D3's remote
-signer is not started. Not a numbered ADR; see `docs/adr/README.md`.
+**Status**: Approved 2026-11-09. Decisions 1–4 are approved. D1–D5 are implemented for one
+host (§9–§11); a cross-host signer transport (mTLS) depends on TODO 8.4.1. D6 (rotation) is
+deferred. Not a numbered ADR; see `docs/adr/README.md`.
 **Date**: 2026-11-09
 **Requirements**:
 - PRD R12 / AT12: protected keys; no secrets in logs.
@@ -211,4 +211,32 @@ first. Decisions 1–3 remain open, so D1–D3 are not started.
   buffers.
 - **K1** (the key is in the node process) and **K3** (cross-host double signing): open until D3,
   the remote signer, which waits for decision 2 (transport).
+
+## 11. Decision 2: gRPC, and the D3 remote signer (2026-11-09)
+
+**Approved by:** project owner, 2026-11-09. Decision 2 is option **(c), gRPC**, built on
+`tonic`/`prost`. The protobuf is compiled in `build.rs` by the pure-Rust `protox`, so no system
+`protoc` is needed locally or in Docker.
+
+**Transport:**
+- **Now:** gRPC over a **Unix domain socket**. The socket is created with mode 0600, and each
+  connection's peer uid (`SO_PEERCRED`) must equal the signer's uid.
+- **Later:** gRPC over TCP with mTLS for a signer on another host. It waits for 8.4.1
+  (authenticated transport identity) and is not built yet.
+
+| Item | Implementation | Tests |
+|---|---|---|
+| Wire contract | `proto/signer.proto` (`miraset.signer.v1.ValidatorSigner`): `GetPublicKey` and `Sign`, with typed `PhaseVote`/`TimeoutVote`/`AdvertiseBlock` requests; the response is a signature or an explicit `refused`, and faults are gRPC errors. `src/signer/convert.rs` validates every field (32-byte hash, known phase, request present). | Unit: round trip with identical signing bytes; malformed requests are rejected |
+| Signer process | `miraset-chain signer --genesis --key-file --signing-guard --socket [--init-signing-guard]` (`src/signer/process.rs`, `server.rs`). It owns key and guard through `GuardedSigner` and never creates a guard implicitly. A fault halts it: it signs nothing more, exits with code 3, and **stops even with connected clients after a 2s grace**. Without that bound, tonic's graceful shutdown would wait for every client to disconnect. A stale socket file is replaced, and anything else at that path is refused. | Unit: peer-uid rule, socket replacement and mode. Integration: `tests/remote_signer.rs`. E2E: the signer refuses to start without a guard. |
+| Remote client | `src/signer/client.rs` `RemoteSigner` implements `ValidatorSigner`: <ul><li>checks the chain id and an optional `--validator-pubkey` pin at connect;</li><li>verifies **every** returned signature against the signer's key over the exact signing bytes;</li><li>sets a 2s deadline per request;</li><li>retries connecting for 10s at startup only.</li></ul> A failure halts the validator (exit 3, `/health` 503). | Unit: identity checks, signature verification. Integration: remote signatures are identical to local ones; refusals cross the wire; **4 concurrent clients never get two votes signed for one view** (K3 on one host); a fault halts the server; a wrong pin or chain is rejected; a validator with a remote signer finalizes. E2E: real `signer` + `--remote-signer` validator finalizes, the validator is given no key path, and the guard is recorded in the signer. **SIGKILLing the signer** gives the validator `/health` 503 and exit 3, and restarting both resumes the chain. A signer for another key is refused (exit 1). |
+| Node-side layer | With `--remote-signer` the node still opens its own `--signing-guard` for `GuardedNetwork`, as the second layer. | (existing 8.3.2 tests) |
+
+**Threat status:**
+- **K1** (the key in the node process): closed when the validator runs with `--remote-signer`.
+  The node process has no key, and the signer runs as its own hardened process.
+- **K3** (double signing): closed **on one host**. Any number of validator processes can share
+  one signer, which serializes requests and keeps one guard. Cross-host sharing needs the mTLS
+  transport (8.4.1).
+- **K5** (rotation): still deferred (D6, 8.3.3).
+- **Devnet:** decision 3 keeps the in-process `GuardedSigner`, so no signer containers.
 

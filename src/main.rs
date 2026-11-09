@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
+use hotstuff_rs::types::signer::ValidatorSigner;
 use miraset_chain::consensus::{
     GuardIdentity, GuardedNetwork, GuardedSigner, OpenMode, SafetyHalt, SigningGuard,
 };
@@ -13,6 +14,10 @@ use miraset_chain::node::{
 };
 use miraset_chain::process_hardening;
 use miraset_chain::rpc::start_rpc_server;
+use miraset_chain::signer::process::{
+    SIGNER_HALT_EXIT_CODE, SignerExit, SignerOptions, run_signer,
+};
+use miraset_chain::signer::{RemoteSigner, RemoteSignerExpectation};
 use miraset_chain::storage::{MemKVStore, RedbKVStore, read_recovery_metadata};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -25,6 +30,9 @@ type CliResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 const SAFETY_HALT_GRACE: Duration = Duration::from_secs(5);
 const SAFETY_HALT_POLL: Duration = Duration::from_millis(200);
 const SIGNING_GUARD_FILE: &str = "signing-guard.redb";
+/// How long a validator waits for its remote signer to come up at startup.
+const SIGNER_CONNECT_WINDOW: Duration = Duration::from_secs(10);
+const SIGNER_CONNECT_RETRY: Duration = Duration::from_millis(250);
 /// Distinct exit status for a consensus safety halt (TODO 8.3.2).
 const SAFETY_HALT_EXIT_CODE: i32 = 3;
 
@@ -45,9 +53,19 @@ struct Cli {
     #[arg(long)]
     genesis: Option<PathBuf>,
 
-    /// Hex-encoded Ed25519 validator secret key file (mode 0600); required with --genesis
-    #[arg(long)]
+    /// Hex-encoded Ed25519 validator secret key file (mode 0600). With --genesis, exactly one
+    /// of --key-file or --remote-signer is required
+    #[arg(long, conflicts_with = "remote_signer")]
     key_file: Option<PathBuf>,
+
+    /// Unix socket of a `miraset-chain signer` process holding the validator key; the node then
+    /// holds no key (key custody D3)
+    #[arg(long)]
+    remote_signer: Option<PathBuf>,
+
+    /// Hex public key the remote signer must serve (optional pin)
+    #[arg(long, requires = "remote_signer")]
+    validator_pubkey: Option<String>,
 
     /// Directory holding the node's Redb database
     #[arg(long, default_value = ".miraset_data")]
@@ -115,6 +133,22 @@ enum Commands {
         #[arg(long)]
         nonce: u64,
     },
+    /// Run a validator signer holding the key and its slashing-protection guard, serving
+    /// gRPC on a Unix socket (only the same uid may connect)
+    Signer {
+        #[arg(long)]
+        genesis: PathBuf,
+        #[arg(long)]
+        key_file: PathBuf,
+        /// Slashing-protection guard file; keep it with the key, never delete it after signing
+        #[arg(long)]
+        signing_guard: PathBuf,
+        #[arg(long)]
+        socket: PathBuf,
+        /// Create the guard on first start. Only safe if this key has never signed on this chain
+        #[arg(long, default_value_t = false)]
+        init_signing_guard: bool,
+    },
     /// Run the interactive in-memory devnet demo
     Demo,
 }
@@ -153,6 +187,34 @@ async fn main() -> CliResult {
             fee,
             nonce,
         }) => sign_transfer(&key_file, &to, amount, fee, nonce),
+        Some(Commands::Signer {
+            genesis,
+            key_file,
+            signing_guard,
+            socket,
+            init_signing_guard,
+        }) => {
+            let options = SignerOptions {
+                genesis,
+                key_file,
+                signing_guard,
+                socket,
+                init_signing_guard,
+            };
+            let shutdown = async {
+                let _ = shutdown_signal().await;
+            };
+            match run_signer(options, shutdown).await {
+                Ok(()) => Ok(()),
+                Err(SignerExit::Error(e)) => Err(e.into()),
+                Err(SignerExit::Halted(reason)) => {
+                    eprintln!(
+                        "signer safety halt: {reason}; exiting with code {SIGNER_HALT_EXIT_CODE}"
+                    );
+                    std::process::exit(SIGNER_HALT_EXIT_CODE);
+                }
+            }
+        }
         Some(Commands::Demo) => {
             run_devnet_demo().await;
             Ok(())
@@ -208,12 +270,8 @@ fn sign_transfer(key_file: &Path, to: &str, amount: u64, fee: u64, nonce: u64) -
 /// Run a persistent validator from a genesis file until SIGINT or SIGTERM.
 async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     let genesis = GenesisConfig::load(genesis_path)?;
-    let key_path = cli
-        .key_file
-        .as_deref()
-        .ok_or("--key-file is required when running with --genesis")?;
-    let signing_key: SigningKey = devnet::read_key_file(key_path)?;
-    let vk = signing_key.verifying_key();
+    let node_key = load_node_key(cli, genesis.chain_id).await?;
+    let vk = node_key.public_key();
     if !genesis.is_validator(&vk) {
         return Err(format!(
             "key {} is not a validator in {}",
@@ -244,9 +302,13 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     // Outermost layer: TcpNetwork delivers self-addressed votes inside `send`.
     let network = GuardedNetwork::new(tcp, guard.clone(), safety_halt.clone());
 
-    // Key custody D1+D2: the key moves into the signer, which checks the guard before signing
-    // a phase vote. GuardedNetwork shares the guard as a second layer.
-    let signer = GuardedSigner::new(signing_key, guard)?;
+    // Key custody D1-D3: a local key moves into a GuardedSigner that checks the guard before
+    // signing a phase vote; a remote signer holds key and guard in its own process. Either way
+    // GuardedNetwork keeps this node's guard as a second layer.
+    let signer: Arc<dyn ValidatorSigner> = match node_key {
+        NodeKey::Local(signing_key) => GuardedSigner::new(*signing_key, guard)?,
+        NodeKey::Remote(remote) => remote,
+    };
     let mut config = NodeConfig::devnet_with_signer(signer);
     config.chain_id = genesis.chain_id;
     config.expected_genesis_hash = Some(genesis_hash);
@@ -295,6 +357,66 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     drop(runtime);
     println!("Shutdown complete.");
     outcome
+}
+
+/// Where this validator's signatures come from.
+enum NodeKey {
+    Local(Box<SigningKey>),
+    Remote(Arc<RemoteSigner>),
+}
+
+impl NodeKey {
+    fn public_key(&self) -> ed25519_dalek::VerifyingKey {
+        match self {
+            NodeKey::Local(key) => key.verifying_key(),
+            NodeKey::Remote(remote) => remote.public_key(),
+        }
+    }
+}
+
+async fn load_node_key(cli: &Cli, chain_id: u64) -> CliResult<NodeKey> {
+    match (&cli.key_file, &cli.remote_signer) {
+        (Some(key_path), None) => Ok(NodeKey::Local(Box::new(devnet::read_key_file(key_path)?))),
+        (None, Some(socket)) => {
+            let validator = cli
+                .validator_pubkey
+                .as_deref()
+                .map(parse_pubkey)
+                .transpose()?;
+            let expect = RemoteSignerExpectation {
+                chain_id,
+                validator,
+            };
+            let socket = socket.clone();
+            // The client blocks on its own runtime; keep it off this async runtime's workers.
+            let remote =
+                tokio::task::spawn_blocking(move || connect_signer(&socket, &expect)).await??;
+            Ok(NodeKey::Remote(Arc::new(remote)))
+        }
+        _ => Err("with --genesis, pass exactly one of --key-file or --remote-signer".into()),
+    }
+}
+
+/// Connect to the signer, retrying briefly: an orchestrator may start node and signer together.
+/// An identity mismatch is not retried.
+fn connect_signer(socket: &Path, expect: &RemoteSignerExpectation) -> Result<RemoteSigner, String> {
+    let deadline = std::time::Instant::now() + SIGNER_CONNECT_WINDOW;
+    loop {
+        match RemoteSigner::connect(socket, expect) {
+            Ok(remote) => return Ok(remote),
+            Err(e) if e.starts_with("cannot connect") && std::time::Instant::now() < deadline => {
+                std::thread::sleep(SIGNER_CONNECT_RETRY);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn parse_pubkey(hex_key: &str) -> CliResult<[u8; 32]> {
+    hex::decode(hex_key.trim())
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| "--validator-pubkey must be 32 hex-encoded bytes".into())
 }
 
 /// Open the vote signing guard (TODO 8.3.2). A non-empty chain database requires an existing

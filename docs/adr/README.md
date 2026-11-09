@@ -24,8 +24,9 @@ Design proposals:
 - [Vote safety state persistence](proposal-vote-safety-state.md) (TODO 8.3.2, PRD R07) —
   design approved by the project owner 2026-11-09 (§10); implementation in progress. Not a
   numbered ADR until the register is recovered.
-- [Validator key custody](proposal-validator-key-custody.md) (TODO 8.3.4, PRD R12) — Proposed,
-  awaiting approval (§7 lists the decisions).
+- [Validator key custody](proposal-validator-key-custody.md) (TODO 8.3.4, PRD R12): decisions
+  1–4 approved 2026-11-09; D1–D5 implemented for one host (§9–§11). A cross-host signer depends
+  on 8.4.1.
 
 Do not assign an engineering number until the original register is recovered
 and the next unused number is verified. Do not write synthetic Accepted records

@@ -1,0 +1,67 @@
+// Remote validator signer (TODO 8.3.4, docs/adr/proposal-validator-key-custody.md D3).
+//
+// Purpose-bound: the signer receives typed requests, never raw bytes. It re-encodes each request
+// exactly as hotstuff_rs signs it (vendored patch #9), applies slashing protection to phase
+// votes, and returns either a signature or an explicit refusal. Faults are gRPC errors.
+syntax = "proto3";
+
+package miraset.signer.v1;
+
+service ValidatorSigner {
+  // Identity of the key this signer serves; the node checks it against genesis.
+  rpc GetPublicKey(GetPublicKeyRequest) returns (GetPublicKeyResponse);
+  rpc Sign(SignRequest) returns (SignResponse);
+}
+
+message GetPublicKeyRequest {}
+
+message GetPublicKeyResponse {
+  // 32-byte Ed25519 verifying key.
+  bytes public_key = 1;
+  // Chain the signer (and its slashing-protection guard) is bound to.
+  uint64 chain_id = 2;
+}
+
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_GENERIC = 1;
+  PHASE_PREPARE = 2;
+  PHASE_PRECOMMIT = 3;
+  PHASE_COMMIT = 4;
+  PHASE_DECIDE = 5;
+}
+
+message PhaseVote {
+  uint64 chain_id = 1;
+  uint64 view = 2;
+  // 32-byte block hash.
+  bytes block = 3;
+  Phase phase = 4;
+}
+
+message TimeoutVote {
+  uint64 chain_id = 1;
+  uint64 view = 2;
+}
+
+message AdvertiseBlock {
+  uint64 chain_id = 1;
+  uint64 highest_committed_block_height = 2;
+}
+
+message SignRequest {
+  oneof request {
+    PhaseVote phase_vote = 1;
+    TimeoutVote timeout_vote = 2;
+    AdvertiseBlock advertise_block = 3;
+  }
+}
+
+message SignResponse {
+  oneof result {
+    // 64-byte Ed25519 signature.
+    bytes signature = 1;
+    // Deliberate refusal (e.g. stale or conflicting phase vote). The node skips the message.
+    string refused = 2;
+  }
+}
