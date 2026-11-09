@@ -48,7 +48,6 @@ progress within the window (liveness), or a node more than `--max-lag` blocks be
 
 ## Known limitations
 
-- Each idle node uses about 2 CPU cores: `hotstuff_rs` v0.4.0's block-sync server polls with
-  `try_recv` + `yield_now`, and its main loop spins when a view deadline has already passed. Fixing
-  this requires patching the library.
+- Each node uses roughly 0.2 CPU cores, mostly the consensus thread producing blocks. Upstream
+  `hotstuff_rs` busy loops (event bus, block-sync server) are patched in `lib/hotstuff_rs`.
 - The validator set is static; reconfiguration is disabled (TODO 8.3.3).

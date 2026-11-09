@@ -5,7 +5,7 @@ use std::{
     mem,
     sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError},
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use ed25519_dalek::VerifyingKey;
@@ -41,7 +41,7 @@ pub(crate) fn start_polling<N: Network + 'static>(
     let (to_sync_request_receiver, sync_request_receiver) = mpsc::channel();
     let (to_sync_response_receiver, sync_response_receiver) = mpsc::channel();
 
-    let poller_thread = thread::spawn(move || loop {
+    let poller_thread = thread::Builder::new().name("hs-poller".to_string()).spawn(move || loop {
         match shutdown_signal.try_recv() {
             Ok(()) => return,
             Err(TryRecvError::Empty) => (),
@@ -67,7 +67,8 @@ pub(crate) fn start_polling<N: Network + 'static>(
         } else {
             thread::yield_now()
         }
-    });
+    })
+    .expect("failed to spawn the poller thread");
     (
         poller_thread,
         progress_msg_receiver,
@@ -413,15 +414,19 @@ impl BlockSyncServerStub {
     }
 
     /// Receive a [BlockSyncRequest] if available, else return [BlockSyncRequestReceiveError::NotAvailable].
+    ///
+    /// MIRASET PATCH: waits up to `timeout` for a request (upstream used `try_recv`, and its only
+    /// caller looped with `yield_now`, spinning a full core).
     pub(crate) fn recv_request(
         &self,
+        timeout: Duration,
     ) -> Result<(VerifyingKey, BlockSyncRequest), BlockSyncRequestReceiveError> {
-        match self.requests.try_recv() {
+        match self.requests.recv_timeout(timeout) {
             Ok((origin, request)) => Ok((origin, request)),
             // Safety: the sync server thread (the only caller of this function) shuts down before the poller thread
             // (the sender side of this channel), so we will never be disconnected at this point.
-            Err(TryRecvError::Disconnected) => Err(BlockSyncRequestReceiveError::Disconnected),
-            Err(TryRecvError::Empty) => Err(BlockSyncRequestReceiveError::NotAvailable),
+            Err(RecvTimeoutError::Disconnected) => Err(BlockSyncRequestReceiveError::Disconnected),
+            Err(RecvTimeoutError::Timeout) => Err(BlockSyncRequestReceiveError::NotAvailable),
         }
     }
 }

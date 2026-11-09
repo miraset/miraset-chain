@@ -450,8 +450,12 @@ fn test_four_validator_fault_bound_and_partition_healing() {
         init_genesis(kv.clone(), &validators, &initial_accounts);
         let net = ChannelNetwork::new(vk, hub.clone());
         let pool = Mempool::new();
-        // hotstuff_rs truncates max_view_time to whole seconds; keep the 1s devnet default.
-        let config = NodeConfig::devnet(kp);
+        // Sub-second view time: regression for the vendored pacemaker patch (upstream truncated
+        // 350ms to 0s, so no view ever completed and nothing committed).
+        let config = NodeConfig {
+            max_view_time: Duration::from_millis(350),
+            ..NodeConfig::devnet(kp)
+        };
         nodes.push(MirasetNode::start(config, kv, net, pool));
     }
 

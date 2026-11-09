@@ -149,16 +149,17 @@ pub trait KVGet {
         match data_len {
             None => Ok(None),
             Some(len) => {
-                let mut data = (0..len.int()).map(|i| self.block_datum(block, i));
-                if let None = data.find(|datum| datum.is_none()) {
-                    Ok(Some(Data::new(data.map(|datum| datum.unwrap()).collect())))
-                } else {
-                    Err(KVGetError::ValueExpectedButNotFound {
+                // MIRASET PATCH: upstream ran `find` on this iterator and then collected the
+                // same (exhausted) iterator, so every block read from the KV store had empty data.
+                (0..len.int())
+                    .map(|i| self.block_datum(block, i))
+                    .collect::<Option<Vec<Datum>>>()
+                    .map(|data| Some(Data::new(data)))
+                    .ok_or(KVGetError::ValueExpectedButNotFound {
                         key: Key::BlockData {
                             block: block.clone(),
                         },
                     })
-                }
             }
         }
     }

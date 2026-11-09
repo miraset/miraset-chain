@@ -123,7 +123,10 @@ impl<N: Network + 'static, K: KVStore, A: App<K> + 'static> Algorithm<N, K, A> {
 
     /// Start an instance of the algorithm thread.
     pub(crate) fn start(self) -> JoinHandle<()> {
-        thread::spawn(move || self.execute())
+        thread::Builder::new()
+            .name("hs-algorithm".to_string())
+            .spawn(move || self.execute())
+            .expect("failed to spawn the algorithm thread")
     }
 
     fn execute(mut self) {

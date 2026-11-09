@@ -84,7 +84,7 @@ impl<N: Network + 'static, K: KVStore> BlockSyncServer<N, K> {
     }
 
     pub(crate) fn start(mut self) -> JoinHandle<()> {
-        thread::spawn(move || loop {
+        thread::Builder::new().name("hs-sync-server".to_string()).spawn(move || loop {
             match self.shutdown_signal.try_recv() {
                 Ok(()) => return,
                 Err(TryRecvError::Empty) => (),
@@ -101,7 +101,7 @@ impl<N: Network + 'static, K: KVStore> BlockSyncServer<N, K> {
                     limit,
                     chain_id,
                 },
-            )) = self.receiver.recv_request()
+            )) = self.receiver.recv_request(self.request_wait())
             {
                 // Ignore requests whose chain ID does not match ours.
                 if chain_id != self.config.chain_id {
@@ -189,6 +189,17 @@ impl<N: Network + 'static, K: KVStore> BlockSyncServer<N, K> {
 
             thread::yield_now();
         })
+        .expect("failed to spawn the block sync server thread")
+    }
+
+    /// MIRASET PATCH: wait for sync requests until the next advertisement is due (capped so
+    /// shutdown stays responsive) instead of spinning on `try_recv`.
+    fn request_wait(&self) -> Duration {
+        const MAX_REQUEST_WAIT: Duration = Duration::from_millis(10);
+        self.config
+            .advertise_time
+            .saturating_sub(self.last_advertisement.elapsed())
+            .min(MAX_REQUEST_WAIT)
     }
 }
 

@@ -1,4 +1,5 @@
-pub mod kv_compat;
+#[cfg(test)]
+mod block_data_tests;
 pub mod mem;
 pub mod redb;
 

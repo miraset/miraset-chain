@@ -22,3 +22,8 @@ rand = "0.7"
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 sha2 = "0.10"
 typed-builder = "0.16.2"
+# MIRASET PATCH: silence upstream dead-code and lifetime-syntax warnings in the vendored copy so
+# they do not drown out miraset-chain's own `cargo clippy -D warnings` output.
+[lints.rust]
+dead_code = "allow"
+mismatched_lifetime_syntaxes = "allow"

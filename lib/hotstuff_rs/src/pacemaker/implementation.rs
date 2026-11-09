@@ -524,9 +524,10 @@ impl PacemakerState {
 
             // Add timeouts for all remaining views in the epoch of start_view.
             for view in start_view.int()..=epoch_view {
-                let time_to_view_deadline = Duration::from_secs(
-                    config.max_view_time.as_secs() * (view - start_view.int() + 1),
-                );
+                // MIRASET PATCH: upstream used `max_view_time.as_secs()`, truncating sub-second
+                // values (e.g. 350ms -> 0, so every view timed out immediately).
+                let time_to_view_deadline =
+                    view_deadline_offset(config.max_view_time, view - start_view.int() + 1);
                 timeouts.insert(ViewNumber::new(view), start_time + time_to_view_deadline);
             }
 
@@ -560,9 +561,9 @@ impl PacemakerState {
 
         // Populate `self.timeouts` with the timeouts of the views in the newly-entered epoch.
         for view in epoch_start_view.int()..=epoch_change_view {
-            let time_to_view_deadline = Duration::from_secs(
-                config.max_view_time.as_secs() * (view - epoch_start_view.int() + 1),
-            );
+            // MIRASET PATCH: exact Duration arithmetic (see `view_deadline_offset`).
+            let time_to_view_deadline =
+                view_deadline_offset(config.max_view_time, view - epoch_start_view.int() + 1);
             self.timeouts.insert(
                 ViewNumber::new(view),
                 epoch_start_time + time_to_view_deadline,
@@ -705,6 +706,15 @@ pub fn select_leader(view: ViewNumber, validator_set: &ValidatorSet) -> Verifyin
 
     // Safety: If index not found, panic. This should never happen.
     unreachable!("Cannot select a leader: index not found!")
+}
+
+/// MIRASET PATCH: offset of the `nth` (1-based) view deadline from the epoch start, computed with
+/// exact `Duration` arithmetic and saturating instead of overflowing.
+fn view_deadline_offset(max_view_time: Duration, nth: u64) -> Duration {
+    u32::try_from(nth)
+        .ok()
+        .and_then(|n| max_view_time.checked_mul(n))
+        .unwrap_or(Duration::MAX)
 }
 
 /// Check whether `view` is an epoch-change view given the configured `epoch_length`.

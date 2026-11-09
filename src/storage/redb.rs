@@ -172,16 +172,6 @@ impl KVGet for RedbSnapshot {
         let val = table.get(key).ok()??;
         Some(val.value().to_vec())
     }
-
-    fn block_data(
-        &self,
-        block: &hotstuff_rs::types::data_types::CryptoHash,
-    ) -> Result<
-        Option<hotstuff_rs::types::data_types::Data>,
-        hotstuff_rs::block_tree::pluggables::KVGetError,
-    > {
-        super::kv_compat::read_block_data(self, block)
-    }
 }
 
 /// Durable, crash-consistent embedded KVStore powered by Redb.
@@ -560,16 +550,6 @@ impl KVGet for RedbKVStore {
         let table = read_txn.open_table(BLOCKTREE_TABLE).ok()?;
         let val = table.get(key).ok()??;
         Some(val.value().to_vec())
-    }
-
-    fn block_data(
-        &self,
-        block: &hotstuff_rs::types::data_types::CryptoHash,
-    ) -> Result<
-        Option<hotstuff_rs::types::data_types::Data>,
-        hotstuff_rs::block_tree::pluggables::KVGetError,
-    > {
-        super::kv_compat::read_block_data(self, block)
     }
 }
 

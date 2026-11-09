@@ -22,12 +22,16 @@
 //!    the default logging handlers defined in [logging](crate::logging).
 
 use std::{
-    sync::mpsc::{Receiver, TryRecvError},
+    sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError},
     thread,
     thread::JoinHandle,
+    time::Duration,
 };
 
 use crate::{events::*, logging::Logger};
+
+/// MIRASET PATCH: bounded wait for events; also bounds shutdown latency.
+const EVENT_BUS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Pointer to a handler closure, parametrised by the argument (for our use case, event) type.
 pub(crate) type HandlerPtr<T> = Box<dyn Fn(&T) + Send>;
@@ -478,7 +482,9 @@ pub(crate) fn start_event_bus(
     event_subscriber: Receiver<Event>,
     shutdown_signal: Receiver<()>,
 ) -> JoinHandle<()> {
-    thread::spawn(move || loop {
+    thread::Builder::new()
+        .name("hs-event-bus".to_string())
+        .spawn(move || loop {
         match shutdown_signal.try_recv() {
             Ok(()) => return,
             Err(TryRecvError::Empty) => (),
@@ -487,10 +493,14 @@ pub(crate) fn start_event_bus(
             }
         }
 
-        if let Ok(event) = event_subscriber.try_recv() {
-            (&event_handlers).fire_handlers(event)
-        } else if let Err(TryRecvError::Disconnected) = event_subscriber.try_recv() {
-            panic!("The algorithm thread (event publisher) disconnected from the channel")
+        // MIRASET PATCH: upstream polled with `try_recv` and no wait, spinning a full core.
+        match event_subscriber.recv_timeout(EVENT_BUS_POLL_INTERVAL) {
+            Ok(event) => (&event_handlers).fire_handlers(event),
+            Err(RecvTimeoutError::Timeout) => (),
+            Err(RecvTimeoutError::Disconnected) => {
+                panic!("The algorithm thread (event publisher) disconnected from the channel")
+            }
         }
     })
+    .expect("failed to spawn the event bus thread")
 }

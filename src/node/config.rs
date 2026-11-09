@@ -3,6 +3,9 @@ use hotstuff_rs::replica::Configuration;
 use hotstuff_rs::types::data_types::{BufferSize, ChainID, EpochLength};
 use std::time::Duration;
 
+/// Lower bound that leaves room for propose/vote round trips even on a local devnet.
+const MIN_MAX_VIEW_TIME: Duration = Duration::from_millis(100);
+
 /// Configuration options for a MIRASET L1 node.
 ///
 /// Per protocol ADR-0013 (Accepted) and ADR-0016 (Proposed), HotStuff consensus
@@ -65,11 +68,11 @@ impl NodeConfig {
         if self.progress_msg_buffer_capacity == 0 {
             return Err("progress_msg_buffer_capacity must be non-zero");
         }
-        // hotstuff_rs v0.4.0 derives pacemaker deadlines from `max_view_time.as_secs()`,
-        // truncating sub-second precision. A sub-second (or fractional) value would
-        // silently become a zero or shorter timeout and stall liveness, so fail closed.
-        if self.max_view_time.as_secs() == 0 || self.max_view_time.subsec_nanos() != 0 {
-            return Err("max_view_time must be a whole number of seconds (>= 1s)");
+        // A zero view time makes every view time out immediately, stalling liveness.
+        // (Sub-second values are exact since the vendored pacemaker patch; see
+        // lib/hotstuff_rs/MIRASET_PATCHES.md.)
+        if self.max_view_time < MIN_MAX_VIEW_TIME {
+            return Err("max_view_time must be at least 100ms");
         }
         Ok(())
     }
@@ -110,15 +113,11 @@ mod tests {
     }
 
     #[test]
-    fn test_node_config_rejects_sub_second_max_view_time() {
+    fn test_node_config_bounds_max_view_time() {
         let key = SigningKey::from_bytes(&[1u8; 32]);
         let base = NodeConfig::devnet(key);
 
-        for invalid in [
-            Duration::ZERO,
-            Duration::from_millis(350),
-            Duration::from_millis(1500),
-        ] {
+        for invalid in [Duration::ZERO, Duration::from_millis(99)] {
             let cfg = NodeConfig {
                 max_view_time: invalid,
                 ..base.clone()
@@ -126,10 +125,12 @@ mod tests {
             assert!(cfg.validate().is_err(), "{invalid:?} should be rejected");
         }
 
-        let cfg = NodeConfig {
-            max_view_time: Duration::from_secs(2),
-            ..base
-        };
-        assert!(cfg.validate().is_ok());
+        for valid in [Duration::from_millis(350), Duration::from_millis(1500)] {
+            let cfg = NodeConfig {
+                max_view_time: valid,
+                ..base.clone()
+            };
+            assert!(cfg.validate().is_ok(), "{valid:?} should be accepted");
+        }
     }
 }
