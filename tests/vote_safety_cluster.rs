@@ -24,7 +24,9 @@ use hotstuff_rs::networking::network::Network;
 use hotstuff_rs::types::data_types::{BlockHeight, CryptoHash};
 use hotstuff_rs::types::update_sets::ValidatorSetUpdates;
 use hotstuff_rs::types::validator_set::{ValidatorSet, VerifyingKey};
-use miraset_chain::consensus::{GuardIdentity, GuardedNetwork, OpenMode, SafetyHalt, SigningGuard};
+use miraset_chain::consensus::{
+    GuardIdentity, GuardedNetwork, GuardedSigner, OpenMode, SafetyHalt, SigningGuard,
+};
 use miraset_chain::core::types::Transaction;
 use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{NetworkRuntime, TcpNetwork};
@@ -104,6 +106,7 @@ type GuardedNode = MirasetNode<RedbKVStore, GuardedNetwork<VoteTap>>;
 struct RunningNode {
     node: GuardedNode,
     network: GuardedNetwork<VoteTap>,
+    signer: Arc<GuardedSigner>,
     // Drop the replica before its transport.
     _runtime: NetworkRuntime,
 }
@@ -221,9 +224,11 @@ impl Cluster {
             signer: i,
             log: Arc::clone(&self.log),
         };
-        let network = GuardedNetwork::new(tap, guard, halt.clone());
+        let network = GuardedNetwork::new(tap, guard.clone(), halt.clone());
+        // Key custody D2: the signer checks the guard before signing; the network is layer two.
+        let signer = GuardedSigner::new(key, guard).expect("guard matches key");
 
-        let mut config = NodeConfig::devnet(key);
+        let mut config = NodeConfig::devnet_with_signer(signer.clone());
         config.max_view_time = VIEW_TIME;
         config.safety_halt = halt;
         let node = MirasetNode::try_start(config, store, network.clone(), Mempool::new())
@@ -231,6 +236,7 @@ impl Cluster {
         self.nodes[i] = Some(RunningNode {
             node,
             network,
+            signer,
             _runtime: runtime,
         });
     }
@@ -239,8 +245,13 @@ impl Cluster {
         self.nodes[i].take().expect("node running").network
     }
 
-    fn network(&self, i: usize) -> &GuardedNetwork<VoteTap> {
-        &self.nodes[i].as_ref().expect("node running").network
+    /// Votes refused by either guard layer (signer first, network second) on validator `i`.
+    fn refused_votes(&self, i: usize) -> u64 {
+        let running = self.nodes[i].as_ref().expect("node running");
+        running.signer.stale_refused()
+            + running.signer.conflicting_refused()
+            + running.network.stale_votes_dropped()
+            + running.network.conflicting_votes_refused()
     }
 
     fn node(&self, i: usize) -> &GuardedNode {
@@ -421,12 +432,7 @@ fn test_cluster_restore_to_older_chain_data_is_refused_by_guards() {
         "progress resumes after restore"
     );
 
-    let refused: u64 = (0..VALIDATORS)
-        .map(|i| {
-            let network = cluster.network(i);
-            network.stale_votes_dropped() + network.conflicting_votes_refused()
-        })
-        .sum();
+    let refused: u64 = (0..VALIDATORS).map(|i| cluster.refused_votes(i)).sum();
     assert!(
         refused > 0,
         "restored validators never tried to re-sign old views"

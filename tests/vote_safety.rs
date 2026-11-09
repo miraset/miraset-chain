@@ -333,3 +333,56 @@ async fn test_chain_store_write_failure_halts_visibly() {
     // it. The validator binary exits the process instead (see `main.rs`), so do the same here.
     std::mem::forget(node);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Purpose-bound signer (key custody D1, vendored patch #9).
+// ---------------------------------------------------------------------------------------------
+
+use hotstuff_rs::types::data_types::SignatureBytes;
+use hotstuff_rs::types::signer::{LocalKeySigner, SignError, SignRequest, ValidatorSigner};
+
+/// Signs everything except phase votes, which it refuses.
+struct RefusePhaseVotes(LocalKeySigner);
+
+impl ValidatorSigner for RefusePhaseVotes {
+    fn public_key(&self) -> VerifyingKey {
+        self.0.public_key()
+    }
+
+    fn sign(&self, request: &SignRequest) -> Result<SignatureBytes, SignError> {
+        match request {
+            SignRequest::PhaseVote { .. } => Err(SignError::Refused("test".into())),
+            _ => self.0.sign(request),
+        }
+    }
+}
+
+/// A refusing signer means no phase vote leaves the replica, and the replica keeps running.
+#[test]
+fn test_signer_refusal_sends_no_phase_vote_and_does_not_halt() {
+    let keypair = SigningKey::from_bytes(&[53u8; 32]);
+    let vk = keypair.verifying_key();
+    let store = MemKVStore::new();
+    init_genesis(store.clone(), &[(vk, 100)], &ACCOUNTS);
+    let halt = SafetyHalt::new();
+    let tap = VoteTap::new(vk);
+
+    let mut config =
+        NodeConfig::devnet_with_signer(Arc::new(RefusePhaseVotes(LocalKeySigner::new(keypair))));
+    config.max_view_time = FAST_VIEW;
+    config.safety_halt = halt.clone();
+    let node = MirasetNode::start(config, store, tap.clone(), Mempool::new());
+
+    thread::sleep(FAST_VIEW * 10);
+    assert!(
+        tap.sent_views().is_empty(),
+        "phase votes left: {:?}",
+        tap.sent_views()
+    );
+    assert_eq!(
+        node.highest_committed_height(),
+        None,
+        "no votes, no commits"
+    );
+    assert!(!halt.is_halted());
+}

@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
-use miraset_chain::consensus::{GuardIdentity, GuardedNetwork, OpenMode, SafetyHalt, SigningGuard};
+use miraset_chain::consensus::{
+    GuardIdentity, GuardedNetwork, GuardedSigner, OpenMode, SafetyHalt, SigningGuard,
+};
 use miraset_chain::core::types::{ComputeReceipt, Transaction};
 use miraset_chain::devnet::{self, DevnetSpec};
 use miraset_chain::mempool::Mempool;
@@ -240,9 +242,12 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     let peers = genesis.peer_addresses(&vk)?;
     let (tcp, runtime) = TcpNetwork::bind_with_hosts(vk, cli.p2p_addr, peers)?;
     // Outermost layer: TcpNetwork delivers self-addressed votes inside `send`.
-    let network = GuardedNetwork::new(tcp, guard, safety_halt.clone());
+    let network = GuardedNetwork::new(tcp, guard.clone(), safety_halt.clone());
 
-    let mut config = NodeConfig::devnet(signing_key);
+    // Key custody D1+D2: the key moves into the signer, which checks the guard before signing
+    // a phase vote. GuardedNetwork shares the guard as a second layer.
+    let signer = GuardedSigner::new(signing_key, guard)?;
+    let mut config = NodeConfig::devnet_with_signer(signer);
     config.chain_id = genesis.chain_id;
     config.expected_genesis_hash = Some(genesis_hash);
     config.safety_halt = safety_halt.clone();

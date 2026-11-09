@@ -1,6 +1,8 @@
 use ed25519_dalek::SigningKey;
 use hotstuff_rs::replica::Configuration;
 use hotstuff_rs::types::data_types::{BufferSize, ChainID, EpochLength};
+use hotstuff_rs::types::signer::{LocalKeySigner, ValidatorSigner};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::consensus::SafetyHalt;
@@ -13,9 +15,10 @@ const MIN_MAX_VIEW_TIME: Duration = Duration::from_millis(100);
 /// Per protocol ADR-0013 (Accepted) and ADR-0016 (Proposed), HotStuff consensus
 /// in `miraset-chain` is isolated to experimental/devnet operation until a
 /// superseding settlement decision is explicitly accepted.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NodeConfig {
-    pub signing_key: SigningKey,
+    /// Validator signing authority (key custody D1). The node holds no `SigningKey` itself.
+    pub signer: Arc<dyn ValidatorSigner>,
     pub chain_id: u64,
     /// Must be `true` while ADR-0016 remains Proposed; prevents implicit production activation.
     pub experimental_mode: bool,
@@ -36,11 +39,30 @@ pub struct NodeConfig {
     pub safety_halt: SafetyHalt,
 }
 
+impl std::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field(
+                "validator",
+                &hex::encode(self.signer.public_key().to_bytes()),
+            )
+            .field("chain_id", &self.chain_id)
+            .field("experimental_mode", &self.experimental_mode)
+            .field("max_view_time", &self.max_view_time)
+            .finish_non_exhaustive()
+    }
+}
+
 impl NodeConfig {
-    /// Devnet configuration optimized for local testing and fast block times.
+    /// Devnet configuration with an unguarded in-process signer (tests and the in-memory demo).
     pub fn devnet(signing_key: SigningKey) -> Self {
+        Self::devnet_with_signer(Arc::new(LocalKeySigner::new(signing_key)))
+    }
+
+    /// Devnet configuration optimized for local testing and fast block times.
+    pub fn devnet_with_signer(signer: Arc<dyn ValidatorSigner>) -> Self {
         Self {
-            signing_key,
+            signer,
             chain_id: 1337,
             experimental_mode: true,
             block_sync_request_limit: 50,
@@ -88,7 +110,7 @@ impl NodeConfig {
         self.validate()
             .expect("invalid NodeConfig passed to to_hotstuff_config");
         Configuration::builder()
-            .me(self.signing_key.clone())
+            .signer(Arc::clone(&self.signer))
             .chain_id(ChainID::new(self.chain_id))
             .block_sync_request_limit(self.block_sync_request_limit)
             .block_sync_server_advertise_time(self.block_sync_server_advertise_time)

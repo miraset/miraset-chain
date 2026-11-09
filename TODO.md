@@ -165,7 +165,12 @@ Do not mark an item complete based only on a module existing. Record its accepta
     - `src/process_hardening.rs` disables core dumps and makes processes non-dumpable.
     - The devnet stores one key per volume; nodes mount only their own key read-only, and the faucet key goes only to the `faucet` tool.
     - Evidence: unit, integration and e2e tests, plus the Docker fault suite's key isolation step (§9 of the proposal).
-    - Open: D1–D3 (signer seam, slashing protection in the signer, remote signer), awaiting decisions 1–3.
+  - **D1+D2 delivered (2026-11-09, decisions 1 and 3 approved):**
+    - Vendored patch #9 gives purpose-bound signing (`SignRequest` / `ValidatorSigner`, no raw-bytes signing).
+    - `src/consensus/signer.rs` `GuardedSigner` checks the signing guard before a phase-vote signature exists.
+    - `NodeConfig` holds a signer, not a key.
+    - Evidence: library golden and identical-signature tests; unit tests; integration tests for refusal and failure; the cluster harness on `GuardedSigner`; e2e on the real binary; the Docker fault suite (proposal §10).
+    - Open: D3, the remote signer process, which closes K1 and K3. It waits for decision 2 (transport).
   - **Progress (2026-11-09, not complete):** the `[42;32]` fallback key is removed; `--genesis` mode requires `--key-file`, and `src/devnet.rs` creates key files with mode 0600 (`create_new`), refuses group/world-readable or malformed keys, and never prints secrets (`test_key_files_fail_closed`). Open: signer boundary/KMS design; the devnet compose mounts all keys in every container.
 
 ### 8.4. Networking, synchronization, RPC, and operations

@@ -318,7 +318,7 @@ fn test_e2e_wiped_chain_data_with_guard_kept_recovers_without_resigning() {
     wait_healthy_with_height(&v, &second, 1, RECOVERY_TIMEOUT);
     let log = second.log_text();
     assert!(
-        log.contains("dropped stale phase vote"),
+        log.contains("stale phase vote"),
         "guard should refuse votes for old views; log:\n{log}"
     );
     assert!(!log.contains("SAFETY HALT"), "{log}");

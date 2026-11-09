@@ -2,10 +2,12 @@
 
 pub mod guarded_network;
 pub mod safety_halt;
+pub mod signer;
 pub mod signing_guard;
 
 pub use guarded_network::GuardedNetwork;
 pub use safety_halt::SafetyHalt;
+pub use signer::GuardedSigner;
 pub use signing_guard::{
     Authorization, GuardIdentity, OpenMode, SigningGuard, SigningGuardError, VoteRecord,
 };

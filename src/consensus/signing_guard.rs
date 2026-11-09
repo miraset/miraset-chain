@@ -133,12 +133,17 @@ impl GuardIdentity {
 }
 
 impl VoteRecord {
-    fn from_vote(vote: &PhaseVote) -> Self {
+    /// Record for a vote that has not been signed yet (key custody D2: guard before signing).
+    pub fn from_parts(view: u64, block: [u8; 32], phase: Phase) -> Self {
         Self {
-            view: vote.view.int(),
-            block: vote.block.bytes(),
-            phase: phase_code(vote.phase),
+            view,
+            block,
+            phase: phase_code(phase),
         }
+    }
+
+    fn from_vote(vote: &PhaseVote) -> Self {
+        Self::from_parts(vote.view.int(), vote.block.bytes(), vote.phase)
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -225,14 +230,21 @@ impl SigningGuard {
 
     /// Decide whether `vote` may leave the node; on `Fresh` the record is durable on return.
     pub fn authorize(&self, vote: &PhaseVote) -> Result<Authorization, SigningGuardError> {
-        let found = vote.chain_id.int();
+        self.authorize_record(vote.chain_id.int(), VoteRecord::from_vote(vote))
+    }
+
+    /// Same decision as [`authorize`](Self::authorize), for a vote that is not signed yet.
+    pub fn authorize_record(
+        &self,
+        found: u64,
+        candidate: VoteRecord,
+    ) -> Result<Authorization, SigningGuardError> {
         if found != self.identity.chain_id {
             return Err(SigningGuardError::WrongChain {
                 found,
                 expected: self.identity.chain_id,
             });
         }
-        let candidate = VoteRecord::from_vote(vote);
         let mut state = self.lock()?;
         if let Some(last) = state.last {
             if candidate.view < last.view {

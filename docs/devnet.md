@@ -51,8 +51,10 @@ progress within the window (liveness), or a node more than `--max-lag` blocks be
   created from a different genesis (accounts or validator set).
 - Every `miraset-chain` process disables core dumps and marks itself non-dumpable on Linux, so
   other processes of the same user cannot read its memory or environment (key custody D4).
-- The key still lives in the validator process's memory. Separating it into a signer process is
-  key custody D1–D3, which awaits approval.
+- Each validator signs through `GuardedSigner`, the only holder of its key. It checks the signing
+  guard before it signs a phase vote, and it never signs arbitrary bytes (key custody D1+D2).
+  The key is still inside the validator process; a separate signer process (D3) awaits the
+  transport decision.
 - Each validator keeps a vote **signing guard** (`signing-guard.redb`) on its own `nodeN-guard`
   volume, separate from chain data `nodeN-data` (TODO 8.3.2). Deleting only `nodeN-data` is a
   safe resync: the guard stops the node re-signing views it already voted in. Never delete
