@@ -40,18 +40,16 @@ pub async fn run_signer(
         .last_signed_view()
         .map_err(|e| SignerExit::Error(e.to_string()))?;
     let listener = bind_socket(&options.socket).map_err(SignerExit::Error)?;
-    println!("MIRASET validator signer (experimental, ADR-0016 Proposed):");
-    println!(
-        "  Validator:     {}",
-        hex::encode(signer_public_key(&signer))
-    );
-    println!("  Chain ID:      {}", signer.chain_id());
-    println!(
-        "  Signing guard: {} (last signed view: {})",
+    // No structured fields: operators and tests read "last signed view: N)" at the line end.
+    tracing::info!(
+        "MIRASET validator signer (experimental, ADR-0016 Proposed); validator {}; chain {}; \
+         Socket: {}; signing guard {} (last signed view: {})",
+        hex::encode(signer_public_key(&signer)),
+        signer.chain_id(),
+        options.socket.display(),
         options.signing_guard.display(),
         last_view.map_or_else(|| "none".to_string(), |view| view.to_string())
     );
-    println!("  Socket:        {}", options.socket.display());
 
     let halt = SafetyHalt::new();
     let service = SignerService::new(signer, halt.clone());

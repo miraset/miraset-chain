@@ -20,7 +20,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::core::types::{ComputeReceipt, Transaction};
-use crate::node::MirasetNode;
+use crate::node::{AdmissionError, MirasetNode};
 
 /// Response for health check.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -30,6 +30,19 @@ pub struct HealthResponse {
     /// Present when consensus is halted for safety (TODO 8.3.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Response for `/livez` and `/readyz` (TODO 8.4.4).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ProbeResponse {
+    /// `alive`, `ready`, or the not-ready/halted reason label.
+    pub status: String,
+    /// Highest committed height this process has observed; absent before the first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_height: Option<u64>,
+    /// Seconds since this process last observed a commit; absent before the first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_commit_age_secs: Option<f64>,
 }
 
 /// Generic success or rejection status.
@@ -118,6 +131,9 @@ where
 
     Router::new()
         .route("/health", get(health_handler))
+        .route("/livez", get(livez_handler))
+        .route("/readyz", get(readyz_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/tx/submit", post(submit_tx_handler))
         .route("/receipt/submit", post(submit_receipt_handler))
         .route("/account/{address}", get(get_account_handler))
@@ -157,6 +173,73 @@ where
     )
 }
 
+/// Liveness: the process serves requests and consensus has not halted for safety.
+async fn livez_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    let halted = state.node.safety_halt().is_halted();
+    let (code, status) = if halted {
+        (StatusCode::SERVICE_UNAVAILABLE, "halted")
+    } else {
+        (StatusCode::OK, "alive")
+    };
+    (code, Json(probe(&state, status)))
+}
+
+/// Readiness to finalize: alive, not draining, and a block committed recently.
+async fn readyz_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    match state.node.readiness() {
+        Ok(()) => (StatusCode::OK, Json(probe(&state, "ready"))),
+        Err(reason) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(probe(&state, reason.as_str())),
+        ),
+    }
+}
+
+fn probe<K, N>(state: &RpcState<K, N>, status: &str) -> ProbeResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    let metrics = state.node.metrics();
+    let age = metrics.last_commit_age();
+    ProbeResponse {
+        status: status.to_string(),
+        committed_height: age.map(|_| metrics.committed_height()),
+        last_commit_age_secs: age.map(|d| d.as_secs_f64()),
+    }
+}
+
+/// Prometheus text exposition format 0.0.4.
+async fn metrics_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.node.render_metrics(),
+    )
+}
+
+/// Duplicates are client errors; refusals while draining tell the client to retry elsewhere.
+fn admission_status(err: AdmissionError) -> StatusCode {
+    match err {
+        AdmissionError::Duplicate => StatusCode::BAD_REQUEST,
+        AdmissionError::Draining => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
+
 async fn submit_tx_handler<K, N>(
     State(state): State<RpcState<K, N>>,
     Json(tx): Json<Transaction>,
@@ -173,7 +256,10 @@ where
                 tx.sender, tx.nonce
             ))),
         ),
-        Err(err) => (StatusCode::BAD_REQUEST, Json(ApiResponse::err(err))),
+        Err(err) => (
+            admission_status(err),
+            Json(ApiResponse::err(err.to_string())),
+        ),
     }
 }
 
@@ -193,7 +279,10 @@ where
                 receipt.task_id
             ))),
         ),
-        Err(err) => (StatusCode::BAD_REQUEST, Json(ApiResponse::err(err))),
+        Err(err) => (
+            admission_status(err),
+            Json(ApiResponse::err(err.to_string())),
+        ),
     }
 }
 

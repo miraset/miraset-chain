@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::consensus::SafetyHalt;
+use crate::observability::DEFAULT_READY_MAX_COMMIT_AGE;
 
 /// Lower bound that leaves room for propose/vote round trips even on a local devnet.
 const MIN_MAX_VIEW_TIME: Duration = Duration::from_millis(100);
@@ -37,6 +38,8 @@ pub struct NodeConfig {
     /// Shared consensus safety halt (TODO 8.3.2). Pass the same handle to the
     /// `GuardedNetwork` and chain store so `/health` reports their faults.
     pub safety_halt: SafetyHalt,
+    /// `/readyz` reports not ready when no block was committed within this time (TODO 8.4.4).
+    pub ready_max_commit_age: Duration,
 }
 
 impl std::fmt::Debug for NodeConfig {
@@ -77,6 +80,7 @@ impl NodeConfig {
             log_events: false,
             expected_genesis_hash: None,
             safety_halt: SafetyHalt::new(),
+            ready_max_commit_age: DEFAULT_READY_MAX_COMMIT_AGE,
         }
     }
 
@@ -101,6 +105,10 @@ impl NodeConfig {
         // lib/hotstuff_rs/MIRASET_PATCHES.md.)
         if self.max_view_time < MIN_MAX_VIEW_TIME {
             return Err("max_view_time must be at least 100ms");
+        }
+        // Finality needs several views, so a shorter window would flap between ready and not.
+        if self.ready_max_commit_age < self.max_view_time {
+            return Err("ready_max_commit_age must be at least max_view_time");
         }
         Ok(())
     }
@@ -160,5 +168,23 @@ mod tests {
             };
             assert!(cfg.validate().is_ok(), "{valid:?} should be accepted");
         }
+    }
+
+    #[test]
+    fn test_node_config_rejects_readiness_window_shorter_than_a_view() {
+        let base = NodeConfig::devnet(SigningKey::from_bytes(&[1u8; 32]));
+        let too_short = NodeConfig {
+            ready_max_commit_age: base.max_view_time - Duration::from_millis(1),
+            ..base.clone()
+        };
+        assert_eq!(
+            too_short.validate(),
+            Err("ready_max_commit_age must be at least max_view_time")
+        );
+        let equal = NodeConfig {
+            ready_max_commit_age: base.max_view_time,
+            ..base
+        };
+        assert!(equal.validate().is_ok());
     }
 }

@@ -72,7 +72,8 @@ impl GuardedSigner {
             Ok(Authorization::Fresh | Authorization::IdenticalResend) => Ok(()),
             Ok(Authorization::Stale { last_view }) => {
                 self.stale_refused.fetch_add(1, Ordering::Relaxed);
-                eprintln!(
+                tracing::warn!(
+                    target: crate::observability::logging::SAFETY_LOG_TARGET,
                     "signing guard: refused to sign stale phase vote for view {} (last signed view {last_view})",
                     view.int()
                 );
@@ -83,7 +84,8 @@ impl GuardedSigner {
             }
             Ok(Authorization::Conflicting { view }) => {
                 self.conflicting_refused.fetch_add(1, Ordering::Relaxed);
-                eprintln!(
+                tracing::error!(
+                    target: crate::observability::logging::SAFETY_LOG_TARGET,
                     "signing guard: REFUSED to sign conflicting phase vote for view {view} (already signed a different vote in this view)"
                 );
                 Err(SignError::Refused(format!(

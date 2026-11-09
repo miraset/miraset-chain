@@ -45,7 +45,7 @@ impl SafetyHalt {
         let reason = reason.into();
         let triggered = self.0.set(reason).is_ok();
         if triggered {
-            eprintln!("SAFETY HALT: {}", self.reason().unwrap_or_default());
+            tracing::error!(target: crate::observability::logging::SAFETY_LOG_TARGET, "SAFETY HALT: {}", self.reason().unwrap_or_default());
         }
         triggered
     }

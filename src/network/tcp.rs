@@ -161,6 +161,11 @@ impl TcpNetwork {
         self.dropped_messages.load(Ordering::Relaxed)
     }
 
+    /// Shared handle to the dropped-message counter, for metrics export.
+    pub fn dropped_messages_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.dropped_messages)
+    }
+
     fn deliver_local(&self, message: Message) {
         if self
             .local_inbound

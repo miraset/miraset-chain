@@ -31,7 +31,7 @@ The table below specifies the concrete engineering contracts for closing the R03
 | **R09 Network identity & bounds** | Authenticate validator frames using Ed25519 envelope signatures bound to `chain_id` and sender `VerifyingKey`; enforce frame size (`16 MiB`), connection (`64`), and bounded queue limits (`4096`). |
 | **R10 Authenticated sync** | Verify chain ID, block payload hash, state commitment, and parent ancestry during `validate_block_for_sync` and snapshot verification; fail closed on corrupted or mismatched history. |
 | **R11 Public node RPC** | Versioned/rate-limited admission and query endpoints that distinguish mempool admission (`accepted`/`admitted`) from 3-chain finality (`committed`) and expose committed block height/hash freshness. |
-| **R12 Operational safety & keys** | Enforce `experimental_mode = true` in `NodeConfig::validate()`, require explicit key custody (rejecting implicit fallback keys in non-dev persistent mode with file-permission checks), and provide distinct `/health`, `/livez`, and `/readyz` probes. |
+| **R12 Operational safety & keys** | Enforce `experimental_mode = true` in `NodeConfig::validate()`, require explicit key custody (rejecting implicit fallback keys in non-dev persistent mode with file-permission checks), and provide distinct `/health`, `/livez`, and `/readyz` probes. Readiness means "finalizing": no safety halt, not draining, and a commit within `ready_max_commit_age`. `/metrics` exports a fixed, bounded-cardinality Prometheus set; logs are `tracing` text or JSON on stderr; shutdown drains admission before stopping consensus (`src/observability/`). |
 
 ## Proposed Cargo boundaries
 

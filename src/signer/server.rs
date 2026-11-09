@@ -162,14 +162,14 @@ fn connection_allowed(stream: &UnixStream, server_uid: u32) -> bool {
     match stream.peer_cred() {
         Ok(cred) if peer_allowed(cred.uid(), server_uid) => true,
         Ok(cred) => {
-            eprintln!(
+            tracing::warn!(
                 "signer: rejected connection from uid {} (only uid {server_uid} may sign)",
                 cred.uid()
             );
             false
         }
         Err(e) => {
-            eprintln!("signer: rejected connection without peer credentials: {e}");
+            tracing::warn!("signer: rejected connection without peer credentials: {e}");
             false
         }
     }

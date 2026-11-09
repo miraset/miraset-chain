@@ -24,6 +24,33 @@ RPC for `nodeN` is published on `127.0.0.1:854{5+N}` (node0 = 8545 … node4 = 8
 endpoints: `/health`, `/block/latest` (hash + height), `/block/height/{h}`, `/account/{addr}`,
 `/tx/submit`, `/mempool/status`, `/events/blocks` (SSE).
 
+Operations endpoints (TODO 8.4.4):
+
+| Endpoint | 200 when | 503 body `status` |
+|---|---|---|
+| `/livez` | the process serves and consensus has not halted | `halted` |
+| `/readyz` | not halted, not draining, and a block was committed within `--ready-max-commit-age-secs` (default 30) | `halted`, `draining`, `no_commit_yet`, `commit_stale` |
+| `/metrics` | always; Prometheus text format with a fixed metric set (`miraset_*`) | — |
+
+`/readyz` measures whether this node is finalizing, so every node of a set that cannot reach a
+quorum reports not ready. A node catching up through block sync also commits and can report
+ready before it reaches the tip. The compose healthcheck still uses `/health` (same meaning as
+`/livez`).
+
+Logs go to stderr: text by default, one JSON object per line with `--log-format json`; `RUST_LOG`
+sets the filter (default `info`). On SIGTERM a validator stops admission (`/tx/submit` and
+`/receipt/submit` return 503), reports `draining` for `--shutdown-drain-ms` (default 2000), then
+stops consensus and logs how many mempool items were discarded; the mempool is not durable.
+A second SIGTERM/SIGINT ends the drain early, and a safety halt during the drain still exits with
+code 3. Safety events (`SAFETY HALT`, refused or dropped votes) use the `miraset_safety` target,
+which stays enabled at `warn` whatever `RUST_LOG` says; an invalid `RUST_LOG` is reported and
+falls back to `info`.
+
+Changes for operators: the startup banner is now a log line on **stderr** (previously stdout),
+and admission errors read `already exists in mempool` (400) or `node is shutting down…` (503).
+`/metrics` and `/readyz` are served on the same unauthenticated RPC port as everything else; they
+expose only fixed, non-secret series, but keep the port private (public RPC hardening is 8.4.3).
+
 ## What the fault suite asserts
 
 | Scenario | Fault | While faulted | After recovery |
@@ -72,7 +99,9 @@ progress within the window (liveness), or a node more than `--max-lag` blocks be
   `{"status":"halted","reason":…}` and the process exit with code 3 after 5s; compose restarts it
   (`restart: on-failure`). Stale or conflicting votes are dropped and logged, not halted.
 - P2P identity is a self-declared key checked against the genesis peer table, not authenticated
-  (TODO 8.4.1). The devnet network must stay private.
+  (TODO 8.4.1, design in `docs/adr/proposal-transport-identity.md`). Proposals are unsigned in
+  `hotstuff_rs`, so any host that reaches a P2P port can impersonate the leader. The devnet
+  network must stay private.
 
 ## Known limitations
 

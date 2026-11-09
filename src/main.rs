@@ -12,6 +12,8 @@ use miraset_chain::node::{
     GenesisConfig, MirasetNode, NodeConfig, genesis_state_commitment, init_genesis,
     init_genesis_with_chain_id,
 };
+use miraset_chain::observability::logging::SAFETY_LOG_TARGET;
+use miraset_chain::observability::{LogFormat, init_logging};
 use miraset_chain::process_hardening;
 use miraset_chain::rpc::start_rpc_server;
 use miraset_chain::signer::process::{
@@ -88,6 +90,19 @@ struct Cli {
     /// P2P TCP listen address for HotStuff consensus
     #[arg(long, default_value = "127.0.0.1:9948")]
     p2p_addr: SocketAddr,
+
+    /// Diagnostic log format on stderr (`RUST_LOG` sets the filter, default `info`)
+    #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
+    log_format: LogFormat,
+
+    /// `/readyz` reports not ready when no block was committed within this many seconds
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=86_400))]
+    ready_max_commit_age_secs: u64,
+
+    /// On SIGTERM/SIGINT, refuse admission and report not ready for this long before stopping,
+    /// so load balancers and clients move away first
+    #[arg(long, default_value_t = 2_000, value_parser = clap::value_parser!(u64).range(0..=60_000))]
+    shutdown_drain_ms: u64,
 }
 
 #[derive(Subcommand, Debug)]
@@ -156,6 +171,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> CliResult {
     let cli = Cli::parse();
+    init_logging(cli.log_format);
     // Before any key is read: no core dumps, no same-user ptrace (key custody D4).
     process_hardening::disable_core_dumps()?;
     match cli.command {
@@ -208,8 +224,10 @@ async fn main() -> CliResult {
                 Ok(()) => Ok(()),
                 Err(SignerExit::Error(e)) => Err(e.into()),
                 Err(SignerExit::Halted(reason)) => {
-                    eprintln!(
-                        "signer safety halt: {reason}; exiting with code {SIGNER_HALT_EXIT_CODE}"
+                    tracing::error!(
+                        target: SAFETY_LOG_TARGET,
+                        exit_code = SIGNER_HALT_EXIT_CODE,
+                        "signer safety halt: {reason}; exiting"
                     );
                     std::process::exit(SIGNER_HALT_EXIT_CODE);
                 }
@@ -299,6 +317,7 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
 
     let peers = genesis.peer_addresses(&vk)?;
     let (tcp, runtime) = TcpNetwork::bind_with_hosts(vk, cli.p2p_addr, peers)?;
+    let p2p_dropped = tcp.dropped_messages_counter();
     // Outermost layer: TcpNetwork delivers self-addressed votes inside `send`.
     let network = GuardedNetwork::new(tcp, guard.clone(), safety_halt.clone());
 
@@ -313,20 +332,24 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     config.chain_id = genesis.chain_id;
     config.expected_genesis_hash = Some(genesis_hash);
     config.safety_halt = safety_halt.clone();
+    config.ready_max_commit_age = Duration::from_secs(cli.ready_max_commit_age_secs);
     let node = Arc::new(MirasetNode::try_start(
         config,
         kv_store,
         network,
         Mempool::new(),
     )?);
+    node.metrics().attach_p2p_dropped(p2p_dropped);
 
-    println!("Starting MIRASET experimental/devnet validator (ADR-0016 Proposed):");
-    println!("  Chain ID:   {}", genesis.chain_id);
-    println!("  Public Key: {}", hex::encode(vk.to_bytes()));
-    println!("  Validators: {}", genesis.validators.len());
-    println!("  Data Dir:   {}", cli.data_dir.display());
-    println!("  P2P Addr:   {}", cli.p2p_addr);
-    println!("  RPC Addr:   {}", cli.rpc_addr);
+    tracing::info!(
+        chain_id = genesis.chain_id,
+        validator = %hex::encode(vk.to_bytes()),
+        validators = genesis.validators.len(),
+        data_dir = %cli.data_dir.display(),
+        p2p_addr = %cli.p2p_addr,
+        rpc_addr = %cli.rpc_addr,
+        "starting MIRASET experimental/devnet validator (ADR-0016 Proposed)"
+    );
 
     let mut rpc = tokio::spawn(start_rpc_server(
         Arc::clone(&node),
@@ -335,12 +358,7 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
     ));
     let outcome: CliResult = tokio::select! {
         signal = shutdown_signal() => signal.map_err(Into::into),
-        reason = wait_for_safety_halt(&safety_halt) => {
-            // No graceful shutdown: the replica thread may have panicked, and joining it would
-            // panic again. Redb commits are atomic, so exiting here loses nothing durable.
-            eprintln!("consensus safety halt: {reason}; exiting with code {SAFETY_HALT_EXIT_CODE}");
-            std::process::exit(SAFETY_HALT_EXIT_CODE);
-        }
+        reason = wait_for_safety_halt(&safety_halt) => exit_on_safety_halt(&reason),
         result = &mut rpc => match result {
             Ok(Ok(())) => Err("RPC server exited unexpectedly".into()),
             Ok(Err(e)) => Err(format!("RPC server failed: {e}").into()),
@@ -348,15 +366,73 @@ async fn run_validator(cli: &Cli, genesis_path: &Path) -> CliResult {
         },
     };
 
-    // Stop admission first so the RPC task releases its handle to the node, then stop consensus
-    // (joins replica threads; Redb commits are atomic) and finally the transport.
+    let drain = if outcome.is_ok() {
+        Duration::from_millis(cli.shutdown_drain_ms)
+    } else {
+        Duration::ZERO
+    };
+    shutdown_validator(node, rpc, runtime, &safety_halt, drain).await;
+    outcome
+}
+
+/// No graceful shutdown after a safety halt: the replica thread may have panicked, and joining
+/// it would panic again. Redb commits are atomic, so exiting here loses nothing durable.
+fn exit_on_safety_halt(reason: &str) -> ! {
+    tracing::error!(
+        target: SAFETY_LOG_TARGET,
+        exit_code = SAFETY_HALT_EXIT_CODE,
+        "consensus safety halt: {reason}; exiting"
+    );
+    std::process::exit(SAFETY_HALT_EXIT_CODE);
+}
+
+/// Graceful stop (TODO 8.4.4): refuse admission and report not ready, keep serving probes for
+/// the drain period, then stop RPC, consensus (joins replica threads; Redb commits are atomic)
+/// and the transport. Mempool contents are not durable; their count is reported (best effort:
+/// a submission racing the drain flag may still be admitted).
+///
+/// A safety halt during the drain still exits with code 3, and a second SIGTERM/SIGINT ends the
+/// drain early.
+async fn shutdown_validator<K, N>(
+    node: Arc<MirasetNode<K, N>>,
+    rpc: tokio::task::JoinHandle<std::io::Result<()>>,
+    runtime: miraset_chain::network::tcp::NetworkRuntime,
+    safety_halt: &SafetyHalt,
+    drain: Duration,
+) where
+    K: hotstuff_rs::block_tree::pluggables::KVStore,
+    N: hotstuff_rs::networking::network::Network + 'static,
+{
+    node.lifecycle().begin_drain();
+    tracing::info!(
+        drain_ms = drain.as_millis() as u64,
+        "shutdown: admission stopped, readiness withdrawn"
+    );
+    if !drain.is_zero() {
+        tokio::select! {
+            () = tokio::time::sleep(drain) => {}
+            reason = wait_for_safety_halt(safety_halt) => exit_on_safety_halt(&reason),
+            _ = shutdown_signal() => tracing::warn!("shutdown: second signal, ending drain early"),
+        }
+    }
+    if let Some(reason) = safety_halt.reason() {
+        exit_on_safety_halt(reason);
+    }
     rpc.abort();
     let _ = rpc.await;
-    println!("Shutting down node...");
+    let pending_txs = node.mempool().tx_count();
+    let pending_receipts = node.mempool().receipt_count();
+    if pending_txs + pending_receipts > 0 {
+        tracing::warn!(
+            pending_txs,
+            pending_receipts,
+            "shutdown: unfinalized mempool items are discarded (the mempool is not durable); clients must resubmit"
+        );
+    }
+    let height = node.highest_committed_height();
     drop(node);
     drop(runtime);
-    println!("Shutdown complete.");
-    outcome
+    tracing::info!(committed_height = ?height, "shutdown complete");
 }
 
 /// Where this validator's signatures come from.
@@ -450,8 +526,8 @@ fn open_signing_guard(
         .last_vote()
         .map_err(|e| e.to_string())?
         .map(|record| record.view);
-    println!(
-        "  Signing guard: {} (last signed view: {})",
+    tracing::info!(
+        "signing guard {} opened (last signed view: {})",
         path.display(),
         last_view.map_or_else(|| "none".to_string(), |view| view.to_string())
     );

@@ -6,6 +6,7 @@ pub mod keys;
 pub mod mempool;
 pub mod network;
 pub mod node;
+pub mod observability;
 pub mod process_hardening;
 pub mod rpc;
 pub mod signer;

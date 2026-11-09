@@ -72,7 +72,8 @@ impl<N: Network> GuardedNetwork<N> {
             Ok(Authorization::Fresh | Authorization::IdenticalResend) => true,
             Ok(Authorization::Stale { last_view }) => {
                 self.stale_votes_dropped.fetch_add(1, Ordering::Relaxed);
-                eprintln!(
+                tracing::warn!(
+                    target: crate::observability::logging::SAFETY_LOG_TARGET,
                     "signing guard: dropped stale phase vote for view {} (last signed view {last_view})",
                     vote.view.int()
                 );
@@ -81,7 +82,8 @@ impl<N: Network> GuardedNetwork<N> {
             Ok(Authorization::Conflicting { view }) => {
                 self.conflicting_votes_refused
                     .fetch_add(1, Ordering::Relaxed);
-                eprintln!(
+                tracing::error!(
+                    target: crate::observability::logging::SAFETY_LOG_TARGET,
                     "signing guard: REFUSED conflicting phase vote for view {view} (already signed a different vote in this view)"
                 );
                 false

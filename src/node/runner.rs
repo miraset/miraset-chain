@@ -6,7 +6,8 @@ use hotstuff_rs::replica::{Replica, ReplicaSpec};
 use hotstuff_rs::types::data_types::{BlockHeight, CryptoHash, Power};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
 use hotstuff_rs::types::validator_set::{ValidatorSet, ValidatorSetState, VerifyingKey};
-use std::time::UNIX_EPOCH;
+use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use crate::app::MirasetApp;
@@ -17,6 +18,10 @@ use crate::core::types::{
 };
 use crate::mempool::Mempool;
 use crate::node::config::NodeConfig;
+use crate::observability::{
+    AdmissionKind, AdmissionReject, Lifecycle, NodeMetrics, NotReadyReason, ReadinessInput,
+    ScrapeState, evaluate_readiness,
+};
 use crate::storage::{
     RecoveryMetadata, STORAGE_SCHEMA_VERSION, read_recovery_metadata, validate_recovery_state,
     write_recovery_metadata,
@@ -30,6 +35,9 @@ pub struct MirasetNode<K: KVStore, N: Network + 'static> {
     pub network: N,
     pub commit_sender: broadcast::Sender<CommitEvent>,
     pub safety_halt: SafetyHalt,
+    metrics: Arc<NodeMetrics>,
+    lifecycle: Arc<Lifecycle>,
+    ready_max_commit_age: Duration,
 }
 
 /// Canonical genesis application entries (accounts and epoch 0), in deterministic order.
@@ -148,6 +156,9 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         let commit_tx = commit_sender.clone();
         let kv_for_event = kv_store.clone();
         let mempool_for_event = mempool.clone();
+        let metrics = Arc::new(NodeMetrics::default());
+        let metrics_for_event = Arc::clone(&metrics);
+        let ready_max_commit_age = config.ready_max_commit_age;
 
         let replica = ReplicaSpec::builder()
             .app(app)
@@ -164,6 +175,18 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
 
                 let camera = BlockTreeCamera::new(kv_for_event.clone());
                 let snapshot = camera.snapshot();
+                // The block is committed whatever its payload, so readiness sees it first.
+                let height = match snapshot.block_height(&event.block) {
+                    Ok(Some(height)) => Some(height.int()),
+                    other => {
+                        tracing::warn!(
+                            block = %block_hash_hex,
+                            "committed block height unreadable ({other:?}); recorded without height"
+                        );
+                        None
+                    }
+                };
+                metrics_for_event.record_commit(height);
                 // Only publish finalized CommitEvent after verifying the block is durably
                 // readable from the block tree snapshot.
                 let (tx_count, receipt_count) = match snapshot.block_data(&event.block) {
@@ -203,6 +226,9 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             network,
             commit_sender,
             safety_halt,
+            metrics,
+            lifecycle: Arc::new(Lifecycle::default()),
+            ready_max_commit_age,
         })
     }
 
@@ -215,6 +241,37 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
     /// Consensus safety halt shared with the guarded network and chain store.
     pub fn safety_halt(&self) -> &SafetyHalt {
         &self.safety_halt
+    }
+
+    /// Process metrics (TODO 8.4.4).
+    pub fn metrics(&self) -> &Arc<NodeMetrics> {
+        &self.metrics
+    }
+
+    /// Drain state shared by admission, probes and shutdown (TODO 8.4.4).
+    pub fn lifecycle(&self) -> &Lifecycle {
+        &self.lifecycle
+    }
+
+    /// Readiness to finalize: no safety halt, not draining, and a recent commit.
+    pub fn readiness(&self) -> Result<(), NotReadyReason> {
+        evaluate_readiness(ReadinessInput {
+            halted: self.safety_halt.is_halted(),
+            draining: self.lifecycle.is_draining(),
+            last_commit_age: self.metrics.last_commit_age(),
+            max_commit_age: self.ready_max_commit_age,
+        })
+    }
+
+    /// Metrics in Prometheus text format, with gauges sampled now.
+    pub fn render_metrics(&self) -> String {
+        self.metrics.render(ScrapeState {
+            mempool_pending_txs: self.mempool.tx_count(),
+            mempool_pending_receipts: self.mempool.receipt_count(),
+            halted: self.safety_halt.is_halted(),
+            draining: self.lifecycle.is_draining(),
+            ready: self.readiness().is_ok(),
+        })
     }
 
     /// Subscribe to committed block events.
@@ -297,20 +354,48 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
     }
 
     /// Submit a transaction to the local mempool.
-    pub fn submit_transaction(&self, tx: Transaction) -> Result<(), &'static str> {
-        if self.mempool.insert_tx(tx) {
-            Ok(())
-        } else {
-            Err("Transaction already exists in mempool")
-        }
+    pub fn submit_transaction(&self, tx: Transaction) -> Result<(), AdmissionError> {
+        self.admit(AdmissionKind::Transaction, || self.mempool.insert_tx(tx))
     }
 
     /// Submit a compute receipt to the local mempool.
-    pub fn submit_receipt(&self, receipt: ComputeReceipt) -> Result<(), &'static str> {
-        if self.mempool.insert_receipt(receipt) {
+    pub fn submit_receipt(&self, receipt: ComputeReceipt) -> Result<(), AdmissionError> {
+        self.admit(AdmissionKind::Receipt, || {
+            self.mempool.insert_receipt(receipt)
+        })
+    }
+
+    /// Refuse while draining, otherwise insert; count the outcome.
+    fn admit(
+        &self,
+        kind: AdmissionKind,
+        insert: impl FnOnce() -> bool,
+    ) -> Result<(), AdmissionError> {
+        let outcome = if self.lifecycle.is_draining() {
+            Err(AdmissionError::Draining)
+        } else if insert() {
             Ok(())
         } else {
-            Err("Receipt already exists in mempool")
+            Err(AdmissionError::Duplicate)
+        };
+        match outcome {
+            Ok(()) => self.metrics.record_admitted(kind),
+            Err(AdmissionError::Duplicate) => self
+                .metrics
+                .record_rejected(kind, AdmissionReject::Duplicate),
+            Err(AdmissionError::Draining) => self
+                .metrics
+                .record_rejected(kind, AdmissionReject::Draining),
         }
+        outcome
     }
+}
+
+/// Why a transaction or receipt was not admitted to the mempool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AdmissionError {
+    #[error("already exists in mempool")]
+    Duplicate,
+    #[error("node is shutting down and not admitting new work")]
+    Draining,
 }

@@ -22,6 +22,8 @@ pub struct Validator {
     pub rpc: SocketAddr,
     pub p2p: SocketAddr,
     pub runs: usize,
+    /// Extra environment for spawned processes (for example `RUST_LOG`).
+    pub env: Vec<(String, String)>,
 }
 
 pub struct Running {
@@ -67,6 +69,7 @@ impl Validator {
             rpc: free_addr(),
             p2p,
             runs: 0,
+            env: Vec::new(),
         }
     }
 
@@ -137,6 +140,7 @@ impl Validator {
         let out = fs::File::create(&log).expect("create log");
         let child = Command::new(BIN)
             .args(args)
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdout(out.try_clone().expect("clone log"))
             .stderr(out)
             .spawn()
