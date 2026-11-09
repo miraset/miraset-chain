@@ -148,6 +148,7 @@ Do not mark an item complete based only on a module existing. Record its accepta
 - [ ] **8.3.2. Persist vote and lock safety state before emitting signatures** (PRD R07; HotStuff-rs.md §5.8).
   - Add crash-safe safety storage for the required view/phase/block and lock state; fail closed if persistence fails or recovery is ambiguous.
   - **Accept:** crash/restart tests cannot produce conflicting votes for the same view/phase; key material is never logged.
+  - **Design (2026-11-09, Proposed — awaiting approval):** `docs/adr/proposal-vote-safety-state.md`. Today's restart safety rests on an implicit invariant (view entry persisted before voting); open gaps: silent halt on write failure, no guard surviving chain-DB wipe/restore, no same-key multi-process guard, no AT07 tests.
 - [ ] **8.3.3. Keep validator reconfiguration disabled until a safe activation protocol is approved** (PRD R08).
   - Specify on-chain authorization, old/new committee transition, quorum safety, bootstrap, and state catch-up. Do not treat CLI peer changes as validator-set changes.
   - **Accept:** unauthorized updates are rejected and transition tests cover old/new committee overlap, boundary cases, and lagging nodes.
