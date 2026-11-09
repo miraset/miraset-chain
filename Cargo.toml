@@ -11,6 +11,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 ed25519-dalek = "2.2.0"
 hex = "0.4"
 hotstuff_rs = { path = "lib/hotstuff_rs" }
+libc = "0.2"
 rand = "0.10.3"
 redb = "4.5.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -22,6 +23,7 @@ thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1.19", features = ["sync"] }
 tower-http = { version = "0.6", features = ["cors"] }
+zeroize = "1"
 
 [dev-dependencies]
 http-body-util = "0.1"

@@ -9,6 +9,7 @@ use miraset_chain::node::{
     GenesisConfig, MirasetNode, NodeConfig, genesis_state_commitment, init_genesis,
     init_genesis_with_chain_id,
 };
+use miraset_chain::process_hardening;
 use miraset_chain::rpc::start_rpc_server;
 use miraset_chain::storage::{MemKVStore, RedbKVStore, read_recovery_metadata};
 use std::net::SocketAddr;
@@ -94,6 +95,10 @@ enum Commands {
         p2p_addr_template: String,
         #[arg(long, default_value_t = 1_000_000_000)]
         faucet_balance: u64,
+        /// Write each key to its own directory: <keys-dir>/node{i}/node{i}.key and
+        /// <keys-dir>/faucet/faucet.key (one mount per container)
+        #[arg(long)]
+        keys_dir: Option<PathBuf>,
     },
     /// Print a signed transfer as JSON, ready to POST to /tx/submit
     SignTransfer {
@@ -115,6 +120,8 @@ enum Commands {
 #[tokio::main]
 async fn main() -> CliResult {
     let cli = Cli::parse();
+    // Before any key is read: no core dumps, no same-user ptrace (key custody D4).
+    process_hardening::disable_core_dumps()?;
     match cli.command {
         Some(Commands::Keygen { out }) => keygen(&out),
         Some(Commands::Pubkey { key_file }) => {
@@ -128,12 +135,14 @@ async fn main() -> CliResult {
             chain_id,
             p2p_addr_template,
             faucet_balance,
+            keys_dir,
         }) => devnet_init(&DevnetSpec {
             out_dir: &out,
             validators,
             chain_id,
             p2p_addr_template: &p2p_addr_template,
             faucet_balance,
+            keys_dir: keys_dir.as_deref(),
         }),
         Some(Commands::SignTransfer {
             key_file,

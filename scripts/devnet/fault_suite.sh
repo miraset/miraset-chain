@@ -39,6 +39,16 @@ expect_full_recovery() {
     --max-lag "${MAX_LAG:-5}"
 }
 
+step "key isolation: each validator container can read only its own key"
+for i in 0 1 2 3 4; do
+  found="$($COMPOSE exec -T "node$i" sh -c \
+    'find / \( -path /proc -o -path /sys \) -prune -o -name "*.key" -print 2>/dev/null; true' | sort)"
+  if [[ "$found" != "/var/lib/miraset-key/node$i.key" ]]; then
+    echo "FAULT SUITE FAILED: node$i sees key files: ${found:-<none>}"
+    exit 1
+  fi
+done
+
 step "baseline: all 5 validators commit and agree"
 "$HERE/transfer.sh" bob 1000 >/dev/null
 expect_full_recovery

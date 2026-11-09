@@ -1,6 +1,8 @@
 # Proposal: Validator key custody (TODO 8.3.4)
 
-**Status**: Proposed, awaiting approval (not a numbered ADR; see `docs/adr/README.md`)
+**Status**: Partly approved 2026-11-09. Decision 4 (order) is approved, and D4 and D5 are
+implemented (§9). Decisions 1–3 (D1–D3) await approval. Not a numbered ADR; see
+`docs/adr/README.md`.
 **Date**: 2026-11-09
 **Requirements**:
 - PRD R12 / AT12: protected keys; no secrets in logs.
@@ -170,3 +172,23 @@ the guard is bound to the validator key.
 - Authenticated transport identity, which a cross-host signer would rely on: 8.4.1.
 - BLS committee keys (ADR-0008) and master-account custody (ADR-0016).
 - `/livez` and `/readyz` probes: 8.4.4.
+
+## 9. Approval record and implementation (2026-11-09)
+
+**Approved by:** project owner, 2026-11-09. Only **decision 4** is approved: implement D4 and D5
+first. Decisions 1–3 remain open, so D1–D3 are not started.
+
+| Item | Implementation | Tests |
+|---|---|---|
+| D4: key file policy | `src/keys.rs`, moved from `src/devnet.rs`, which re-exports it. Opens with `O_NOFOLLOW` and checks the opened handle: regular file, owned by the process user, no group or other bits. Input limited to 256 bytes. Secret buffers held in `Zeroizing`. Write uses `create_new` and 0600, and never follows a symlink. | Unit: `src/keys_tests.rs` covers the policy matrix, symlink read and write, bad mode, length and size, and no secret in errors |
+| D4: process hardening | `src/process_hardening.rs` sets `RLIMIT_CORE=0` and, on Linux, `PR_SET_DUMPABLE=0`. It runs at the start of `main` for every subcommand and fails closed. | Integration: `tests/process_hardening.rs`. E2E: `tests/e2e_validator.rs::test_e2e_validator_process_is_hardened` checks the core limit is 0 and that `/proc/<pid>/environ` cannot be read by the same user. |
+| D4: one in-memory copy | **Deferred to D1.** The library takes an owned `SigningKey` (`Configuration::me`), so the copies only go away with the signer seam. | — |
+| D5: devnet key isolation | `devnet-init --keys-dir` writes `node{i}/node{i}.key` and `faucet/faucet.key`, with new key directories at 0700. Compose gives each key its own volume, and each node mounts only its own key read-only. The faucet key goes only to the `faucet` tool (profile `tools`, no network). `transfer.sh` uses that tool. | Unit: `test_init_devnet_keys_dir_puts_each_key_in_its_own_directory`. E2E: the Docker fault suite's "key isolation" step checks each node sees exactly its own key. The full suite passed 2026-11-09. |
+
+**Threat status after D4 and D5:**
+- **K2** (one container reads every key): closed for the devnet.
+- **K4** (leaks through core dumps, ptrace or `/proc`): mitigated. In-memory copies remain until
+  D1.
+- **K1, K3, K6**: open until D1–D3.
+- **K5** (rotation): deferred (D6).
+

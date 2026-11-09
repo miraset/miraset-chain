@@ -1,82 +1,17 @@
-//! Experimental devnet tooling: validator key files and multi-validator genesis generation.
+//! Experimental devnet tooling: multi-validator genesis and key generation.
 //!
-//! Key files hold a hex-encoded Ed25519 secret, are created with owner-only permissions, and
-//! are refused when group/world accessible. Secrets are never printed by this module.
+//! Key file handling lives in [`crate::keys`] (re-exported here for existing callers). With a
+//! keys directory, each validator key and the faucet key get their own subdirectory so a
+//! deployment can mount one key per container (key custody proposal D5).
 
 use crate::node::{GenesisAccount, GenesisConfig, GenesisValidator};
-use ed25519_dalek::SigningKey;
-use rand::RngExt;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::{Path, PathBuf};
+
+pub use crate::keys::{generate_signing_key, read_key_file, write_key_file};
 
 pub const GENESIS_FILE: &str = "genesis.json";
 pub const FAUCET_KEY_FILE: &str = "faucet.key";
-const SECRET_KEY_BYTES: usize = 32;
 const VALIDATOR_POWER: u64 = 100;
-
-/// Generate a fresh random Ed25519 signing key.
-pub fn generate_signing_key() -> SigningKey {
-    let mut secret = [0u8; SECRET_KEY_BYTES];
-    rand::rng().fill(&mut secret);
-    SigningKey::from_bytes(&secret)
-}
-
-/// Write `key` as hex to a new file with mode 0600. Refuses to overwrite an existing file.
-pub fn write_key_file(path: &Path, key: &SigningKey) -> Result<(), String> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|e| format!("cannot create key file {}: {e}", path.display()))?;
-    file.write_all(hex::encode(key.to_bytes()).as_bytes())
-        .and_then(|()| file.sync_all())
-        .map_err(|e| format!("cannot write key file {}: {e}", path.display()))
-}
-
-/// Read a hex-encoded Ed25519 secret key file, failing closed on bad permissions or contents.
-pub fn read_key_file(path: &Path) -> Result<SigningKey, String> {
-    check_key_permissions(path)?;
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read key file {}: {e}", path.display()))?;
-    let bytes: [u8; SECRET_KEY_BYTES] = hex::decode(content.trim())
-        .ok()
-        .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| {
-            format!(
-                "key file {} must contain 32 hex-encoded bytes",
-                path.display()
-            )
-        })?;
-    Ok(SigningKey::from_bytes(&bytes))
-}
-
-#[cfg(unix)]
-fn check_key_permissions(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(path)
-        .map_err(|e| format!("cannot stat key file {}: {e}", path.display()))?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
-        return Err(format!(
-            "key file {} is accessible by group/others (mode {:o}); run chmod 600",
-            path.display(),
-            mode & 0o777
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_key_permissions(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
 
 /// Parameters for [`init_devnet`].
 pub struct DevnetSpec<'a> {
@@ -86,11 +21,52 @@ pub struct DevnetSpec<'a> {
     /// `host:port` template; `{i}` is replaced with the validator index.
     pub p2p_addr_template: &'a str,
     pub faucet_balance: u64,
+    /// When set, keys go to `<keys_dir>/node{i}/node{i}.key` and `<keys_dir>/faucet/faucet.key`
+    /// instead of next to `genesis.json`.
+    pub keys_dir: Option<&'a Path>,
 }
 
-/// Path of validator `index`'s key file inside a devnet directory.
+/// Path of validator `index`'s key file inside a devnet directory (flat layout).
 pub fn validator_key_path(out_dir: &Path, index: usize) -> PathBuf {
     out_dir.join(format!("node{index}.key"))
+}
+
+/// Validator key path for `spec`, honouring `keys_dir`.
+pub fn spec_validator_key_path(spec: &DevnetSpec<'_>, index: usize) -> PathBuf {
+    match spec.keys_dir {
+        Some(root) => root
+            .join(format!("node{index}"))
+            .join(format!("node{index}.key")),
+        None => validator_key_path(spec.out_dir, index),
+    }
+}
+
+/// Faucet key path for `spec`, honouring `keys_dir`.
+pub fn spec_faucet_key_path(spec: &DevnetSpec<'_>) -> PathBuf {
+    match spec.keys_dir {
+        Some(root) => root.join("faucet").join(FAUCET_KEY_FILE),
+        None => spec.out_dir.join(FAUCET_KEY_FILE),
+    }
+}
+
+/// Create the parent directory of a key file (owner-only when it is new).
+fn ensure_key_dir(key_path: &Path) -> Result<(), String> {
+    let Some(parent) = key_path.parent() else {
+        return Ok(());
+    };
+    if parent.exists() {
+        return Ok(());
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(parent)
+        .map_err(|e| format!("cannot create key directory {}: {e}", parent.display()))
 }
 
 /// Create validator keys, a funded faucet key, and `genesis.json` in `spec.out_dir`.
@@ -112,7 +88,9 @@ pub fn init_devnet(spec: &DevnetSpec<'_>) -> Result<bool, String> {
     let mut validators = Vec::with_capacity(spec.validators);
     for index in 0..spec.validators {
         let key = generate_signing_key();
-        write_key_file(&validator_key_path(spec.out_dir, index), &key)?;
+        let key_path = spec_validator_key_path(spec, index);
+        ensure_key_dir(&key_path)?;
+        write_key_file(&key_path, &key)?;
         validators.push(GenesisValidator {
             pubkey: hex::encode(key.verifying_key().to_bytes()),
             power: VALIDATOR_POWER,
@@ -121,7 +99,9 @@ pub fn init_devnet(spec: &DevnetSpec<'_>) -> Result<bool, String> {
     }
 
     let faucet = generate_signing_key();
-    write_key_file(&spec.out_dir.join(FAUCET_KEY_FILE), &faucet)?;
+    let faucet_path = spec_faucet_key_path(spec);
+    ensure_key_dir(&faucet_path)?;
+    write_key_file(&faucet_path, &faucet)?;
     let genesis = GenesisConfig {
         chain_id: spec.chain_id,
         validators,
@@ -151,6 +131,7 @@ mod tests {
             chain_id: 4242,
             p2p_addr_template: "node{i}:9948",
             faucet_balance: 1_000_000,
+            keys_dir: None,
         }
     }
 
@@ -186,25 +167,43 @@ mod tests {
     }
 
     #[test]
-    fn test_key_files_fail_closed() {
+    fn test_init_devnet_keys_dir_puts_each_key_in_its_own_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("k.key");
-        let key = generate_signing_key();
-        write_key_file(&path, &key).unwrap();
-        assert_eq!(read_key_file(&path).unwrap().to_bytes(), key.to_bytes());
-        assert!(write_key_file(&path, &key).is_err(), "must not overwrite");
+        let keys = dir.path().join("keys");
+        let mut with_keys = spec(dir.path());
+        with_keys.keys_dir = Some(&keys);
+        assert!(init_devnet(&with_keys).unwrap());
 
-        let short = dir.path().join("short.key");
-        std::fs::write(&short, "abcd").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&short, std::fs::Permissions::from_mode(0o600)).unwrap();
-            assert!(read_key_file(&short).is_err(), "wrong length");
+        // genesis.json is the only file next to the config; no key leaks into it.
+        let config_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name != "keys")
+            .collect();
+        assert_eq!(config_files, vec![GENESIS_FILE.to_string()]);
 
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            assert!(read_key_file(&path).is_err(), "world-readable key refused");
+        let genesis = GenesisConfig::load(&dir.path().join(GENESIS_FILE)).unwrap();
+        for (index, validator) in genesis.validators.iter().enumerate() {
+            let node_dir = keys.join(format!("node{index}"));
+            let entries: Vec<_> = std::fs::read_dir(&node_dir).unwrap().collect();
+            assert_eq!(entries.len(), 1, "exactly one key per node directory");
+            let key = read_key_file(&spec_validator_key_path(&with_keys, index)).unwrap();
+            assert_eq!(
+                validator.pubkey,
+                hex::encode(key.verifying_key().to_bytes())
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&node_dir).unwrap().permissions().mode();
+                assert_eq!(mode & 0o077, 0, "new key directories are owner-only");
+            }
         }
+        let faucet = read_key_file(&spec_faucet_key_path(&with_keys)).unwrap();
+        assert_eq!(
+            genesis.accounts[0].address,
+            hex::encode(faucet.verifying_key().to_bytes())
+        );
     }
 
     #[test]

@@ -21,44 +21,61 @@ x-validator: &validator
     retries: 12
 
 services:
-  # One-shot: generates validator keys, a funded faucet key, and genesis.json into the shared
-  # volume. A no-op once genesis exists, so `docker compose down -v` is needed for a fresh chain.
+  # One-shot: generates genesis.json into the shared config volume and each key into its own
+  # volume (key custody D5): a validator container mounts only its own key, read-only, and only
+  # the `faucet` tool sees the faucet key. A no-op once genesis exists, so
+  # `docker compose down -v` is needed for a fresh chain.
   devnet-init:
     image: miraset-chain:devnet
     build: .
-    command: ["devnet-init", "--out", "/devnet", "--validators", "5", "--p2p-addr-template", "node{i}:9948"]
-    volumes: [devnet-config:/devnet]
+    command: ["devnet-init", "--out", "/devnet", "--keys-dir", "/keys", "--validators", "5", "--p2p-addr-template", "node{i}:9948"]
+    volumes:
+      - devnet-config:/devnet
+      - faucet-key:/keys/faucet
+      - node0-key:/keys/node0
+      - node1-key:/keys/node1
+      - node2-key:/keys/node2
+      - node3-key:/keys/node3
+      - node4-key:/keys/node4
     networks: [devnet]
+
+  # Faucet signing tool for scripts/devnet/transfer.sh (`docker compose run --rm faucet ...`).
+  faucet:
+    image: miraset-chain:devnet
+    build: .
+    profiles: [tools]
+    volumes: [faucet-key:/keys/faucet:ro]
+    network_mode: none
 
   node0:
     <<: *validator
     hostname: node0
-    command: [--key-file=/devnet/node0.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node0-data:/var/lib/miraset, node0-guard:/var/lib/miraset-guard]
+    command: [--key-file=/var/lib/miraset-key/node0.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node0-key:/var/lib/miraset-key:ro, node0-data:/var/lib/miraset, node0-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8545:8545"]
   node1:
     <<: *validator
     hostname: node1
-    command: [--key-file=/devnet/node1.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node1-data:/var/lib/miraset, node1-guard:/var/lib/miraset-guard]
+    command: [--key-file=/var/lib/miraset-key/node1.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node1-key:/var/lib/miraset-key:ro, node1-data:/var/lib/miraset, node1-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8546:8545"]
   node2:
     <<: *validator
     hostname: node2
-    command: [--key-file=/devnet/node2.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node2-data:/var/lib/miraset, node2-guard:/var/lib/miraset-guard]
+    command: [--key-file=/var/lib/miraset-key/node2.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node2-key:/var/lib/miraset-key:ro, node2-data:/var/lib/miraset, node2-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8547:8545"]
   node3:
     <<: *validator
     hostname: node3
-    command: [--key-file=/devnet/node3.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node3-data:/var/lib/miraset, node3-guard:/var/lib/miraset-guard]
+    command: [--key-file=/var/lib/miraset-key/node3.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node3-key:/var/lib/miraset-key:ro, node3-data:/var/lib/miraset, node3-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8548:8545"]
   node4:
     <<: *validator
     hostname: node4
-    command: [--key-file=/devnet/node4.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
-    volumes: [devnet-config:/devnet:ro, node4-data:/var/lib/miraset, node4-guard:/var/lib/miraset-guard]
+    command: [--key-file=/var/lib/miraset-key/node4.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545]
+    volumes: [devnet-config:/devnet:ro, node4-key:/var/lib/miraset-key:ro, node4-data:/var/lib/miraset, node4-guard:/var/lib/miraset-guard]
     ports: ["127.0.0.1:8549:8545"]
 
 networks:
@@ -66,6 +83,13 @@ networks:
 
 volumes:
   devnet-config: {}
+  # One key per volume (key custody D5).
+  faucet-key: {}
+  node0-key: {}
+  node1-key: {}
+  node2-key: {}
+  node3-key: {}
+  node4-key: {}
   node0-data: {}
   node1-data: {}
   node2-data: {}

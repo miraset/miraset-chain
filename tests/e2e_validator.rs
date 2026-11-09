@@ -252,6 +252,38 @@ fn test_e2e_missing_guard_with_chain_data_refuses_start_until_init() {
     assert_exists(&v.guard_file());
 }
 
+/// Key custody D4: the running validator has a zero core limit and is not dumpable, so other
+/// processes of the same user cannot read its memory or environment through `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_e2e_validator_process_is_hardened() {
+    let mut v = Validator::init();
+    let run = v.start(&[]);
+    wait_healthy_with_height(&v, &run, 1, STARTUP_TIMEOUT);
+    let pid = run.child.id();
+
+    let limits = fs::read_to_string(format!("/proc/{pid}/limits")).expect("limits readable");
+    let core = limits
+        .lines()
+        .find(|line| line.starts_with("Max core file size"))
+        .expect("core limit line");
+    assert_eq!(
+        core.split_whitespace().skip(4).take(2).collect::<Vec<_>>(),
+        ["0", "0"],
+        "{core}"
+    );
+
+    // A non-dumpable process's /proc entries belong to root, so even its own user cannot read
+    // its environment or memory. Root bypasses this, so only assert as a normal user.
+    if miraset_chain::keys::effective_uid() != 0 {
+        let environ = fs::read(format!("/proc/{pid}/environ"));
+        assert!(
+            environ.is_err(),
+            "same-user process could read the validator's environment"
+        );
+    }
+}
+
 fn latest_height_after_start(v: &Validator, run: &Running) -> u64 {
     let mut height = None;
     wait_for("RPC up", STARTUP_TIMEOUT, run, || {

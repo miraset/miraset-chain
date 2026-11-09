@@ -15,7 +15,7 @@ With 5, the remaining 4-of-5 quorum keeps committing (one window per 5 views).
 ```bash
 docker compose up -d --build          # devnet-init generates keys + genesis, then node0..node4 start
 python3 scripts/devnet/check_consensus.py --progress-window 20 --max-lag 5
-scripts/devnet/transfer.sh bob 1000   # signed faucet transfer via node0
+scripts/devnet/transfer.sh bob 1000   # faucet transfer, signed in the one-shot `faucet` tool container
 scripts/devnet/fault_suite.sh         # crash / pause / partition scenarios (~1 min)
 docker compose down -v                # stop and delete the chain (keys, genesis, databases)
 ```
@@ -39,21 +39,28 @@ progress within the window (liveness), or a node more than `--max-lag` blocks be
 
 ## Layout and security notes
 
-- `devnet-init` writes `genesis.json`, `node{i}.key`, and `faucet.key` (mode 0600, uid 10001) to
-  the `devnet-config` volume. It is a no-op if genesis already exists.
-- Every node mounts the whole config volume read-only, so each container can read every key. This
-  is acceptable only for a local devnet; real deployments need per-validator key custody (TODO 8.3.4).
-- Nodes refuse key files readable by group/others, keys that are not genesis validators, and a
-  database created from a different genesis (accounts or validator set).
+- `devnet-init` writes `genesis.json` to the `devnet-config` volume. Each key goes to **its own
+  volume**: `node{i}-key` holds `node{i}.key` and `faucet-key` holds `faucet.key` (mode 0600,
+  uid 10001, directories 0700). It is a no-op if genesis already exists.
+- Each validator container mounts only its own key volume, read-only, at
+  `/var/lib/miraset-key`. The faucet key is visible only to the one-shot `faucet` tool container
+  (profile `tools`, no network) used by `transfer.sh`. The fault suite checks that each node
+  sees exactly one key file (TODO 8.3.4, key custody D5).
+- Key files must be regular files (symlinks are refused), owned by the process user, with no
+  group or other access. Nodes also refuse keys that are not genesis validators, and a database
+  created from a different genesis (accounts or validator set).
+- Every `miraset-chain` process disables core dumps and marks itself non-dumpable on Linux, so
+  other processes of the same user cannot read its memory or environment (key custody D4).
+- The key still lives in the validator process's memory. Separating it into a signer process is
+  key custody D1–D3, which awaits approval.
 - Each validator keeps a vote **signing guard** (`signing-guard.redb`) on its own `nodeN-guard`
   volume, separate from chain data `nodeN-data` (TODO 8.3.2). Deleting only `nodeN-data` is a
   safe resync: the guard stops the node re-signing views it already voted in. Never delete
   `nodeN-guard` for a validator that has signed; a node with chain data but no guard refuses to
   start unless `--init-signing-guard` is passed.
-- **Upgrading an existing devnet:** older devnets have chain data but no guard volume, so the
-  validators refuse to start. If you do not need the old chain, use `docker compose down -v`.
-  Otherwise start each validator once with `--init-signing-guard` added to its command. This is
-  safe only because no guard existed before, so nothing could be double-signed against it.
+- **Upgrading an existing devnet:** recreate it with `docker compose down -v`. Older devnets
+  keep their keys in `devnet-config`, which the nodes no longer read, and have no guard
+  volumes.
 - A consensus safety halt (guard fault, chain write failure, or a panic on any `hs-*` consensus
   thread) makes `/health` return 503
   `{"status":"halted","reason":…}` and the process exit with code 3 after 5s; compose restarts it
