@@ -297,13 +297,27 @@ impl<N: Network> BlockSyncClient<N> {
                 None => BlockHeight::new(0),
             };
 
+        // MIRASET PATCH #10: requests start at `highest committed + 1` as upstream. If such a
+        // response brings nothing new although this session inserted blocks beyond that height
+        // (a response that committed nothing, e.g. across view gaps left by timed-out leaders),
+        // retry once from after the last inserted block (`ahead`). Upstream ended the session
+        // there, and every later session repeated it: the replica never caught up. An `ahead`
+        // response that does not extend our blocks (our speculative tip lost a fork) ends the
+        // session without blacklisting the server, which did nothing wrong. Every block is
+        // still validated before insertion.
+        let mut next_height: Option<BlockHeight> = None;
+        let mut ahead = false;
+
         loop {
+            let after_committed = match block_tree.highest_committed_block_height()? {
+                Some(height) => height + 1,
+                None => BlockHeight::new(0),
+            };
             let request = BlockSyncRequest {
                 chain_id: self.config.chain_id,
-                start_height: if let Some(height) = block_tree.highest_committed_block_height()? {
-                    height + 1
-                } else {
-                    BlockHeight::new(0)
+                start_height: match next_height {
+                    Some(next) if ahead && next > after_committed => next,
+                    _ => after_committed,
                 },
                 limit: self.config.request_limit,
             };
@@ -320,6 +334,10 @@ impl<N: Network> BlockSyncClient<N> {
                         .skip_while(|block| block_tree.contains(&block.hash))
                         .collect();
                     if new_blocks.is_empty() {
+                        if !ahead && next_height.is_some_and(|next| next > after_committed) {
+                            ahead = true;
+                            continue;
+                        }
                         // Check if the server's commitment to providing blocks at least up to a given height was observed.
                         // If not, blacklist the server.
                         let min_blocks_expected = *self
@@ -349,11 +367,14 @@ impl<N: Network> BlockSyncClient<N> {
                         if !block.is_correct(block_tree)?
                             || !safe_block(&block, block_tree, self.config.chain_id)?
                         {
-                            // Blacklist the sync server.
-                            self.block_sync_client_state.blacklist_sync_server(
-                                peer.clone(),
-                                self.config.blacklist_expiry_time,
-                            );
+                            // Blacklist the sync server, unless the block only fails to
+                            // extend our own speculative tip (see `ahead` above).
+                            if !ahead {
+                                self.block_sync_client_state.blacklist_sync_server(
+                                    peer.clone(),
+                                    self.config.blacklist_expiry_time,
+                                );
+                            }
                             Event::EndSync(EndSyncEvent {
                                 timestamp: SystemTime::now(),
                                 peer: *peer,
@@ -399,6 +420,7 @@ impl<N: Network> BlockSyncClient<N> {
                             }
 
                             blocks_synced += 1;
+                            next_height = Some(block.height + 1);
                         } else {
                             // Blacklist the sync server.
                             self.block_sync_client_state.blacklist_sync_server(
@@ -420,6 +442,9 @@ impl<N: Network> BlockSyncClient<N> {
                             block_tree.update(&response.highest_pc, &self.event_publisher)?;
                         }
                     }
+                    // This response made progress: the next request starts from the committed
+                    // height again (MIRASET PATCH #10).
+                    ahead = false;
                 }
                 Err(BlockSyncResponseReceiveError::Disconnected)
                 | Err(BlockSyncResponseReceiveError::Timeout) => {

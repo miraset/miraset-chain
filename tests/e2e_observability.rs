@@ -62,15 +62,10 @@ fn test_e2e_probes_metrics_json_logs_and_graceful_drain() {
     }
 
     sigterm(run.child.id());
-    wait_for(
-        "draining readiness",
-        DRAIN_OBSERVE_TIMEOUT,
-        &run,
-        || {
-            status_of(v.rpc, "/readyz")
-                .is_some_and(|(code, json)| code == 503 && json["status"] == "draining")
-        },
-    );
+    wait_for("draining readiness", DRAIN_OBSERVE_TIMEOUT, &run, || {
+        status_of(v.rpc, "/readyz")
+            .is_some_and(|(code, json)| code == 503 && json["status"] == "draining")
+    });
     let status = run
         .wait_exit(EXIT_TIMEOUT)
         .expect("validator exits after SIGTERM");
@@ -128,7 +123,8 @@ fn test_e2e_text_logs_are_default_and_invalid_drain_is_refused() {
     );
 
     // An invalid RUST_LOG is reported and falls back to `info` instead of silencing logs.
-    v.env.push(("RUST_LOG".into(), "miraset_chain=notalevel".into()));
+    v.env
+        .push(("RUST_LOG".into(), "miraset_chain=notalevel".into()));
     let mut run = v.start(&["--init-signing-guard", "--shutdown-drain-ms", LONG_DRAIN_MS]);
     const STARTUP: &str = "starting MIRASET experimental/devnet validator";
     wait_for("startup line", STARTUP_TIMEOUT, &run, || {
@@ -153,5 +149,9 @@ fn test_e2e_text_logs_are_default_and_invalid_drain_is_refused() {
         .wait_exit(EARLY_EXIT_TIMEOUT)
         .expect("second signal ends the drain");
     assert!(status.success());
-    assert!(run.log_text().contains("second signal"), "{}", run.log_text());
+    assert!(
+        run.log_text().contains("second signal"),
+        "{}",
+        run.log_text()
+    );
 }

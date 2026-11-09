@@ -65,8 +65,14 @@ impl<S: KVGet> BlockTreeSnapshot<S> {
             }
         }
 
-        // Get speculative blocks.
-        let speculative_blocks = self.blocks_from_newest_to_committed()?.into_iter().rev();
+        // Get speculative blocks. MIRASET PATCH #10: from `height` on, like committed blocks.
+        // Upstream started at the committed height whatever `height` was, so a client asking past
+        // a speculative run longer than `limit` got the same known blocks back every time.
+        let speculative_blocks = self
+            .blocks_from_newest_to_committed()?
+            .into_iter()
+            .rev()
+            .filter(|block| block.height >= height);
         for block in speculative_blocks {
             res.push(block);
 
