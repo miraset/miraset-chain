@@ -210,10 +210,12 @@ Exit code 3 is not covered end to end: triggering it needs an injected fault, wh
 production binary does not expose. In-process tests cover the halt itself (T5 and the panic
 test).
 
-**Still open for 8.3.2:**
-- A deterministic regression test for vendored patch #8. Current evidence is the repeated
-  cluster runs.
-- Independent review of patches #7 and #8 (TODO 8.5.2).
+Vendored patch #8 has a deterministic regression test,
+`lib/hotstuff_rs/src/pacemaker/view_regression_tests.rs`, which fails on upstream with the
+production error.
+
+**Remaining outside 8.3.2:** independent review of patches #7 and #8 (TODO 8.5.2) and
+cross-host double signing (TODO 8.3.4).
 
 Cross-host double signing remains with TODO 8.3.4.
 

@@ -121,6 +121,11 @@
 //!
 //! Modules not listed above not subprotocol-specific.
 
+// MIRASET PATCH #8 test support: lets in-crate tests reuse `tests/common` helpers that refer to
+// the crate as `hotstuff_rs`.
+#[cfg(test)]
+extern crate self as hotstuff_rs;
+
 pub mod app;
 
 mod algorithm;

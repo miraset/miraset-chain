@@ -775,3 +775,7 @@ fn select_leader_fairness_test() {
         )
     })
 }
+
+#[cfg(test)]
+#[path = "view_regression_tests.rs"]
+mod view_regression_tests;
