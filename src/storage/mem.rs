@@ -34,6 +34,16 @@ impl KVGet for MemSnapshot {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         self.data.get(key).cloned()
     }
+
+    fn block_data(
+        &self,
+        block: &hotstuff_rs::types::data_types::CryptoHash,
+    ) -> Result<
+        Option<hotstuff_rs::types::data_types::Data>,
+        hotstuff_rs::block_tree::pluggables::KVGetError,
+    > {
+        super::kv_compat::read_block_data(self, block)
+    }
 }
 
 /// Thread-safe in-memory KVStore for HotStuff-rs consensus and state machine.
@@ -67,6 +77,16 @@ impl KVGet for MemKVStore {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
         let lock = self.state.read().expect("lock poisoned");
         lock.get(key).cloned()
+    }
+
+    fn block_data(
+        &self,
+        block: &hotstuff_rs::types::data_types::CryptoHash,
+    ) -> Result<
+        Option<hotstuff_rs::types::data_types::Data>,
+        hotstuff_rs::block_tree::pluggables::KVGetError,
+    > {
+        super::kv_compat::read_block_data(self, block)
     }
 }
 

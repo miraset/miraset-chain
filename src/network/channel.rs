@@ -5,6 +5,11 @@ use hotstuff_rs::types::update_sets::ValidatorSetUpdates;
 use hotstuff_rs::types::validator_set::ValidatorSet;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
+
+/// Back-off applied when a mailbox is empty. `hotstuff_rs` polls `Network::recv` in a
+/// `yield_now` loop, so an instantly-empty in-memory mailbox would busy-spin a core per node.
+const EMPTY_MAILBOX_BACKOFF: Duration = Duration::from_micros(500);
 
 type MailboxMap = HashMap<VerifyingKey, VecDeque<(VerifyingKey, Message)>>;
 
@@ -163,7 +168,11 @@ impl Network for ChannelNetwork {
     }
 
     fn recv(&mut self) -> Option<(VerifyingKey, Message)> {
-        self.hub.pop(&self.my_key)
+        let message = self.hub.pop(&self.my_key);
+        if message.is_none() {
+            std::thread::sleep(EMPTY_MAILBOX_BACKOFF);
+        }
+        message
     }
 }
 

@@ -78,7 +78,9 @@ impl StateSnapshot {
         }
 
         let mut all_refs: Vec<(&[u8], &[u8])> = Vec::with_capacity(
-            self.state_entries.len().saturating_add(self.receipt_entries.len()),
+            self.state_entries
+                .len()
+                .saturating_add(self.receipt_entries.len()),
         );
         for (k, v) in &self.state_entries {
             all_refs.push((k.as_slice(), v.as_slice()));
@@ -169,6 +171,16 @@ impl KVGet for RedbSnapshot {
         let table = self.read_txn.open_table(BLOCKTREE_TABLE).ok()?;
         let val = table.get(key).ok()??;
         Some(val.value().to_vec())
+    }
+
+    fn block_data(
+        &self,
+        block: &hotstuff_rs::types::data_types::CryptoHash,
+    ) -> Result<
+        Option<hotstuff_rs::types::data_types::Data>,
+        hotstuff_rs::block_tree::pluggables::KVGetError,
+    > {
+        super::kv_compat::read_block_data(self, block)
     }
 }
 
@@ -402,11 +414,11 @@ impl RedbKVStore {
     /// Prune non-state/non-metadata keys matching `prefix` while preserving finalized state,
     /// receipt indexes, and recovery metadata.
     pub fn prune_keys_with_prefix(&mut self, prefix: &[u8]) -> Result<usize, String> {
-        if is_app_state_key(prefix)
-            || is_receipt_index_key(prefix)
-            || prefix.starts_with(b"meta:")
+        if is_app_state_key(prefix) || is_receipt_index_key(prefix) || prefix.starts_with(b"meta:")
         {
-            return Err("refusing to prune protected state, receipt, or metadata prefix".to_string());
+            return Err(
+                "refusing to prune protected state, receipt, or metadata prefix".to_string(),
+            );
         }
 
         let read_txn = self
@@ -444,8 +456,9 @@ impl RedbKVStore {
 
     /// Explicit, fail-closed schema migration check. Never performs destructive automatic repair.
     pub fn migrate_schema(&mut self, from_version: u32, to_version: u32) -> Result<(), String> {
-        let meta = read_recovery_metadata(self)?
-            .ok_or_else(|| "cannot migrate uninitialized store (missing recovery metadata)".to_string())?;
+        let meta = read_recovery_metadata(self)?.ok_or_else(|| {
+            "cannot migrate uninitialized store (missing recovery metadata)".to_string()
+        })?;
         if meta.schema_version != from_version {
             return Err(format!(
                 "migration source version mismatch: store is at v{}, requested from v{}",
@@ -463,7 +476,10 @@ impl RedbKVStore {
 }
 
 /// Write recovery metadata into any `KVStore`.
-pub fn write_recovery_metadata<K: KVStore>(store: &mut K, meta: &RecoveryMetadata) -> Result<(), String> {
+pub fn write_recovery_metadata<K: KVStore>(
+    store: &mut K,
+    meta: &RecoveryMetadata,
+) -> Result<(), String> {
     let bytes = meta
         .to_bytes()
         .map_err(|e| format!("failed to encode recovery metadata: {e}"))?;
@@ -490,8 +506,9 @@ pub fn validate_recovery_state<K: KVStore>(
     expected_chain_id: u64,
     expected_genesis_hash: Option<[u8; 32]>,
 ) -> Result<RecoveryMetadata, String> {
-    let meta = read_recovery_metadata(store)?
-        .ok_or_else(|| "missing recovery metadata in store (uninitialized or incomplete genesis)".to_string())?;
+    let meta = read_recovery_metadata(store)?.ok_or_else(|| {
+        "missing recovery metadata in store (uninitialized or incomplete genesis)".to_string()
+    })?;
 
     if meta.schema_version != STORAGE_SCHEMA_VERSION {
         return Err(format!(
@@ -543,6 +560,16 @@ impl KVGet for RedbKVStore {
         let table = read_txn.open_table(BLOCKTREE_TABLE).ok()?;
         let val = table.get(key).ok()??;
         Some(val.value().to_vec())
+    }
+
+    fn block_data(
+        &self,
+        block: &hotstuff_rs::types::data_types::CryptoHash,
+    ) -> Result<
+        Option<hotstuff_rs::types::data_types::Data>,
+        hotstuff_rs::block_tree::pluggables::KVGetError,
+    > {
+        super::kv_compat::read_block_data(self, block)
     }
 }
 
@@ -785,7 +812,11 @@ mod tests {
         assert_eq!(store.get(b"task:t1"), Some(b"settled".to_vec()));
 
         // Schema migration checks
-        assert!(store.migrate_schema(STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION).is_ok());
+        assert!(
+            store
+                .migrate_schema(STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION)
+                .is_ok()
+        );
         assert!(store.migrate_schema(2, STORAGE_SCHEMA_VERSION).is_err());
         assert!(store.migrate_schema(STORAGE_SCHEMA_VERSION, 99).is_err());
     }

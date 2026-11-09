@@ -24,6 +24,8 @@ pub struct NodeConfig {
     pub epoch_length: u32,
     pub max_view_time: Duration,
     pub log_events: bool,
+    /// When set, startup fails unless the store's recorded genesis commitment matches.
+    pub expected_genesis_hash: Option<[u8; 32]>,
 }
 
 impl NodeConfig {
@@ -43,6 +45,7 @@ impl NodeConfig {
             epoch_length: 10,
             max_view_time: Duration::from_millis(1000),
             log_events: false,
+            expected_genesis_hash: None,
         }
     }
 
@@ -61,6 +64,12 @@ impl NodeConfig {
         }
         if self.progress_msg_buffer_capacity == 0 {
             return Err("progress_msg_buffer_capacity must be non-zero");
+        }
+        // hotstuff_rs v0.4.0 derives pacemaker deadlines from `max_view_time.as_secs()`,
+        // truncating sub-second precision. A sub-second (or fractional) value would
+        // silently become a zero or shorter timeout and stall liveness, so fail closed.
+        if self.max_view_time.as_secs() == 0 || self.max_view_time.subsec_nanos() != 0 {
+            return Err("max_view_time must be a whole number of seconds (>= 1s)");
         }
         Ok(())
     }
@@ -99,5 +108,28 @@ mod tests {
         cfg.experimental_mode = false;
         assert!(cfg.validate().is_err());
     }
-}
 
+    #[test]
+    fn test_node_config_rejects_sub_second_max_view_time() {
+        let key = SigningKey::from_bytes(&[1u8; 32]);
+        let base = NodeConfig::devnet(key);
+
+        for invalid in [
+            Duration::ZERO,
+            Duration::from_millis(350),
+            Duration::from_millis(1500),
+        ] {
+            let cfg = NodeConfig {
+                max_view_time: invalid,
+                ..base.clone()
+            };
+            assert!(cfg.validate().is_err(), "{invalid:?} should be rejected");
+        }
+
+        let cfg = NodeConfig {
+            max_view_time: Duration::from_secs(2),
+            ..base
+        };
+        assert!(cfg.validate().is_ok());
+    }
+}

@@ -1,6 +1,6 @@
 use ed25519_dalek::SigningKey;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use miraset_chain::core::types::{ComputeReceipt, Transaction};
 use miraset_chain::mempool::Mempool;
@@ -8,6 +8,24 @@ use miraset_chain::network::ChannelNetwork;
 use miraset_chain::network::ChannelNetworkHub;
 use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
 use miraset_chain::storage::MemKVStore;
+
+/// Upper bound for a consensus-dependent condition; tests return as soon as it holds.
+const CONSENSUS_TIMEOUT: Duration = Duration::from_secs(20);
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Poll `condition` until it holds or `timeout` elapses. Returns whether it held.
+fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if condition() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
 
 #[test]
 fn test_single_node_genesis_and_query() {
@@ -63,17 +81,29 @@ fn test_single_node_genesis_and_query() {
     receipt.sign_with(&coord_key);
     assert!(node.submit_receipt(receipt).is_ok());
 
-    // Allow background consensus threads to run and commit blocks
-    thread::sleep(Duration::from_millis(1500));
+    // Wait for background consensus to commit the transaction and receipt
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.is_task_settled("compute_task_001")
+            && node.get_account("bob").map(|a| a.balance) == Some(1_500)
+    });
 
-    // Verify commit event was broadcast and received
+    // Verify commit events were broadcast with the committed payload counts. Commit events read
+    // block data back from the KV store, so this also guards the `block_data` compat override.
     let mut received_event = false;
-    while let Ok(evt) = commit_rx.try_recv() {
-        if !evt.block_hash.is_empty() {
-            received_event = true;
-            break;
+    let (mut committed_txs, mut committed_receipts) = (0, 0);
+    wait_until(CONSENSUS_TIMEOUT, || {
+        while let Ok(evt) = commit_rx.try_recv() {
+            if !evt.block_hash.is_empty() {
+                received_event = true;
+                committed_txs += evt.tx_count;
+                committed_receipts += evt.receipt_count;
+            }
         }
-    }
+        committed_txs == 1 && committed_receipts == 1
+    });
+    assert_eq!((committed_txs, committed_receipts), (1, 1));
+    // Committed entries are pruned from the mempool by the commit handler.
+    assert_eq!(node.mempool().tx_count(), 0);
     assert!(
         received_event,
         "Expected to receive at least one commit event"
@@ -151,8 +181,13 @@ fn test_three_validator_cluster_consensus() {
     receipt.sign_with(&coord_key);
     assert!(nodes[0].submit_receipt(receipt).is_ok());
 
-    // Allow consensus rounds between the 3 validators to progress
-    thread::sleep(Duration::from_millis(2500));
+    // Wait for consensus rounds between the 3 validators to settle the task everywhere
+    wait_until(CONSENSUS_TIMEOUT, || {
+        nodes.iter().all(|n| {
+            n.is_task_settled("task_cluster_01")
+                && n.get_account(&alice_addr).map(|a| a.balance) == Some(44_850)
+        })
+    });
 
     // Verify on all 3 nodes that task was settled and alice was debited across consensus
     for node in &nodes {
@@ -202,7 +237,9 @@ fn test_worker_bond_registration_unbonding_and_slashing() {
     bond_tx.sign_with(&worker_owner_key);
     assert!(node.submit_transaction(bond_tx).is_ok());
 
-    thread::sleep(Duration::from_millis(1500));
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.get_worker("gpu_worker_pro").is_some()
+    });
 
     // Verify worker registration committed
     let worker = node
@@ -229,7 +266,9 @@ fn test_worker_bond_registration_unbonding_and_slashing() {
     unbond_tx.sign_with(&worker_owner_key);
     assert!(node.submit_transaction(unbond_tx).is_ok());
 
-    thread::sleep(Duration::from_millis(1500));
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.get_worker("gpu_worker_pro").map(|w| w.stake) == Some(400)
+    });
 
     let worker = node.get_worker("gpu_worker_pro").unwrap();
     assert_eq!(worker.stake, 400); // 500 - 100
@@ -251,7 +290,9 @@ fn test_worker_bond_registration_unbonding_and_slashing() {
     slash_tx.sign_with(&worker_owner_key);
     assert!(node.submit_transaction(slash_tx).is_ok());
 
-    thread::sleep(Duration::from_millis(1500));
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.get_worker("gpu_worker_pro").map(|w| w.stake) == Some(360)
+    });
 
     let worker = node.get_worker("gpu_worker_pro").unwrap();
     assert_eq!(worker.stake, 360); // 400 - 40
@@ -298,7 +339,9 @@ fn test_epoch_token_accumulation_and_system_rollover() {
     reg_tx.sign_with(&owner_key);
     assert!(node.submit_transaction(reg_tx).is_ok());
 
-    thread::sleep(Duration::from_millis(1500));
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.get_worker("epoch_worker_1").is_some()
+    });
 
     // Verify worker registered
     let worker = node
@@ -322,7 +365,9 @@ fn test_epoch_token_accumulation_and_system_rollover() {
     receipt.sign_with(&coord_key);
     assert!(node.submit_receipt(receipt).is_ok());
 
-    thread::sleep(Duration::from_millis(1500));
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.get_current_epoch().map(|e| e.total_receipts) == Some(1)
+    });
 
     // Verify worker epoch_tokens and epoch accumulation
     let worker = node.get_worker("epoch_worker_1").unwrap();
@@ -347,7 +392,9 @@ fn test_epoch_token_accumulation_and_system_rollover() {
     rollover_tx.sign_with(&owner_key);
     assert!(node.submit_transaction(rollover_tx).is_ok());
 
-    thread::sleep(Duration::from_millis(1500));
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.get_current_epoch().map(|e| e.epoch_id) == Some(1)
+    });
 
     // Verify epoch has advanced to 1
     let next_epoch = node.get_current_epoch().expect("next epoch should exist");
@@ -387,12 +434,7 @@ fn test_four_validator_fault_bound_and_partition_healing() {
         .map(|i| SigningKey::from_bytes(&[i as u8; 32]))
         .collect();
     let vks: Vec<_> = keypairs.iter().map(|kp| kp.verifying_key()).collect();
-    let validators = vec![
-        (vks[0], 3),
-        (vks[1], 3),
-        (vks[2], 3),
-        (vks[3], 1),
-    ];
+    let validators = vec![(vks[0], 3), (vks[1], 3), (vks[2], 3), (vks[3], 1)];
 
     let alice_key = SigningKey::from_bytes(&[25u8; 32]);
     let alice_addr = hex::encode(alice_key.verifying_key().to_bytes());
@@ -408,8 +450,8 @@ fn test_four_validator_fault_bound_and_partition_healing() {
         init_genesis(kv.clone(), &validators, &initial_accounts);
         let net = ChannelNetwork::new(vk, hub.clone());
         let pool = Mempool::new();
-        let mut config = NodeConfig::devnet(kp);
-        config.max_view_time = Duration::from_millis(350);
+        // hotstuff_rs truncates max_view_time to whole seconds; keep the 1s devnet default.
+        let config = NodeConfig::devnet(kp);
         nodes.push(MirasetNode::start(config, kv, net, pool));
     }
 
@@ -421,22 +463,19 @@ fn test_four_validator_fault_bound_and_partition_healing() {
     }
 
     // Wait for honest 3-of-4 quorum to advance views around the isolated validator and commit
-    let deadline = std::time::Instant::now() + Duration::from_millis(6000);
-    while std::time::Instant::now() < deadline {
-        if nodes[..3]
+    wait_until(CONSENSUS_TIMEOUT, || {
+        nodes[..3]
             .iter()
             .all(|n| n.get_account("bob").map(|a| a.balance) == Some(3_000))
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+    });
 
     // Verify all 3 honest validators finalized the transaction identically with no conflicting finality
     for honest_node in &nodes[..3] {
         let bob = honest_node.get_account("bob").expect("bob should exist");
         assert_eq!(bob.balance, 3_000);
-        let alice = honest_node.get_account(&alice_addr).expect("alice should exist");
+        let alice = honest_node
+            .get_account(&alice_addr)
+            .expect("alice should exist");
         assert_eq!(alice.balance, 97_950);
         assert!(honest_node.highest_committed_block().is_some());
     }
@@ -449,22 +488,21 @@ fn test_four_validator_fault_bound_and_partition_healing() {
         assert!(honest_node.submit_transaction(tx2.clone()).is_ok());
     }
 
-    let heal_deadline = std::time::Instant::now() + Duration::from_millis(6000);
-    while std::time::Instant::now() < heal_deadline {
-        if nodes
+    wait_until(CONSENSUS_TIMEOUT, || {
+        nodes
             .iter()
             .all(|n| n.get_account("bob").map(|a| a.balance) == Some(4_000))
-        {
-            break;
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
+    });
 
     // Verify all 4 validators (including the healed lagging validator) converge on the finalized state
     for node in &nodes {
-        let bob = node.get_account("bob").expect("bob should exist on all nodes");
+        let bob = node
+            .get_account("bob")
+            .expect("bob should exist on all nodes");
         assert_eq!(bob.balance, 4_000);
-        let alice = node.get_account(&alice_addr).expect("alice should exist on all nodes");
+        let alice = node
+            .get_account(&alice_addr)
+            .expect("alice should exist on all nodes");
         assert_eq!(alice.balance, 96_900);
         assert_eq!(alice.nonce, 2);
     }

@@ -805,11 +805,7 @@ impl EpochRewardConfig {
         total_budget: u64,
         workers: &[WorkerInfo],
     ) -> Result<EpochRewardDistribution, &'static str> {
-        if self
-            .compute_split_bps
-            .checked_add(self.capacity_split_bps)
-            != Some(10_000)
-        {
+        if self.compute_split_bps.checked_add(self.capacity_split_bps) != Some(10_000) {
             return Err("invalid reward pool split bps (must sum to 10000)");
         }
         if self.vram_cap_gib == 0 {
@@ -909,9 +905,8 @@ impl EpochRewardConfig {
                         .checked_sub(capacity_allocated)
                         .ok_or("capacity pool remainder underflow")?
                 } else {
-                    let s =
-                        u64::try_from((capacity_pool as u128 * *score) / total_capacity_score)
-                            .map_err(|_| "capacity share overflow")?;
+                    let s = u64::try_from((capacity_pool as u128 * *score) / total_capacity_score)
+                        .map_err(|_| "capacity share overflow")?;
                     capacity_allocated = capacity_allocated
                         .checked_add(s)
                         .ok_or("capacity allocated overflow")?;
@@ -1130,9 +1125,7 @@ mod tests {
         );
         assert_eq!(Transaction::from_canonical_bytes(&tx_bytes).unwrap(), tx);
 
-        let receipt = ComputeReceipt::new(
-            "t1", "alice", "w1", "c1", "m1", "p1", 100, 25, 20,
-        );
+        let receipt = ComputeReceipt::new("t1", "alice", "w1", "c1", "m1", "p1", 100, 25, 20);
         let r_bytes = receipt.to_canonical_bytes().unwrap();
         assert_eq!(&r_bytes[..4], b"MRCP");
         assert_eq!(r_bytes[4], PROTOCOL_ENCODING_VERSION);
@@ -1145,7 +1138,8 @@ mod tests {
         let r_commit = receipt.commitment_hash().unwrap();
         let block = BlockPayload::new(vec![tx], vec![receipt]);
         let block_commit = block.commitment_hash().unwrap();
-        let state_commit = compute_state_commitment(&[(b"acc:alice", b"1000"), (b"acc:bob", b"500")]);
+        let state_commit =
+            compute_state_commitment(&[(b"acc:alice", b"1000"), (b"acc:bob", b"500")]);
         let state_commit_reordered =
             compute_state_commitment(&[(b"acc:bob", b"500"), (b"acc:alice", b"1000")]);
 
@@ -1196,8 +1190,10 @@ mod tests {
         assert!(receipt.to_canonical_bytes().is_err());
         assert!(receipt.verify_signature().is_err());
 
-        let mut block = BlockPayload::default();
-        block.version = 2;
+        let block = BlockPayload {
+            version: 2,
+            ..Default::default()
+        };
         assert!(block.to_canonical_bytes().is_err());
     }
 }

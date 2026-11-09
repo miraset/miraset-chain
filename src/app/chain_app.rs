@@ -505,7 +505,6 @@ impl MirasetApp {
 
 impl<K: KVStore> App<K> for MirasetApp {
     fn produce_block(&mut self, request: ProduceBlockRequest<'_, K>) -> ProduceBlockResponse {
-        std::thread::sleep(std::time::Duration::from_millis(5));
         let (candidate_txs, candidate_receipts) = self.mempool.peek_for_block(100, 20);
         let mut selected_txs = Vec::new();
         let mut selected_receipts = Vec::new();

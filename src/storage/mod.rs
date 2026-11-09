@@ -1,3 +1,4 @@
+pub mod kv_compat;
 pub mod mem;
 pub mod redb;
 
