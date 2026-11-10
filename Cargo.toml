@@ -41,3 +41,9 @@ tonic-prost-build = "0.14"
 
 
 
+
+# Dependencies (crypto, storage, serialization) are optimised even in debug builds: unoptimised
+# Ed25519 verification is slow enough that a debug-build leader cannot produce a full block within
+# a view. Our own crate stays at opt-level 0 for debugging.
+[profile.dev.package."*"]
+opt-level = 2

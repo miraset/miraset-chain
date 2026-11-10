@@ -1,6 +1,5 @@
 use crate::core::types::{
-    AccountState, BlockPayload, EpochInfo, EpochRewardConfig, EpochStatus, MIN_WORKER_BOND,
-    Transaction, WorkerBondAction, WorkerInfo, compute_state_commitment,
+    AccountState, BlockPayload, ComputeReceipt, EpochInfo, Transaction, WorkerInfo,
 };
 use crate::mempool::Mempool;
 use hotstuff_rs::app::{
@@ -9,7 +8,9 @@ use hotstuff_rs::app::{
 use hotstuff_rs::block_tree::pluggables::KVStore;
 use hotstuff_rs::types::data_types::{CryptoHash, Data, Datum};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
-use std::collections::{BTreeMap, BTreeSet};
+
+mod execution;
+use execution::BlockExecution;
 
 /// Application state machine implementing `hotstuff_rs::app::App`.
 pub struct MirasetApp {
@@ -165,388 +166,71 @@ impl MirasetApp {
     }
 
     /// Process payload against block tree view to compute deterministic state updates
-    /// and the resulting domain-separated state commitment root (PRD R04).
+    /// and the resulting domain-separated state commitment root (PRD R04). Any invalid
+    /// transaction or receipt rejects the whole payload.
     fn compute_state_updates_with_commitment<K: KVStore>(
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
         payload: &BlockPayload,
     ) -> Option<(AppStateUpdates, [u8; 32])> {
-        let mut updates = AppStateUpdates::new();
-        let mut committed_entries: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
-
-        // Track running balances and state deterministically during block processing
-        let mut local_accounts = BTreeMap::<String, AccountState>::new();
-        let mut local_workers = BTreeMap::<String, WorkerInfo>::new();
-        let mut local_tasks = BTreeSet::<String>::new();
-        let all_ids_key = b"workers:all_ids".to_vec();
-        let mut worker_ids: Vec<String> = tree
-            .app_state(&all_ids_key)
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
-        let mut worker_ids_modified = false;
-        let mut current_epoch = Self::read_current_epoch(tree);
-        let mut epoch_modified = false;
-
+        let mut execution = BlockExecution::new(tree);
         for tx in &payload.transactions {
-            let sender_acc = local_accounts
-                .remove(&tx.sender)
-                .unwrap_or_else(|| Self::read_account(tree, &tx.sender));
-
-            // Reject the block on an unsigned/forged sender, a replayed or
-            // out-of-order nonce, overflow, or insufficient funds.
-            let updated_sender = Self::apply_transaction_to_sender(tx, &sender_acc).ok()?;
-            local_accounts.insert(tx.sender.clone(), updated_sender);
-
-            // Handle worker bond actions if recipient is system:worker_registry
-            if tx.recipient == "system:worker_registry" && !tx.payload.is_empty() {
-                let action: WorkerBondAction = match serde_json::from_slice(&tx.payload) {
-                    Ok(a) => a,
-                    Err(_) => return None, // malformed payload
-                };
-
-                match action {
-                    WorkerBondAction::Register {
-                        worker_id,
-                        bond_amount,
-                        vram_gib,
-                        endpoint,
-                    } => {
-                        if tx.amount != bond_amount {
-                            return None;
-                        }
-                        let mut worker = local_workers
-                            .remove(&worker_id)
-                            .or_else(|| Self::read_worker(tree, &worker_id))
-                            .unwrap_or(WorkerInfo {
-                                worker_id: worker_id.clone(),
-                                stake: 0,
-                                completed_tasks: 0,
-                                rewards_accumulated: 0,
-                                active: true,
-                                vram_gib,
-                                uptime_bps: 10000,
-                                epoch_tokens: 0,
-                                owner_address: tx.sender.clone(),
-                                endpoint: endpoint.clone(),
-                            });
-
-                        // If already has an owner, only owner can add bond
-                        if !worker.owner_address.is_empty() && worker.owner_address != tx.sender {
-                            return None;
-                        }
-
-                        worker.owner_address = tx.sender.clone();
-                        worker.stake = worker.stake.checked_add(bond_amount)?;
-                        if vram_gib > 0 {
-                            worker.vram_gib = vram_gib;
-                        }
-                        if !endpoint.is_empty() {
-                            worker.endpoint = endpoint;
-                        }
-                        worker.active = worker.stake >= MIN_WORKER_BOND;
-                        local_workers.insert(worker_id.clone(), worker);
-
-                        worker_ids_modified |= Self::add_worker_id(&mut worker_ids, &worker_id);
-                    }
-                    WorkerBondAction::Unbond { worker_id, amount } => {
-                        let mut worker = local_workers
-                            .remove(&worker_id)
-                            .or_else(|| Self::read_worker(tree, &worker_id))?;
-
-                        // Only owner can unbond
-                        if worker.owner_address != tx.sender {
-                            return None;
-                        }
-
-                        worker.stake = worker.stake.checked_sub(amount)?;
-                        if worker.stake < MIN_WORKER_BOND {
-                            worker.active = false;
-                        }
-                        local_workers.insert(worker_id, worker);
-
-                        // Credit unbonded funds back to owner using checked arithmetic
-                        let mut owner_acc = local_accounts
-                            .remove(&tx.sender)
-                            .unwrap_or_else(|| Self::read_account(tree, &tx.sender));
-                        owner_acc.balance = owner_acc.balance.checked_add(amount)?;
-                        local_accounts.insert(tx.sender.clone(), owner_acc);
-                    }
-                    WorkerBondAction::Slash {
-                        worker_id,
-                        slash_amount,
-                        ..
-                    } => {
-                        // Slashes burn worker stake with checked underflow rejection
-                        let mut worker = local_workers
-                            .remove(&worker_id)
-                            .or_else(|| Self::read_worker(tree, &worker_id))?;
-
-                        worker.stake = worker.stake.checked_sub(slash_amount)?;
-                        if worker.stake < MIN_WORKER_BOND {
-                            worker.active = false;
-                        }
-                        local_workers.insert(worker_id, worker);
-                    }
-                }
-            } else if tx.recipient == "system:epoch_manager" && !tx.payload.is_empty() {
-                // Handle epoch rollover and reward distribution
-                if tx.payload.len() != 8 {
-                    return None;
-                }
-                let mut epoch_bytes = [0u8; 8];
-                epoch_bytes.copy_from_slice(&tx.payload);
-                let target_epoch_id = u64::from_be_bytes(epoch_bytes);
-
-                // Target epoch must match current active epoch
-                if target_epoch_id != current_epoch.epoch_id {
-                    return None;
-                }
-
-                // Load all registered workers from state, augmented by locally updated workers
-                let mut all_workers = Self::read_all_registered_workers(tree);
-                for local_w in local_workers.values() {
-                    if let Some(pos) = all_workers
-                        .iter()
-                        .position(|w| w.worker_id == local_w.worker_id)
-                    {
-                        all_workers[pos] = local_w.clone();
-                    } else {
-                        all_workers.push(local_w.clone());
-                    }
-                }
-                all_workers.sort_by(|a, b| a.worker_id.cmp(&b.worker_id));
-
-                // Compute canonical PoCC reward distribution across all registered workers
-                let reward_config = EpochRewardConfig::default();
-                let distribution = reward_config
-                    .try_distribute(current_epoch.reward_budget, &all_workers)
-                    .ok()?;
-
-                // Credit distributed rewards to worker owners / balances
-                for (w_id, reward_amount) in &distribution.worker_rewards {
-                    if *reward_amount > 0 {
-                        let worker = local_workers
-                            .remove(w_id)
-                            .or_else(|| Self::read_worker(tree, w_id));
-
-                        if let Some(mut worker) = worker {
-                            worker.rewards_accumulated =
-                                worker.rewards_accumulated.checked_add(*reward_amount)?;
-                            if !worker.owner_address.is_empty() {
-                                let mut owner_acc =
-                                    local_accounts.remove(&worker.owner_address).unwrap_or_else(
-                                        || Self::read_account(tree, &worker.owner_address),
-                                    );
-                                owner_acc.balance =
-                                    owner_acc.balance.checked_add(*reward_amount)?;
-                                local_accounts.insert(worker.owner_address.clone(), owner_acc);
-                            }
-                            local_workers.insert(w_id.clone(), worker);
-                        }
-                    }
-                }
-
-                // Finalize current epoch
-                current_epoch.status = EpochStatus::Finalized;
-                current_epoch.distribution = Some(distribution);
-
-                // Write finalized epoch to historical index: epoch:info:{epoch_id}
-                let hist_key = Self::epoch_key(current_epoch.epoch_id);
-                let hist_val = current_epoch.to_bytes().ok()?;
-                committed_entries.insert(hist_key.clone(), hist_val.clone());
-                updates.insert(hist_key, hist_val);
-
-                // Reset worker epoch_tokens for the next epoch across all workers
-                for mut worker in all_workers {
-                    if let Some(local_w) = local_workers.get_mut(&worker.worker_id) {
-                        local_w.epoch_tokens = 0;
-                    } else {
-                        worker.epoch_tokens = 0;
-                        local_workers.insert(worker.worker_id.clone(), worker);
-                    }
-                }
-
-                // Advance to next active epoch using checked arithmetic
-                let next_epoch = EpochInfo::new(
-                    current_epoch.epoch_id.checked_add(1)?,
-                    current_epoch.start_timestamp.checked_add(3600)?,
-                    current_epoch.reward_budget,
-                );
-                current_epoch = next_epoch;
-                epoch_modified = true;
-            } else {
-                let mut recipient_acc = local_accounts
-                    .remove(&tx.recipient)
-                    .unwrap_or_else(|| Self::read_account(tree, &tx.recipient));
-                recipient_acc.balance = recipient_acc.balance.checked_add(tx.amount)?;
-                local_accounts.insert(tx.recipient.clone(), recipient_acc);
-            }
+            execution.apply_transaction(tree, tx)?;
         }
-
-        // Process PoCC compute receipts:
-        // - Cryptographic signature verification
-        // - Enforce anti-replay on task_id
-        // - Verify client receipt delivery confirmation
-        // - Debit client account for compute cost with checked arithmetic
-        // - Credit worker rewards and increment completed tasks with checked arithmetic
         for receipt in &payload.compute_receipts {
-            if receipt.verify_signature().is_err() {
-                // Reject block on invalid signature
-                return None;
-            }
-
-            let t_key = Self::task_key(&receipt.task_id);
-            if tree.app_state(&t_key).is_some() || local_tasks.contains(&receipt.task_id) {
-                // Reject block on duplicate task replay
-                return None;
-            }
-            local_tasks.insert(receipt.task_id.clone());
-            let settled_val = b"settled".to_vec();
-            committed_entries.insert(t_key.clone(), settled_val.clone());
-            updates.insert(t_key, settled_val);
-
-            // If client account is specified, verify client delivery confirmation and debit cost
-            if !receipt.client_address.is_empty() {
-                if !receipt.client_confirmed {
-                    // Client did not confirm receiving all generated output
-                    return None;
-                }
-
-                if receipt.client_cost > 0 {
-                    let mut client_acc = local_accounts
-                        .remove(&receipt.client_address)
-                        .unwrap_or_else(|| Self::read_account(tree, &receipt.client_address));
-
-                    client_acc.balance = client_acc.balance.checked_sub(receipt.client_cost)?;
-                    local_accounts.insert(receipt.client_address.clone(), client_acc);
-                }
-            }
-
-            let reward = if receipt.worker_reward > 0 {
-                receipt.worker_reward
-            } else {
-                receipt.gas_reward
-            };
-
-            let mut worker = local_workers
-                .remove(&receipt.worker_id)
-                .or_else(|| Self::read_worker(tree, &receipt.worker_id))
-                .unwrap_or(WorkerInfo {
-                    worker_id: receipt.worker_id.clone(),
-                    stake: 0,
-                    completed_tasks: 0,
-                    rewards_accumulated: 0,
-                    active: true,
-                    vram_gib: 24,
-                    uptime_bps: 10000,
-                    epoch_tokens: 0,
-                    owner_address: String::new(),
-                    endpoint: String::new(),
-                });
-
-            worker.completed_tasks = worker.completed_tasks.checked_add(1)?;
-            worker.rewards_accumulated = worker.rewards_accumulated.checked_add(reward)?;
-            worker.epoch_tokens = worker.epoch_tokens.checked_add(receipt.tokens_computed)?;
-            local_workers.insert(receipt.worker_id.clone(), worker);
-
-            // Accumulate tokens and receipt counts into active epoch
-            current_epoch.total_tokens = current_epoch
-                .total_tokens
-                .checked_add(receipt.tokens_computed)?;
-            current_epoch.total_receipts = current_epoch.total_receipts.checked_add(1)?;
-            epoch_modified = true;
+            execution.apply_receipt(tree, receipt)?;
         }
+        execution.finish()
+    }
+}
 
-        if worker_ids_modified {
-            worker_ids.sort();
-            let val = serde_json::to_vec(&worker_ids).ok()?;
-            committed_entries.insert(all_ids_key.clone(), val.clone());
-            updates.insert(all_ids_key, val);
-        }
-
-        // Apply epoch state updates
-        if epoch_modified {
-            let key = Self::current_epoch_key();
-            let val = current_epoch.to_bytes().ok()?;
-            committed_entries.insert(key.clone(), val.clone());
-            updates.insert(key, val.clone());
-
-            // Also keep current epoch synced under its indexed key epoch:info:{epoch_id}
-            let info_key = Self::epoch_key(current_epoch.epoch_id);
-            committed_entries.insert(info_key.clone(), val.clone());
-            updates.insert(info_key, val);
-        }
-
-        // Apply worker updates in deterministic BTreeMap order
-        for (w_id, worker) in local_workers {
-            let key = Self::worker_key(&w_id);
-            let val = serde_json::to_vec(&worker).ok()?;
-            committed_entries.insert(key.clone(), val.clone());
-            updates.insert(key, val);
-        }
-
-        // Apply account updates in deterministic BTreeMap order
-        for (addr, acc) in local_accounts {
-            let key = Self::account_key(&addr);
-            let val = serde_json::to_vec(&acc).ok()?;
-            committed_entries.insert(key.clone(), val.clone());
-            updates.insert(key, val);
-        }
-
-        let refs: Vec<(&[u8], &[u8])> = committed_entries
-            .iter()
-            .map(|(k, v)| (k.as_slice(), v.as_slice()))
-            .collect();
-        let state_root = compute_state_commitment(&refs);
-        updates.insert(Self::state_commitment_key(), state_root.to_vec());
-
-        Some((updates, state_root))
+/// Keep `item` if it applies on top of `execution`; otherwise leave `execution` unchanged.
+/// One application per candidate (PRD R04, TODO 8.5.3 finding b).
+fn try_apply(
+    execution: &mut BlockExecution,
+    apply: impl FnOnce(&mut BlockExecution) -> Option<()>,
+) -> bool {
+    let mut trial = execution.clone();
+    if apply(&mut trial).is_some() {
+        *execution = trial;
+        true
+    } else {
+        false
     }
 }
 
 impl<K: KVStore> App<K> for MirasetApp {
     fn produce_block(&mut self, request: ProduceBlockRequest<'_, K>) -> ProduceBlockResponse {
         let (candidate_txs, candidate_receipts) = self.mempool.peek_for_block(100, 20);
-        let mut selected_txs = Vec::new();
-        let mut selected_receipts = Vec::new();
+        // Greedy selection in mempool order: a candidate is kept if it applies on top of the
+        // ones kept before it (transactions first, then receipts, as execution orders them).
+        let tree = request.block_tree();
+        let mut execution = BlockExecution::new(tree);
+        let selected_txs: Vec<Transaction> = candidate_txs
+            .into_iter()
+            .filter(|tx| try_apply(&mut execution, |e| e.apply_transaction(tree, tx)))
+            .collect();
+        let selected_receipts: Vec<ComputeReceipt> = candidate_receipts
+            .into_iter()
+            .filter(|receipt| try_apply(&mut execution, |e| e.apply_receipt(tree, receipt)))
+            .collect();
 
-        for tx in candidate_txs {
-            let mut trial_txs = selected_txs.clone();
-            trial_txs.push(tx.clone());
-            let trial_payload = BlockPayload::new(trial_txs, selected_receipts.clone());
-            if Self::compute_state_updates_with_commitment(request.block_tree(), &trial_payload)
-                .is_some()
-            {
-                selected_txs.push(tx);
-            }
-        }
-
-        for receipt in candidate_receipts {
-            let mut trial_receipts = selected_receipts.clone();
-            trial_receipts.push(receipt.clone());
-            let trial_payload = BlockPayload::new(selected_txs.clone(), trial_receipts);
-            if Self::compute_state_updates_with_commitment(request.block_tree(), &trial_payload)
-                .is_some()
-            {
-                selected_receipts.push(receipt);
-            }
-        }
-
+        // `finish` is the same code validators run after applying the payload, so the state
+        // root and updates match what `validate_block` will compute.
         let mut payload = BlockPayload::new(selected_txs, selected_receipts);
-        let app_state_updates =
-            match Self::compute_state_updates_with_commitment(request.block_tree(), &payload) {
-                Some((updates, state_root)) => {
-                    payload.state_root = state_root;
-                    Some(updates)
-                }
-                None => {
-                    payload = BlockPayload::default();
-                    let (updates, state_root) =
-                        Self::compute_state_updates_with_commitment(request.block_tree(), &payload)
-                            .expect("empty block state commitment must succeed");
-                    payload.state_root = state_root;
-                    Some(updates)
-                }
-            };
+        let app_state_updates = match execution.finish() {
+            Some((updates, state_root)) => {
+                payload.state_root = state_root;
+                Some(updates)
+            }
+            None => {
+                payload = BlockPayload::default();
+                let (updates, state_root) =
+                    Self::compute_state_updates_with_commitment(tree, &payload)
+                        .expect("empty block state commitment must succeed");
+                payload.state_root = state_root;
+                Some(updates)
+            }
+        };
 
         let payload_bytes = payload.to_bytes();
         let hash_arr = payload
@@ -619,6 +303,7 @@ impl<K: KVStore> App<K> for MirasetApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::types::EpochRewardConfig;
     use crate::core::types::{ComputeReceipt, Transaction};
 
     #[test]
