@@ -47,6 +47,16 @@ services:
     volumes: [faucet-key:/keys/faucet:ro]
     network_mode: none
 
+  # Load generator for scripts/devnet/bench.sh and soak.sh (TODO 8.5.3). Holds the faucet key
+  # (read-only) to fund throwaway senders; runs inside the devnet network, so validator netem
+  # profiles also delay its responses and commit events (one way, not a full round trip).
+  loadgen:
+    image: miraset-chain:devnet
+    build: .
+    profiles: [tools]
+    volumes: [faucet-key:/keys/faucet:ro]
+    networks: [devnet]
+
   node0:
     <<: *validator
     hostname: node0

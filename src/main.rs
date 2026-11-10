@@ -210,8 +210,40 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         init_signing_guard: bool,
     },
+    /// Offer a measured transfer/receipt load to devnet node RPCs and print a JSON report
+    /// (TODO 8.5.3). Funds throwaway senders from the faucet key; devnet use only
+    Loadgen(Box<LoadgenArgs>),
     /// Run the interactive in-memory devnet demo
     Demo,
+}
+
+#[derive(clap::Args, Debug)]
+struct LoadgenArgs {
+    /// Node RPC base URL (repeat once per node); the first funds senders and observes commits
+    #[arg(long = "rpc", required = true)]
+    rpc_urls: Vec<String>,
+    /// Funded key that pays for the senders (the devnet faucet key)
+    #[arg(long)]
+    faucet_key: PathBuf,
+    #[arg(long, default_value_t = 32)]
+    senders: usize,
+    /// Offered items (transfers + receipts) per second across all nodes
+    #[arg(long, default_value_t = 20.0)]
+    rate: f64,
+    /// Fraction of offered items that are compute receipts
+    #[arg(long, default_value_t = 0.15)]
+    receipt_share: f64,
+    #[arg(long, default_value_t = 60)]
+    duration_secs: u64,
+    /// Initial seconds of the run excluded from the report
+    #[arg(long, default_value_t = 10)]
+    warmup_secs: u64,
+    /// After the load stops, seconds to wait for admitted items to commit
+    #[arg(long, default_value_t = 60)]
+    drain_timeout_secs: u64,
+    /// Amount the faucet sends each sender before the run
+    #[arg(long, default_value_t = 10_000_000)]
+    fund_amount: u64,
 }
 
 #[tokio::main]
@@ -279,6 +311,7 @@ async fn main() -> CliResult {
                 }
             }
         }
+        Commands::Loadgen(args) => run_loadgen(&args).await,
         Commands::Demo => {
             run_devnet_demo().await;
             Ok(())
@@ -321,6 +354,33 @@ fn expected_chain(path: &Path) -> Result<ExpectedChain, MaintenanceError> {
 
 fn to_json(report: &impl serde::Serialize) -> String {
     serde_json::to_string_pretty(report).expect("maintenance reports serialize")
+}
+
+async fn run_loadgen(args: &LoadgenArgs) -> CliResult {
+    let config = miraset_chain::loadgen::LoadConfig {
+        rpc_urls: args
+            .rpc_urls
+            .iter()
+            .map(|u| u.trim_end_matches('/').to_string())
+            .collect(),
+        faucet: devnet::read_key_file(&args.faucet_key)?,
+        senders: args.senders,
+        rate: args.rate,
+        receipt_share: args.receipt_share,
+        duration: Duration::from_secs(args.duration_secs),
+        warmup: Duration::from_secs(args.warmup_secs),
+        drain_timeout: Duration::from_secs(args.drain_timeout_secs),
+        fund_amount: args.fund_amount,
+        run_id: rand::random(),
+    };
+    let report = miraset_chain::loadgen::run(&config)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        });
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 fn keygen(out: &Path) -> CliResult {

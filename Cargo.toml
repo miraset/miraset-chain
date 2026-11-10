@@ -28,12 +28,13 @@ tonic-prost = "0.14"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "json", "env-filter", "tracing-log", "ansi", "std"] }
 tower = { version = "0.5", features = ["util"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+http-body-util = "0.1"
 tower-http = { version = "0.6", features = ["cors"] }
 zeroize = "1"
 
 [dev-dependencies]
-http-body-util = "0.1"
 
 [build-dependencies]
 protox = "0.10"

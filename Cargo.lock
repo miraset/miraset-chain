@@ -893,6 +893,7 @@ dependencies = [
  "hex",
  "hotstuff_rs",
  "http-body-util",
+ "hyper",
  "hyper-util",
  "libc",
  "prost",

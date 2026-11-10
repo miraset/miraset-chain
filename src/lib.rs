@@ -3,6 +3,7 @@ pub mod consensus;
 pub mod core;
 pub mod devnet;
 pub mod keys;
+pub mod loadgen;
 pub mod mempool;
 pub mod network;
 pub mod node;
