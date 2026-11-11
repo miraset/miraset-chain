@@ -35,6 +35,14 @@ done
 out="${out:-bench-results/$(date -u +%Y%m%dT%H%M%SZ)-$profile}"
 mkdir -p "$out"
 
+# Agreement is checked at every height with shaping cleared: under netem each of the
+# height x node requests would carry the WAN delay and the check would take hours.
+check_agreement() {
+  [[ "$profile" == lan ]] || "$HERE/netem.sh" lan >/dev/null
+  python3 "$HERE/check_consensus.py" --rpc "$ALL_RPCS" --min-reachable 5
+  [[ "$profile" == lan ]] || "$HERE/netem.sh" "$profile" >/dev/null
+}
+
 fund_amount() { # $1 = rate
   python3 -c "import math; print(math.ceil($1 * $duration / $senders) * $ITEM_BUDGET + 1000)"
 }
@@ -68,7 +76,7 @@ for rate in $rates; do
     --faucet-key /keys/faucet/faucet.key --senders "$senders" --rate "$rate" \
     --receipt-share "$share" --duration-secs "$duration" --warmup-secs "$warmup" \
     --fund-amount "$(fund_amount "$rate")" >"$out/rate-$rate.json" 2>"$out/rate-$rate.log"
-  python3 "$HERE/check_consensus.py" --rpc "$ALL_RPCS" --min-reachable 5
+  check_agreement
 done
 
 python3 "$HERE/bench_summary.py" "$out" | tee "$out/summary.md"

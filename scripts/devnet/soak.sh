@@ -98,6 +98,8 @@ wait "$load_pid" || load_status=$?
 load_pid=""
 sample >>"$out/samples.csv"
 
+# Clear shaping first: a per-height check through netem would take hours.
+"$HERE/netem.sh" lan >/dev/null || true
 consensus_status=0
 python3 "$HERE/check_consensus.py" --rpc "$ALL_RPCS" --min-reachable 5 >"$out/consensus.txt" 2>&1 \
   || consensus_status=$?

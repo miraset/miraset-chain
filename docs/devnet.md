@@ -64,6 +64,14 @@ expose only fixed, non-secret series, but keep the port private (public RPC hard
 `check_consensus.py` exits non-zero on conflicting committed hashes at any height (safety), no
 progress within the window (liveness), or a node more than `--max-lag` blocks behind (catch-up).
 
+## Measuring throughput, finality and stability (TODO 8.5.3)
+
+`scripts/devnet/bench.sh` sweeps offered rates with `miraset-chain loadgen` (the `loadgen`
+compose service, profile `tools`), `scripts/devnet/netem.sh` emulates WAN latency and loss on
+validator egress, and `scripts/devnet/soak.sh` runs a constant-rate soak while sampling memory,
+file descriptors, data size and height. Workload, procedure, measured baseline and findings are
+in [`docs/performance-baseline.md`](performance-baseline.md). No target is approved.
+
 ## Layout and security notes
 
 - `devnet-init` writes `genesis.json` to the `devnet-config` volume. Each key goes to **its own
