@@ -1,7 +1,7 @@
 //! End-to-end: the real `miraset-chain` validator binary as a separate process (TODO 8.3.2).
 //!
 //! Each test creates a one-validator devnet with `devnet-init`, runs the binary on free local
-//! ports, observes it only through HTTP (`/health`, `/block/latest`) and its log output, and
+//! ports, observes it only through HTTP (`/v1/health`, `/v1/blocks/latest`) and its log output, and
 //! crashes it with SIGKILL (no graceful shutdown).
 //!
 //! Not covered here: the exit-code-3 safety halt. It needs an injected guard or storage fault,

@@ -73,6 +73,26 @@ impl<T> ApiResponse<T> {
     }
 }
 
+/// Answer to an admitted submission. Admission is not finality: the item is pending in this
+/// node's mempool and is final only once a committed block includes it (watch the account
+/// nonce, `/v1/tasks/{id}`, or `/v1/events/blocks`).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SubmissionResponse {
+    /// Always `pending`.
+    pub status: String,
+    /// `sender:nonce` for a transaction, the task id for a receipt.
+    pub id: String,
+}
+
+impl SubmissionResponse {
+    fn pending(id: String) -> Self {
+        Self {
+            status: "pending".to_string(),
+            id,
+        }
+    }
+}
+
 /// Status of the mempool.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MempoolStatusResponse {
@@ -130,21 +150,23 @@ where
         .allow_headers(Any);
 
     Router::new()
-        .route("/health", get(health_handler))
+        // Operational probes and metrics: unversioned, for orchestrators and scrapers.
         .route("/livez", get(livez_handler))
         .route("/readyz", get(readyz_handler))
         .route("/metrics", get(metrics_handler))
-        .route("/tx/submit", post(submit_tx_handler))
-        .route("/receipt/submit", post(submit_receipt_handler))
-        .route("/account/{address}", get(get_account_handler))
-        .route("/worker/{worker_id}", get(get_worker_handler))
-        .route("/epoch/current", get(get_current_epoch_handler))
-        .route("/epoch/{epoch_id}", get(get_epoch_handler))
-        .route("/task/{task_id}", get(get_task_handler))
-        .route("/block/latest", get(latest_block_handler))
-        .route("/block/height/{height}", get(block_at_height_handler))
-        .route("/mempool/status", get(mempool_status_handler))
-        .route("/events/blocks", get(sse_block_events_handler))
+        // Client contract, version 1 (TODO 8.4.3, docs/rpc-v1.md).
+        .route("/v1/health", get(health_handler))
+        .route("/v1/transactions", post(submit_tx_handler))
+        .route("/v1/receipts", post(submit_receipt_handler))
+        .route("/v1/accounts/{address}", get(get_account_handler))
+        .route("/v1/workers/{worker_id}", get(get_worker_handler))
+        .route("/v1/epochs/current", get(get_current_epoch_handler))
+        .route("/v1/epochs/{epoch_id}", get(get_epoch_handler))
+        .route("/v1/tasks/{task_id}", get(get_task_handler))
+        .route("/v1/blocks/latest", get(latest_block_handler))
+        .route("/v1/blocks/{height}", get(block_at_height_handler))
+        .route("/v1/mempool", get(mempool_status_handler))
+        .route("/v1/events/blocks", get(sse_block_events_handler))
         .layer(cors)
         .with_state(state)
 }
@@ -252,13 +274,11 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
-    match state.node.submit_transaction(tx.clone()) {
+    let id = format!("{}:{}", tx.sender, tx.nonce);
+    match state.node.submit_transaction(tx) {
         Ok(()) => (
-            StatusCode::OK,
-            Json(ApiResponse::ok(format!(
-                "Tx from {} with nonce {} accepted into mempool",
-                tx.sender, tx.nonce
-            ))),
+            StatusCode::ACCEPTED,
+            Json(ApiResponse::ok(SubmissionResponse::pending(id))),
         ),
         Err(err) => (
             admission_status(err),
@@ -275,13 +295,11 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
-    match state.node.submit_receipt(receipt.clone()) {
+    let id = receipt.task_id.clone();
+    match state.node.submit_receipt(receipt) {
         Ok(()) => (
-            StatusCode::OK,
-            Json(ApiResponse::ok(format!(
-                "Receipt for task {} accepted into mempool",
-                receipt.task_id
-            ))),
+            StatusCode::ACCEPTED,
+            Json(ApiResponse::ok(SubmissionResponse::pending(id))),
         ),
         Err(err) => (
             admission_status(err),

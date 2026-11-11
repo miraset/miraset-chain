@@ -653,7 +653,7 @@ impl KVStore for RedbKVStore {
 
     fn write(&mut self, write_batch: Self::WriteBatch) {
         // `KVStore::write` cannot return an error, so a failure must stop the replica thread.
-        // Halt first so the fault is visible (`/health` 503, process exit) instead of silent.
+        // Halt first so the fault is visible (`/v1/health` 503, process exit) instead of silent.
         if let Err(err) = self.try_write(write_batch) {
             if let Some(halt) = &self.safety_halt {
                 halt.trigger(format!("chain store write failed: {err}"));

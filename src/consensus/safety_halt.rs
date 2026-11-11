@@ -1,13 +1,13 @@
 //! Process-wide consensus safety halt (`docs/adr/proposal-vote-safety-state.md` D3).
 //!
-//! Once triggered, the node sends no further consensus messages, `/health` reports 503 with the
+//! Once triggered, the node sends no further consensus messages, `/v1/health` reports 503 with the
 //! reason, and the validator binary exits non-zero after a grace period so the orchestrator
 //! restarts it. The first reason wins; later triggers are ignored.
 //!
 //! Besides explicit triggers (signing guard faults, chain-store write failures), a panic on any
 //! `hotstuff_rs` thread (`hs-algorithm`, `hs-poller`, `hs-sync-server`, `hs-event-bus`) halts the
 //! node once [`SafetyHalt::install_consensus_panic_hook`] is installed: such a panic stops
-//! consensus for good and must not leave `/health` reporting `ok`.
+//! consensus for good and must not leave `/v1/health` reporting `ok`.
 
 use std::sync::{Arc, OnceLock};
 

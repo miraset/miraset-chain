@@ -220,12 +220,12 @@ pub fn http_get(addr: SocketAddr, path: &str) -> Option<(u16, String)> {
 }
 
 pub fn health(addr: SocketAddr) -> Option<(u16, serde_json::Value)> {
-    let (status, body) = http_get(addr, "/health")?;
+    let (status, body) = http_get(addr, "/v1/health")?;
     Some((status, serde_json::from_str(&body).ok()?))
 }
 
 pub fn latest_height(addr: SocketAddr) -> Option<u64> {
-    let (_, body) = http_get(addr, "/block/latest")?;
+    let (_, body) = http_get(addr, "/v1/blocks/latest")?;
     let json: serde_json::Value = serde_json::from_str(&body).ok()?;
     json.pointer("/data/height")
         .or_else(|| json.get("height"))

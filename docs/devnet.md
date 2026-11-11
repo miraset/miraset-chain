@@ -21,8 +21,8 @@ docker compose down -v                # stop and delete the chain (keys, genesis
 ```
 
 RPC for `nodeN` is published on `127.0.0.1:854{5+N}` (node0 = 8545 … node4 = 8549). Useful
-endpoints: `/health`, `/block/latest` (hash + height), `/block/height/{h}`, `/account/{addr}`,
-`/tx/submit`, `/mempool/status`, `/events/blocks` (SSE).
+endpoints: `/v1/health`, `/v1/blocks/latest` (hash + height), `/v1/blocks/{h}`, `/v1/accounts/{addr}`,
+`/v1/transactions`, `/v1/mempool`, `/v1/events/blocks` (SSE).
 
 Operations endpoints (TODO 8.4.4):
 
@@ -50,8 +50,8 @@ an in-process key or `transport` for `GuardedNetwork`, `reason` = `stale` or `co
 validator with `--remote-signer` has no `signer` series; that process counts its own refusals.
 
 Logs go to stderr: text by default, one JSON object per line with `--log-format json`; `RUST_LOG`
-sets the filter (default `info`). On SIGTERM a validator stops admission (`/tx/submit` and
-`/receipt/submit` return 503), reports `draining` for `--shutdown-drain-ms` (default 2000), then
+sets the filter (default `info`). On SIGTERM a validator stops admission (`/v1/transactions` and
+`/v1/receipts` return 503), reports `draining` for `--shutdown-drain-ms` (default 2000), then
 stops consensus and logs how many mempool items were discarded; the mempool is not durable.
 A second SIGTERM/SIGINT ends the drain early, and a safety halt during the drain still exits with
 code 3. Safety events (`SAFETY HALT`, refused or dropped votes) use the `miraset_safety` target,
@@ -119,7 +119,7 @@ in [`docs/performance-baseline.md`](performance-baseline.md). No target is appro
   keep their keys in `devnet-config`, which the nodes no longer read, and have no guard
   volumes.
 - A consensus safety halt (guard fault, chain write failure, or a panic on any `hs-*` consensus
-  thread) makes `/health` return 503
+  thread) makes `/v1/health` return 503
   `{"status":"halted","reason":…}` and the process exit with code 3 after 5s; compose restarts it
   (`restart: on-failure`). Stale or conflicting votes are dropped and logged, not halted.
 - P2P identity is a self-declared key checked against the genesis peer table, not authenticated

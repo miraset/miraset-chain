@@ -353,7 +353,7 @@ impl Transaction {
 ///    inference via a local engine (e.g. Ollama, vLLM), and streams outputs directly to the client.
 /// 2. Once the client receives all tokens/results, delivery is confirmed.
 /// 3. The Coordinator co-signs the receipt with the client cost debit and worker reward.
-/// 4. The Coordinator submits the receipt to MIRASET L1 (`POST /receipt/submit`).
+/// 4. The Coordinator submits the receipt to MIRASET L1 (`POST /v1/receipts`).
 /// 5. Chain consensus verifies client confirmation, debits the client's escrow/account balance,
 ///    credits the worker, and marks the task as settled (anti-replay).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

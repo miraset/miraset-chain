@@ -205,7 +205,7 @@ async fn test_draining_rejects_admission_with_503_and_withdraws_readiness() {
     );
 
     let req = Request::builder()
-        .uri("/tx/submit")
+        .uri("/v1/transactions")
         .method("POST")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&tx).unwrap()))

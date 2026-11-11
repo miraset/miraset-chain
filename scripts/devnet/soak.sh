@@ -54,7 +54,7 @@ sample() { # one CSV row per validator
     rss="$(docker exec "$cid" sh -c "awk '/^VmRSS/ {print \$2 * 1024}' /proc/1/status" 2>/dev/null || echo)"
     fds="$(docker exec "$cid" sh -c 'ls /proc/1/fd | wc -l' 2>/dev/null || echo)"
     data="$(docker exec "$cid" du -sb /var/lib/miraset 2>/dev/null | cut -f1 || echo)"
-    height="$(curl -fsS --max-time 2 "http://127.0.0.1:$((8545 + i))/block/latest" 2>/dev/null \
+    height="$(curl -fsS --max-time 2 "http://127.0.0.1:$((8545 + i))/v1/blocks/latest" 2>/dev/null \
       | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"].get("height") or "")' 2>/dev/null || echo)"
     restarts="$(docker inspect "$cid" --format '{{.RestartCount}}' 2>/dev/null || echo)"
     echo "$ts,$node,$rss,$fds,$data,$height,$restarts"

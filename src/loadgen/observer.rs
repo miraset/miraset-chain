@@ -189,7 +189,7 @@ impl Observer {
         let mut reads = JoinSet::new();
         for sender in senders {
             let client = self.client.clone();
-            let url = format!("{}/account/{}", self.node_url, self.senders[sender]);
+            let url = format!("{}/v1/accounts/{}", self.node_url, self.senders[sender]);
             let tracker = Arc::clone(&self.tracker);
             reads.spawn(async move {
                 let account: ApiResponse<AccountState> = client.get_json(&url).await.ok()?;

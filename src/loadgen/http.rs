@@ -104,7 +104,7 @@ impl RpcClient {
             .map_err(|_| HttpError::Timeout(REQUEST_TIMEOUT))?
     }
 
-    /// Stream `commit_block` events from `url` (`/events/blocks`) into `sink`, stamped with
+    /// Stream `commit_block` events from `url` (`/v1/events/blocks`) into `sink`, stamped with
     /// their arrival time, until the stream ends or the receiver is dropped.
     pub async fn stream_commits(
         &self,

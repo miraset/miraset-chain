@@ -25,8 +25,8 @@ owner (2026-11-10); `soak.sh` has not been run end to end yet.
 
 **Latency** is measured from the item's **scheduled** send time (so a slow node's queueing is
 counted, not hidden) to the arrival of the first `commit_block` event on the observer node
-(`/events/blocks` of the first `--rpc`) after which committed state shows the item: the sender's
-account nonce has passed the transfer's nonce, or `/task/{id}` reports the receipt settled.
+(`/v1/events/blocks` of the first `--rpc`) after which committed state shows the item: the sender's
+account nonce has passed the transfer's nonce, or `/v1/tasks/{id}` reports the receipt settled.
 Commit events are published after the block's state is written. Stamping error is bounded by the
 observer read round (`max_observer_round_ms`, `mean_observer_round_ms`). Items never observed
 committed are reported as `uncommitted` and are **excluded from the percentiles**; read the two
@@ -128,7 +128,7 @@ Observed while building and running the measurement; none is fixed here.
    always goes first; under sustained overload higher-sorting senders can starve. 8.4.3.
 7. **The mempool is not durable**: items admitted but not yet committed are lost when the node
    restarts (seen in the observer-restart e2e test; clients must resubmit).
-8. Commit events (`/events/blocks`) are published after the block's state is written, so a
+8. Commit events (`/v1/events/blocks`) are published after the block's state is written, so a
    client that sees `commit_block` can read the committed state immediately (relied on by the
    latency measurement; verified in `lib/hotstuff_rs`).
 9. Finding (b) from the scenario work (quadratic block production) was fixed in 9974e82 before

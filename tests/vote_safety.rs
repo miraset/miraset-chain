@@ -279,7 +279,7 @@ fn test_wiped_chain_data_cannot_resign_old_views() {
     assert!(resent.is_empty(), "re-signed old views {resent:?}");
 }
 
-/// T5: a chain-store write failure halts the node visibly: no further votes, `/health` 503.
+/// T5: a chain-store write failure halts the node visibly: no further votes, `/v1/health` 503.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_chain_store_write_failure_halts_visibly() {
     let keypair = SigningKey::from_bytes(&[52u8; 32]);
@@ -319,7 +319,7 @@ async fn test_chain_store_write_failure_halts_visibly() {
         chain_id: CHAIN_ID,
     });
     let request = Request::builder()
-        .uri("/health")
+        .uri("/v1/health")
         .body(Body::empty())
         .unwrap();
     let response = app.oneshot(request).await.unwrap();

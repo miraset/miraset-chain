@@ -29,7 +29,7 @@ use std::time::Duration;
 
 type CliResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-/// Time between a safety halt and process exit, so `/health` can report the reason first.
+/// Time between a safety halt and process exit, so `/v1/health` can report the reason first.
 const SAFETY_HALT_GRACE: Duration = Duration::from_secs(5);
 const SAFETY_HALT_POLL: Duration = Duration::from_millis(200);
 const SIGNING_GUARD_FILE: &str = "signing-guard.redb";
@@ -181,7 +181,7 @@ enum Commands {
         #[arg(long)]
         keys_dir: Option<PathBuf>,
     },
-    /// Print a signed transfer as JSON, ready to POST to /tx/submit
+    /// Print a signed transfer as JSON, ready to POST to /v1/transactions
     SignTransfer {
         #[arg(long)]
         key_file: PathBuf,
@@ -683,7 +683,7 @@ fn open_signing_guard(
     Ok(guard)
 }
 
-/// Resolve once the safety halt fires, after a grace period that lets `/health` report it.
+/// Resolve once the safety halt fires, after a grace period that lets `/v1/health` report it.
 async fn wait_for_safety_halt(halt: &SafetyHalt) -> String {
     while !halt.is_halted() {
         tokio::time::sleep(SAFETY_HALT_POLL).await;
@@ -763,7 +763,7 @@ async fn run_devnet_demo() {
     });
     println!("    ✓ Node RPC API listening on http://{}", rpc_addr);
     println!(
-        "      Endpoints: /health, /account/:addr, /worker/:id, /task/:id, /tx/submit, /receipt/submit, /block/latest, /events/blocks"
+        "      Endpoints: /v1/health, /v1/accounts/:addr, /v1/workers/:id, /v1/tasks/:id, /v1/transactions, /v1/receipts, /v1/blocks/latest, /v1/events/blocks"
     );
 
     // Verify initial account queries

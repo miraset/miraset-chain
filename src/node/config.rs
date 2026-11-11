@@ -36,7 +36,7 @@ pub struct NodeConfig {
     /// When set, startup fails unless the store's recorded genesis commitment matches.
     pub expected_genesis_hash: Option<[u8; 32]>,
     /// Shared consensus safety halt (TODO 8.3.2). Pass the same handle to the
-    /// `GuardedNetwork` and chain store so `/health` reports their faults.
+    /// `GuardedNetwork` and chain store so `/v1/health` reports their faults.
     pub safety_halt: SafetyHalt,
     /// `/readyz` reports not ready when no block was committed within this time (TODO 8.4.4).
     pub ready_max_commit_age: Duration,

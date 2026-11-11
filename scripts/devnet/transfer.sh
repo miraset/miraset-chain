@@ -13,9 +13,9 @@ FAUCET_KEY=/keys/faucet/faucet.key
 faucet_tool() { $COMPOSE run --rm -T faucet "$@"; }
 
 faucet=$(faucet_tool pubkey --key-file "$FAUCET_KEY")
-account=$(curl -fsS "$RPC/account/$faucet")
+account=$(curl -fsS "$RPC/v1/accounts/$faucet")
 nonce=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["nonce"])' <<<"$account")
 
 tx=$(faucet_tool sign-transfer --key-file "$FAUCET_KEY" --to "$TO" --amount "$AMOUNT" --nonce "$nonce")
-curl -fsS -X POST -H 'content-type: application/json' --data "$tx" "$RPC/tx/submit"
+curl -fsS -X POST -H 'content-type: application/json' --data "$tx" "$RPC/v1/transactions"
 echo

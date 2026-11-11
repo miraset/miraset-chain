@@ -74,7 +74,7 @@ fn test_e2e_validator_halts_when_its_signer_dies_and_recovers_after_restart() {
         "{}",
         node.log_text()
     );
-    assert!(saw_503, "/health never reported the halt");
+    assert!(saw_503, "/v1/health never reported the halt");
 
     let signer = v.start_signer(&[]);
     wait_for_socket(&v, &signer);

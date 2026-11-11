@@ -171,7 +171,7 @@ pub async fn run(config: &LoadConfig) -> Result<LoadReport, LoadError> {
     let reconnects = Arc::new(AtomicUsize::new(0));
     let subscription = tokio::spawn(subscribe(
         client.clone(),
-        format!("{observer_url}/events/blocks"),
+        format!("{observer_url}/v1/events/blocks"),
         event_tx,
         Arc::clone(&reconnects),
     ));

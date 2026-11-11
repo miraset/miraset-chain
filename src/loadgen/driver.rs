@@ -85,7 +85,7 @@ pub struct TransferStream {
 
 /// Committed nonce of `address`, if readable.
 async fn committed_nonce(client: &RpcClient, node_url: &str, address: &str) -> Option<u64> {
-    let url = format!("{node_url}/account/{address}");
+    let url = format!("{node_url}/v1/accounts/{address}");
     let response: ApiResponse<AccountState> = client.get_json(&url).await.ok()?;
     Some(response.data?.nonce)
 }
@@ -97,7 +97,7 @@ pub async fn run_transfers(
     tracker: Arc<Mutex<Tracker>>,
     lag: Arc<Lag>,
 ) {
-    let url = format!("{}/tx/submit", generator.node_url);
+    let url = format!("{}/v1/transactions", generator.node_url);
     let sender = workload::address(&stream.key);
     let mut nonce = 0;
     let mut retry: Option<Retry<Transaction>> = None;
@@ -153,7 +153,7 @@ pub struct ReceiptStream {
 
 /// Whether task `task_id` is settled, if readable.
 pub async fn task_settled(client: &RpcClient, node_url: &str, task_id: &str) -> Option<bool> {
-    let url = format!("{node_url}/task/{task_id}");
+    let url = format!("{node_url}/v1/tasks/{task_id}");
     let response: ApiResponse<TaskSettlementResponse> = client.get_json(&url).await.ok()?;
     Some(response.data?.settled)
 }
@@ -165,7 +165,7 @@ pub async fn run_receipts(
     tracker: Arc<Mutex<Tracker>>,
     lag: Arc<Lag>,
 ) {
-    let url = format!("{}/receipt/submit", generator.node_url);
+    let url = format!("{}/v1/receipts", generator.node_url);
     let mut seq: u64 = 0;
     let mut retry: Option<Retry<ComputeReceipt>> = None;
     let mut next = Instant::now();
@@ -242,7 +242,7 @@ pub async fn fund(
             needed,
         });
     }
-    let submit = format!("{node_url}/tx/submit");
+    let submit = format!("{node_url}/v1/transactions");
     for (offset, recipient) in recipients.iter().enumerate() {
         let nonce = start.nonce + offset as u64;
         let tx = workload::signed_transfer(faucet, nonce, recipient, amount, TRANSFER_FEE);
@@ -278,7 +278,7 @@ async fn account(
     node_url: &str,
     address: &str,
 ) -> Result<AccountState, FundingError> {
-    let url = format!("{node_url}/account/{address}");
+    let url = format!("{node_url}/v1/accounts/{address}");
     let response: ApiResponse<AccountState> =
         client
             .get_json(&url)

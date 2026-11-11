@@ -33,14 +33,14 @@ def get_json(url: str) -> dict | None:
 
 
 def committed_height(rpc: str) -> int | None:
-    body = get_json(f"{rpc}/block/latest")
+    body = get_json(f"{rpc}/v1/blocks/latest")
     if not body or not body.get("success"):
         return None
     return body["data"].get("height")
 
 
 def hash_at(rpc: str, height: int) -> str | None:
-    body = get_json(f"{rpc}/block/height/{height}")
+    body = get_json(f"{rpc}/v1/blocks/{height}")
     if not body or not body.get("success"):
         return None
     return body["data"]["hash"]

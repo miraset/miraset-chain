@@ -8,7 +8,7 @@ use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub};
 use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
 use miraset_chain::rpc::{
     ApiResponse, BlockAtHeightResponse, HealthResponse, LatestBlockResponse, MempoolStatusResponse,
-    RpcState, TaskSettlementResponse, create_router,
+    RpcState, SubmissionResponse, TaskSettlementResponse, create_router,
 };
 use miraset_chain::storage::MemKVStore;
 use std::sync::Arc;
@@ -91,7 +91,7 @@ async fn test_rpc_health() {
     let app = create_router(state);
 
     let req = Request::builder()
-        .uri("/health")
+        .uri("/v1/health")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -112,7 +112,7 @@ async fn test_rpc_health_reports_safety_halt_as_503() {
     let app = create_router(RpcState { node, chain_id });
 
     let req = Request::builder()
-        .uri("/health")
+        .uri("/v1/health")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -130,7 +130,7 @@ async fn test_rpc_health_omits_reason_when_healthy() {
     let (node, chain_id) = setup_test_node();
     let app = create_router(RpcState { node, chain_id });
     let req = Request::builder()
-        .uri("/health")
+        .uri("/v1/health")
         .body(Body::empty())
         .unwrap();
     let body = app
@@ -157,7 +157,7 @@ async fn test_rpc_get_account() {
 
     // Existing account
     let req = Request::builder()
-        .uri("/account/alice")
+        .uri("/v1/accounts/alice")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -174,7 +174,7 @@ async fn test_rpc_get_account() {
 
     // Non-existent account
     let req_nonexistent = Request::builder()
-        .uri("/account/charlie")
+        .uri("/v1/accounts/charlie")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -191,7 +191,7 @@ async fn test_rpc_tx_and_receipt_submission() {
 
     // Initial mempool status
     let req = Request::builder()
-        .uri("/mempool/status")
+        .uri("/v1/mempool")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -202,23 +202,29 @@ async fn test_rpc_tx_and_receipt_submission() {
 
     // Signed, funded transfer is admitted; the same one again conflicts.
     let tx = signed_transfer(&payer(), 0, 200);
-    assert_eq!(post(&app, "/tx/submit", &tx).await, StatusCode::OK);
-    assert_eq!(post(&app, "/tx/submit", &tx).await, StatusCode::CONFLICT);
+    assert_eq!(
+        post(&app, "/v1/transactions", &tx).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        post(&app, "/v1/transactions", &tx).await,
+        StatusCode::CONFLICT
+    );
 
     // Coordinator-signed receipt with a funded client is admitted; again conflicts.
     let receipt = signed_receipt("task_rpc_101", "alice");
     assert_eq!(
-        post(&app, "/receipt/submit", &receipt).await,
-        StatusCode::OK
+        post(&app, "/v1/receipts", &receipt).await,
+        StatusCode::ACCEPTED
     );
     assert_eq!(
-        post(&app, "/receipt/submit", &receipt).await,
+        post(&app, "/v1/receipts", &receipt).await,
         StatusCode::CONFLICT
     );
 
     // Check mempool status has updated
     let req = Request::builder()
-        .uri("/mempool/status")
+        .uri("/v1/mempool")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -238,7 +244,7 @@ async fn test_rpc_worker_and_block_query() {
 
     // Query non-existent worker
     let req = Request::builder()
-        .uri("/worker/unknown_worker")
+        .uri("/v1/workers/unknown_worker")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -247,7 +253,7 @@ async fn test_rpc_worker_and_block_query() {
 
     // Query latest block
     let req = Request::builder()
-        .uri("/block/latest")
+        .uri("/v1/blocks/latest")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -256,7 +262,7 @@ async fn test_rpc_worker_and_block_query() {
 
     // Query task settlement status
     let req_task = Request::builder()
-        .uri("/task/unsettled_task_123")
+        .uri("/v1/tasks/unsettled_task_123")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -268,7 +274,7 @@ async fn test_rpc_worker_and_block_query() {
 
     // Test SSE block events endpoint connects with 200 OK and text/event-stream content type
     let req_events = Request::builder()
-        .uri("/events/blocks")
+        .uri("/v1/events/blocks")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -294,7 +300,10 @@ async fn test_rpc_worker_bond_submission() {
     };
     let mut tx = Transaction::new_worker_bond(address(&payer()), 0, 5, bond_action).unwrap();
     tx.sign_with(&payer());
-    assert_eq!(post(&app, "/tx/submit", &tx).await, StatusCode::OK);
+    assert_eq!(
+        post(&app, "/v1/transactions", &tx).await,
+        StatusCode::ACCEPTED
+    );
 }
 
 #[tokio::test]
@@ -305,35 +314,40 @@ async fn test_rpc_rejects_items_that_can_never_apply() {
     // Unsigned sender.
     let unsigned = Transaction::new("alice", 0, "bob", 1, 10);
     assert_eq!(
-        post(&app, "/tx/submit", &unsigned).await,
+        post(&app, "/v1/transactions", &unsigned).await,
         StatusCode::BAD_REQUEST
     );
     // Signed by a key other than the sender's.
     let mut forged = Transaction::new(address(&payer()), 0, "bob", 1, 10);
     forged.sign_with(&coordinator());
     assert_eq!(
-        post(&app, "/tx/submit", &forged).await,
+        post(&app, "/v1/transactions", &forged).await,
         StatusCode::BAD_REQUEST
     );
     // Unfunded sender.
     let broke = SigningKey::from_bytes(&[23u8; 32]);
     assert_eq!(
-        post(&app, "/tx/submit", &signed_transfer(&broke, 0, 1)).await,
+        post(&app, "/v1/transactions", &signed_transfer(&broke, 0, 1)).await,
         StatusCode::BAD_REQUEST
     );
     // Overspending the committed balance.
     assert_eq!(
-        post(&app, "/tx/submit", &signed_transfer(&payer(), 0, 5_000)).await,
+        post(
+            &app,
+            "/v1/transactions",
+            &signed_transfer(&payer(), 0, 5_000)
+        )
+        .await,
         StatusCode::BAD_REQUEST
     );
     // Receipt without a coordinator signature; receipt whose client cannot pay.
     let unsigned_receipt = ComputeReceipt::new("t-x", "alice", "w", "c", "m", "p", 10, 1, 1);
     assert_eq!(
-        post(&app, "/receipt/submit", &unsigned_receipt).await,
+        post(&app, "/v1/receipts", &unsigned_receipt).await,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(
-        post(&app, "/receipt/submit", &signed_receipt("t-y", "charlie")).await,
+        post(&app, "/v1/receipts", &signed_receipt("t-y", "charlie")).await,
         StatusCode::BAD_REQUEST
     );
 }
@@ -347,17 +361,17 @@ async fn test_rpc_rejects_replayed_nonce_and_settled_task() {
     });
     let payer_address = address(&payer());
     assert_eq!(
-        post(&app, "/tx/submit", &signed_transfer(&payer(), 0, 1)).await,
-        StatusCode::OK
+        post(&app, "/v1/transactions", &signed_transfer(&payer(), 0, 1)).await,
+        StatusCode::ACCEPTED
     );
     assert_eq!(
         post(
             &app,
-            "/receipt/submit",
+            "/v1/receipts",
             &signed_receipt("task-replay", "alice")
         )
         .await,
-        StatusCode::OK
+        StatusCode::ACCEPTED
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     while node.get_account(&payer_address).map(|a| a.nonce) != Some(1)
@@ -369,7 +383,7 @@ async fn test_rpc_rejects_replayed_nonce_and_settled_task() {
 
     // Same nonce with a different payload: the nonce is already used.
     assert_eq!(
-        post(&app, "/tx/submit", &signed_transfer(&payer(), 0, 2)).await,
+        post(&app, "/v1/transactions", &signed_transfer(&payer(), 0, 2)).await,
         StatusCode::CONFLICT
     );
     // A new receipt for a settled task (different worker reward) is a replay.
@@ -377,13 +391,13 @@ async fn test_rpc_rejects_replayed_nonce_and_settled_task() {
     replay.worker_reward = 1;
     replay.sign_with(&coordinator());
     assert_eq!(
-        post(&app, "/receipt/submit", &replay).await,
+        post(&app, "/v1/receipts", &replay).await,
         StatusCode::CONFLICT
     );
     // The next nonce is still admitted.
     assert_eq!(
-        post(&app, "/tx/submit", &signed_transfer(&payer(), 1, 1)).await,
-        StatusCode::OK
+        post(&app, "/v1/transactions", &signed_transfer(&payer(), 1, 1)).await,
+        StatusCode::ACCEPTED
     );
 }
 
@@ -395,7 +409,7 @@ async fn test_rpc_epoch_endpoints() {
 
     // 1. Query current active epoch (epoch 0 from genesis)
     let req_epoch = Request::builder()
-        .uri("/epoch/current")
+        .uri("/v1/epochs/current")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -415,7 +429,7 @@ async fn test_rpc_epoch_endpoints() {
 
     // 2. Query non-existent historical epoch
     let req_historical = Request::builder()
-        .uri("/epoch/999")
+        .uri("/v1/epochs/999")
         .method("GET")
         .body(Body::empty())
         .unwrap();
@@ -450,7 +464,7 @@ async fn test_rpc_block_height_queries_match_latest() {
     // Wait for the single validator to commit at least one block.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     let latest = loop {
-        let (_, resp) = get_json::<LatestBlockResponse>(&app, "/block/latest").await;
+        let (_, resp) = get_json::<LatestBlockResponse>(&app, "/v1/blocks/latest").await;
         let latest = resp.data.unwrap();
         if latest.height.is_some() || std::time::Instant::now() >= deadline {
             break latest;
@@ -462,18 +476,56 @@ async fn test_rpc_block_height_queries_match_latest() {
 
     // The committed hash at that height is stable and equals the latest committed hash.
     let (status, at) =
-        get_json::<BlockAtHeightResponse>(&app, &format!("/block/height/{height}")).await;
+        get_json::<BlockAtHeightResponse>(&app, &format!("/v1/blocks/{height}")).await;
     assert_eq!(status, StatusCode::OK);
     let at = at.data.unwrap();
     assert_eq!((at.height, at.hash), (height, latest_hash));
 
-    let (status, genesis_block) = get_json::<BlockAtHeightResponse>(&app, "/block/height/0").await;
+    let (status, genesis_block) = get_json::<BlockAtHeightResponse>(&app, "/v1/blocks/0").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(genesis_block.data.unwrap().height, 0);
 
     // Heights above the committed tip are not served.
     let (status, missing) =
-        get_json::<BlockAtHeightResponse>(&app, "/block/height/18446744073709551615").await;
+        get_json::<BlockAtHeightResponse>(&app, "/v1/blocks/18446744073709551615").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(!missing.success);
+}
+
+#[tokio::test]
+async fn test_rpc_contract_is_versioned_and_admission_is_not_finality() {
+    let (node, chain_id) = setup_test_node();
+    let app = create_router(RpcState { node, chain_id });
+
+    // Unversioned client paths are gone.
+    for path in [
+        "/health",
+        "/block/latest",
+        "/account/alice",
+        "/mempool/status",
+    ] {
+        let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let status = app.clone().oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+    assert_eq!(
+        post(&app, "/tx/submit", &signed_transfer(&payer(), 0, 1)).await,
+        StatusCode::NOT_FOUND
+    );
+
+    // An admitted submission is reported as pending, not final.
+    let tx = signed_transfer(&payer(), 0, 1);
+    let req = Request::builder()
+        .uri("/v1/transactions")
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(&tx).unwrap()))
+        .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let answer: ApiResponse<SubmissionResponse> = serde_json::from_slice(&body).unwrap();
+    let answer = answer.data.unwrap();
+    assert_eq!(answer.status, "pending");
+    assert_eq!(answer.id, format!("{}:0", address(&payer())));
 }
