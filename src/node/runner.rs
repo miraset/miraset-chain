@@ -1,6 +1,6 @@
 use hotstuff_rs::block_tree::accessors::public::BlockTreeCamera;
 use hotstuff_rs::block_tree::pluggables::KVStore;
-use hotstuff_rs::events::CommitBlockEvent;
+use hotstuff_rs::events::{CommitBlockEvent, EndSyncEvent, StartSyncEvent, StartViewEvent};
 use hotstuff_rs::networking::network::Network;
 use hotstuff_rs::replica::{Replica, ReplicaSpec};
 use hotstuff_rs::types::data_types::{BlockHeight, CryptoHash, Power};
@@ -158,6 +158,9 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         let mempool_for_event = mempool.clone();
         let metrics = Arc::new(NodeMetrics::default());
         let metrics_for_event = Arc::clone(&metrics);
+        let metrics_for_sync_start = Arc::clone(&metrics);
+        let metrics_for_sync_end = Arc::clone(&metrics);
+        let metrics_for_view = Arc::clone(&metrics);
         let ready_max_commit_age = config.ready_max_commit_age;
 
         let replica = ReplicaSpec::builder()
@@ -165,6 +168,13 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             .network(network.clone())
             .kv_store(kv_store.clone())
             .configuration(hs_config)
+            // Events reach handlers in publication order on one bus thread, so commits made
+            // inside a sync session are seen between its start and end.
+            .on_start_sync(move |_: &StartSyncEvent| metrics_for_sync_start.record_sync_start())
+            .on_end_sync(move |event: &EndSyncEvent| {
+                metrics_for_sync_end.record_sync_end(event.blocks_synced)
+            })
+            .on_start_view(move |_: &StartViewEvent| metrics_for_view.record_view_started())
             .on_commit_block(move |event: &CommitBlockEvent| {
                 let block_hash_hex = hex::encode(event.block.bytes());
                 let timestamp_secs = event
@@ -253,12 +263,14 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         &self.lifecycle
     }
 
-    /// Readiness to finalize: no safety halt, not draining, and a recent commit.
+    /// Readiness to finalize: no safety halt, not draining, not syncing, and a recent commit
+    /// through consensus.
     pub fn readiness(&self) -> Result<(), NotReadyReason> {
         evaluate_readiness(ReadinessInput {
             halted: self.safety_halt.is_halted(),
             draining: self.lifecycle.is_draining(),
-            last_commit_age: self.metrics.last_commit_age(),
+            syncing: self.metrics.is_syncing(),
+            last_commit_age: self.metrics.last_consensus_commit_age(),
             max_commit_age: self.ready_max_commit_age,
         })
     }

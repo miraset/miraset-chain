@@ -50,6 +50,10 @@ fn test_e2e_probes_metrics_json_logs_and_graceful_drain() {
         "miraset_ready 1",
         "miraset_safety_halted 0",
         "miraset_p2p_dropped_messages_total ",
+        "miraset_syncing 0",
+        "miraset_blocks_synced_total ",
+        "miraset_vote_refused_total{layer=\"signer\",reason=\"stale\"} 0",
+        "miraset_vote_refused_total{layer=\"transport\",reason=\"conflicting\"} 0",
     ] {
         assert!(metrics.contains(series), "{series} missing:\n{metrics}");
     }

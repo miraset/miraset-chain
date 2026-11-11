@@ -13,7 +13,7 @@ use miraset_chain::node::{
     init_genesis_with_chain_id,
 };
 use miraset_chain::observability::logging::SAFETY_LOG_TARGET;
-use miraset_chain::observability::{LogFormat, init_logging};
+use miraset_chain::observability::{LogFormat, VoteGuardLayer, init_logging};
 use miraset_chain::process_hardening;
 use miraset_chain::rpc::start_rpc_server;
 use miraset_chain::signer::process::{
@@ -457,13 +457,19 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
     let p2p_dropped = tcp.dropped_messages_counter();
     // Outermost layer: TcpNetwork delivers self-addressed votes inside `send`.
     let network = GuardedNetwork::new(tcp, guard.clone(), safety_halt.clone());
+    let transport_refusals = network.refusals();
 
     // Key custody D1-D3: a local key moves into a GuardedSigner that checks the guard before
     // signing a phase vote; a remote signer holds key and guard in its own process. Either way
     // GuardedNetwork keeps this node's guard as a second layer.
-    let signer: Arc<dyn ValidatorSigner> = match node_key {
-        NodeKey::Local(signing_key) => GuardedSigner::new(*signing_key, guard)?,
-        NodeKey::Remote(remote) => remote,
+    // A remote signer counts its refusals in its own process, so only a local one is exported.
+    let (signer, signer_refusals): (Arc<dyn ValidatorSigner>, _) = match node_key {
+        NodeKey::Local(signing_key) => {
+            let signer = GuardedSigner::new(*signing_key, guard)?;
+            let refusals = signer.refusals();
+            (signer, Some(refusals))
+        }
+        NodeKey::Remote(remote) => (remote, None),
     };
     let mut config = NodeConfig::devnet_with_signer(signer);
     config.chain_id = genesis.chain_id;
@@ -477,6 +483,12 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
         Mempool::new(),
     )?);
     node.metrics().attach_p2p_dropped(p2p_dropped);
+    node.metrics()
+        .attach_vote_refusals(VoteGuardLayer::Transport, transport_refusals);
+    if let Some(refusals) = signer_refusals {
+        node.metrics()
+            .attach_vote_refusals(VoteGuardLayer::Signer, refusals);
+    }
 
     tracing::info!(
         chain_id = genesis.chain_id,

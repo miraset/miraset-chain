@@ -10,16 +10,15 @@ use hotstuff_rs::types::crypto_primitives::VerifyingKey;
 use hotstuff_rs::types::data_types::SignatureBytes;
 use hotstuff_rs::types::signer::{LocalKeySigner, SignError, SignRequest, ValidatorSigner};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::signing_guard::{Authorization, SigningGuard, VoteRecord};
+use crate::observability::VoteRefusals;
 
 /// `LocalKeySigner` plus the durable signing guard.
 pub struct GuardedSigner {
     inner: LocalKeySigner,
     guard: SigningGuard,
-    stale_refused: AtomicU64,
-    conflicting_refused: AtomicU64,
+    refusals: Arc<VoteRefusals>,
 }
 
 impl GuardedSigner {
@@ -32,19 +31,23 @@ impl GuardedSigner {
         Ok(Arc::new(Self {
             inner,
             guard,
-            stale_refused: AtomicU64::new(0),
-            conflicting_refused: AtomicU64::new(0),
+            refusals: Arc::new(VoteRefusals::default()),
         }))
     }
 
     /// Phase votes refused because their view is below the guard record.
     pub fn stale_refused(&self) -> u64 {
-        self.stale_refused.load(Ordering::Relaxed)
+        self.refusals.stale()
     }
 
     /// Phase votes refused because a different vote was already signed in that view.
     pub fn conflicting_refused(&self) -> u64 {
-        self.conflicting_refused.load(Ordering::Relaxed)
+        self.refusals.conflicting()
+    }
+
+    /// Refusal counters, shared with `/metrics` (`layer="signer"`).
+    pub fn refusals(&self) -> Arc<VoteRefusals> {
+        Arc::clone(&self.refusals)
     }
 
     /// Last phase-vote view recorded by the guard, if any.
@@ -71,7 +74,7 @@ impl GuardedSigner {
         match self.guard.authorize_record(chain_id.int(), record) {
             Ok(Authorization::Fresh | Authorization::IdenticalResend) => Ok(()),
             Ok(Authorization::Stale { last_view }) => {
-                self.stale_refused.fetch_add(1, Ordering::Relaxed);
+                self.refusals.record_stale();
                 tracing::warn!(
                     target: crate::observability::logging::SAFETY_LOG_TARGET,
                     "signing guard: refused to sign stale phase vote for view {} (last signed view {last_view})",
@@ -83,7 +86,7 @@ impl GuardedSigner {
                 )))
             }
             Ok(Authorization::Conflicting { view }) => {
-                self.conflicting_refused.fetch_add(1, Ordering::Relaxed);
+                self.refusals.record_conflicting();
                 tracing::error!(
                     target: crate::observability::logging::SAFETY_LOG_TARGET,
                     "signing guard: REFUSED to sign conflicting phase vote for view {view} (already signed a different vote in this view)"

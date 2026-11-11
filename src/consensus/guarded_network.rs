@@ -19,18 +19,17 @@ use hotstuff_rs::networking::network::Network;
 use hotstuff_rs::types::update_sets::ValidatorSetUpdates;
 use hotstuff_rs::types::validator_set::{ValidatorSet, VerifyingKey};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::safety_halt::SafetyHalt;
 use super::signing_guard::{Authorization, SigningGuard};
+use crate::observability::VoteRefusals;
 
 #[derive(Clone)]
 pub struct GuardedNetwork<N: Network> {
     inner: N,
     guard: SigningGuard,
     halt: SafetyHalt,
-    stale_votes_dropped: Arc<AtomicU64>,
-    conflicting_votes_refused: Arc<AtomicU64>,
+    refusals: Arc<VoteRefusals>,
 }
 
 impl<N: Network> GuardedNetwork<N> {
@@ -39,19 +38,23 @@ impl<N: Network> GuardedNetwork<N> {
             inner,
             guard,
             halt,
-            stale_votes_dropped: Arc::new(AtomicU64::new(0)),
-            conflicting_votes_refused: Arc::new(AtomicU64::new(0)),
+            refusals: Arc::new(VoteRefusals::default()),
         }
     }
 
     /// Number of stale phase votes dropped since start.
     pub fn stale_votes_dropped(&self) -> u64 {
-        self.stale_votes_dropped.load(Ordering::Relaxed)
+        self.refusals.stale()
     }
 
     /// Number of conflicting same-view phase votes refused since start.
     pub fn conflicting_votes_refused(&self) -> u64 {
-        self.conflicting_votes_refused.load(Ordering::Relaxed)
+        self.refusals.conflicting()
+    }
+
+    /// Refusal counters, shared with `/metrics` (`layer="transport"`).
+    pub fn refusals(&self) -> Arc<VoteRefusals> {
+        Arc::clone(&self.refusals)
     }
 
     pub fn halt(&self) -> &SafetyHalt {
@@ -71,7 +74,7 @@ impl<N: Network> GuardedNetwork<N> {
         match self.guard.authorize(vote) {
             Ok(Authorization::Fresh | Authorization::IdenticalResend) => true,
             Ok(Authorization::Stale { last_view }) => {
-                self.stale_votes_dropped.fetch_add(1, Ordering::Relaxed);
+                self.refusals.record_stale();
                 tracing::warn!(
                     target: crate::observability::logging::SAFETY_LOG_TARGET,
                     "signing guard: dropped stale phase vote for view {} (last signed view {last_view})",
@@ -80,8 +83,7 @@ impl<N: Network> GuardedNetwork<N> {
                 false
             }
             Ok(Authorization::Conflicting { view }) => {
-                self.conflicting_votes_refused
-                    .fetch_add(1, Ordering::Relaxed);
+                self.refusals.record_conflicting();
                 tracing::error!(
                     target: crate::observability::logging::SAFETY_LOG_TARGET,
                     "signing guard: REFUSED conflicting phase vote for view {view} (already signed a different vote in this view)"

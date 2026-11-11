@@ -1,12 +1,15 @@
 //! Liveness, readiness and drain state (TODO 8.4.4, PRD R12).
 //!
 //! - **Live**: the process is serving and consensus has not halted for safety.
-//! - **Ready**: live, not draining, and this node finalized a block within the configured
-//!   maximum commit age. A node that is still recovering, partitioned from a quorum, or in a
-//!   validator set that cannot finalize is therefore not ready.
+//! - **Ready**: live, not draining, not in a block-sync session, and this node finalized a block
+//!   through consensus (outside block sync) within the configured maximum commit age. A node
+//!   that is still recovering, catching up, partitioned from a quorum, or in a validator set
+//!   that cannot finalize is therefore not ready.
 //!
-//! Limitation: a node that is catching up through block sync also commits blocks, so it can be
-//! reported ready before it reaches the tip.
+//! Catch-up: block sync commits blocks too, but those commits do not count, and every sync
+//! session clears the earlier consensus commit. A lagging node therefore becomes ready only
+//! after it commits through consensus, which needs the blocks up to the tip. The cost: a healthy
+//! node that briefly syncs is not ready until its next consensus commit.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -19,6 +22,7 @@ pub const DEFAULT_READY_MAX_COMMIT_AGE: Duration = Duration::from_secs(30);
 pub enum NotReadyReason {
     Halted,
     Draining,
+    Syncing,
     NoCommitYet,
     CommitStale,
 }
@@ -28,6 +32,7 @@ impl NotReadyReason {
         match self {
             NotReadyReason::Halted => "halted",
             NotReadyReason::Draining => "draining",
+            NotReadyReason::Syncing => "syncing",
             NotReadyReason::NoCommitYet => "no_commit_yet",
             NotReadyReason::CommitStale => "commit_stale",
         }
@@ -39,7 +44,10 @@ impl NotReadyReason {
 pub struct ReadinessInput {
     pub halted: bool,
     pub draining: bool,
-    /// Time since this process last observed a committed block; `None` before the first one.
+    /// A block-sync session is open.
+    pub syncing: bool,
+    /// Time since this process last observed a block committed through consensus (not block
+    /// sync); `None` before the first one.
     pub last_commit_age: Option<Duration>,
     pub max_commit_age: Duration,
 }
@@ -51,6 +59,9 @@ pub fn evaluate_readiness(input: ReadinessInput) -> Result<(), NotReadyReason> {
     }
     if input.draining {
         return Err(NotReadyReason::Draining);
+    }
+    if input.syncing {
+        return Err(NotReadyReason::Syncing);
     }
     match input.last_commit_age {
         None => Err(NotReadyReason::NoCommitYet),
@@ -86,6 +97,7 @@ mod tests {
         ReadinessInput {
             halted,
             draining,
+            syncing: false,
             last_commit_age: age.map(Duration::from_secs),
             max_commit_age: MAX,
         }
@@ -118,6 +130,23 @@ mod tests {
     }
 
     #[test]
+    fn test_syncing_is_not_ready_even_with_a_recent_commit() {
+        let syncing = ReadinessInput {
+            syncing: true,
+            ..input(false, false, Some(1))
+        };
+        assert_eq!(evaluate_readiness(syncing), Err(NotReadyReason::Syncing));
+        let draining_and_syncing = ReadinessInput {
+            syncing: true,
+            ..input(false, true, Some(1))
+        };
+        assert_eq!(
+            evaluate_readiness(draining_and_syncing),
+            Err(NotReadyReason::Draining)
+        );
+    }
+
+    #[test]
     fn test_drain_is_one_way() {
         let lifecycle = Lifecycle::default();
         assert!(!lifecycle.is_draining());
@@ -131,6 +160,7 @@ mod tests {
         let labels: Vec<_> = [
             NotReadyReason::Halted,
             NotReadyReason::Draining,
+            NotReadyReason::Syncing,
             NotReadyReason::NoCommitYet,
             NotReadyReason::CommitStale,
         ]
@@ -139,7 +169,13 @@ mod tests {
         .collect();
         assert_eq!(
             labels,
-            ["halted", "draining", "no_commit_yet", "commit_stale"]
+            [
+                "halted",
+                "draining",
+                "syncing",
+                "no_commit_yet",
+                "commit_stale"
+            ]
         );
     }
 }

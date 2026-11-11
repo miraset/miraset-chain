@@ -14,8 +14,10 @@ x-validator: &validator
   # A consensus safety halt exits with code 3 (TODO 8.3.2); restart so the node recovers.
   restart: on-failure
   networks: [devnet]
+  # Liveness, not readiness: a node that lost quorum or is catching up is alive but not ready,
+  # and marking it unhealthy would hide the difference (see /readyz in docs/devnet.md).
   healthcheck:
-    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8545/health"]
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8545/livez"]
     interval: 5s
     timeout: 2s
     retries: 12

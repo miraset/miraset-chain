@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 const HALT_TIMEOUT: Duration = Duration::from_secs(30);
 const SAFETY_HALT_EXIT_CODE: i32 = 3;
+/// Longer than any wait here: only the halt can end this drain in time.
+const LONG_DRAIN_MS: &str = "60000";
 
 /// Wait for the signer's banner, printed after it binds. The socket path alone is not enough:
 /// a SIGKILLed signer leaves its stale socket file behind.
@@ -78,6 +80,37 @@ fn test_e2e_validator_halts_when_its_signer_dies_and_recovers_after_restart() {
     wait_for_socket(&v, &signer);
     let node = v.start_remote(&socket, &[]);
     wait_healthy_with_height(&v, &node, height_before + 1, STARTUP_TIMEOUT);
+}
+
+/// Halt during the SIGTERM drain (TODO 8.4.4): consensus keeps signing while the node drains,
+/// so killing its signer then is a real fault. The halt must win over the graceful exit.
+#[test]
+fn test_e2e_safety_halt_during_drain_still_exits_with_halt_code() {
+    let mut v = Validator::init();
+    let signer = v.start_signer(&["--init-signing-guard"]);
+    wait_for_socket(&v, &signer);
+    let socket = v.signer_socket();
+    let mut node = v.start_remote(&socket, &["--shutdown-drain-ms", LONG_DRAIN_MS]);
+    wait_healthy_with_height(&v, &node, 2, STARTUP_TIMEOUT);
+
+    sigterm(node.child.id());
+    wait_for("draining readiness", STARTUP_TIMEOUT, &node, || {
+        http_get(v.rpc, "/readyz")
+            .is_some_and(|(code, body)| code == 503 && body.contains("\"draining\""))
+    });
+    signer.kill();
+    let status = node
+        .wait_exit(HALT_TIMEOUT)
+        .expect("validator exits on a halt during the drain");
+    assert_eq!(
+        status.code(),
+        Some(SAFETY_HALT_EXIT_CODE),
+        "{}",
+        node.log_text()
+    );
+    let log = node.log_text();
+    assert!(log.contains("shutdown: admission stopped"), "{log}");
+    assert!(log.contains("SAFETY HALT"), "{log}");
 }
 
 #[test]

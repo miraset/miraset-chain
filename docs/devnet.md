@@ -29,13 +29,25 @@ Operations endpoints (TODO 8.4.4):
 | Endpoint | 200 when | 503 body `status` |
 |---|---|---|
 | `/livez` | the process serves and consensus has not halted | `halted` |
-| `/readyz` | not halted, not draining, and a block was committed within `--ready-max-commit-age-secs` (default 30) | `halted`, `draining`, `no_commit_yet`, `commit_stale` |
+| `/readyz` | not halted, not draining, no block-sync session open, and a block was committed through consensus within `--ready-max-commit-age-secs` (default 30) | `halted`, `draining`, `syncing`, `no_commit_yet`, `commit_stale` |
 | `/metrics` | always; Prometheus text format with a fixed metric set (`miraset_*`) | — |
 
 `/readyz` measures whether this node is finalizing, so every node of a set that cannot reach a
-quorum reports not ready. A node catching up through block sync also commits and can report
-ready before it reaches the tip. The compose healthcheck still uses `/health` (same meaning as
-`/livez`).
+quorum reports not ready. Blocks committed through block sync do not count: a lagging node
+reports `syncing` during a sync session and `commit_stale` (or `no_commit_yet`) between
+sessions (each session discards the earlier consensus commit), and turns ready only after it
+commits through consensus, which needs the blocks up to the tip. Such a commit can finalize an
+ancestor a few heights below the tip. If the highest certificate does not advance for
+`block_sync_trigger_timeout` (3 s), for example under heavy netem loss, the node starts a sync
+session, so `/readyz` can alternate between `ready` and `syncing` on a slow chain that is
+still finalizing. The compose
+healthcheck uses `/livez`: a node without quorum or catching up is alive, not unhealthy.
+
+Besides commits, admission, mempool and transport drops, `/metrics` exports block sync
+(`miraset_syncing`, `miraset_sync_sessions_total`, `miraset_blocks_synced_total`) and phase votes
+refused by the signing guard (`miraset_vote_refused_total{layer, reason}`, `layer` = `signer` for
+an in-process key or `transport` for `GuardedNetwork`, `reason` = `stale` or `conflicting`). A
+validator with `--remote-signer` has no `signer` series; that process counts its own refusals.
 
 Logs go to stderr: text by default, one JSON object per line with `--log-format json`; `RUST_LOG`
 sets the filter (default `info`). On SIGTERM a validator stops admission (`/tx/submit` and

@@ -55,6 +55,12 @@ const SYNC_BATCH: u32 = 5;
 const SYNC_ROUNDS: u64 = 4;
 /// Time for in-flight messages to drain after a fault is applied.
 const SETTLE: Duration = Duration::from_millis(1_000);
+/// Readiness window in the lagging scenario: short, so an isolated replica turns stale.
+const LAG_READY_WINDOW: Duration = Duration::from_millis(1_000);
+/// HotStuff commits a block when a later block's certificate completes its chain, so a replica's
+/// committed height trails the newest committed height of its peers by the blocks in flight
+/// (pipelining depth 2-3). Readiness may turn on that far below the peers' tip.
+const READY_TIP_SLACK: u64 = 3;
 
 /// Serialises the scenarios: each runs 5–6 replicas on short views.
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -388,6 +394,7 @@ fn test_lagging_validator_catches_up_over_several_sync_rounds() {
     let _serial = serial();
     let cluster = Cluster::start(80, &[], |config| {
         config.block_sync_request_limit = SYNC_BATCH;
+        config.ready_max_commit_age = LAG_READY_WINDOW;
     });
     let all: Vec<usize> = (0..VALIDATORS).collect();
     let others: Vec<usize> = (0..LAGGING).collect();
@@ -413,9 +420,23 @@ fn test_lagging_validator_catches_up_over_several_sync_rounds() {
         behind > u64::from(SYNC_BATCH),
         "lag of {behind} must need more than one sync batch"
     );
+    let lagging = &cluster.nodes[LAGGING];
+    assert!(
+        lagging.readiness().is_err(),
+        "isolated replica reports not ready"
+    );
     cluster.hub.heal_peer(&cluster.vk(LAGGING));
-    cluster.wait_all_reach(&[LAGGING], target, "lagging validator catch-up");
+    assert_not_ready_until_caught_up(&cluster, LAGGING, target);
     cluster.assert_no_conflicting_commits(&all);
+    let metrics = lagging.render_metrics();
+    let blocks_synced = metrics
+        .lines()
+        .find_map(|line| line.strip_prefix("miraset_blocks_synced_total "))
+        .and_then(|value| value.parse::<u64>().ok());
+    assert!(
+        blocks_synced.is_some_and(|blocks| blocks > 0),
+        "catch-up went through block sync:\n{metrics}"
+    );
 
     // Back in the set, it contributes to further finality.
     let rejoined_at = cluster.min_height(&all);
@@ -425,4 +446,39 @@ fn test_lagging_validator_catches_up_over_several_sync_rounds() {
         "progress after rejoin",
     );
     cluster.assert_no_conflicting_commits(&all);
+}
+
+/// Catch-up readiness (TODO 8.4.4): while the replica is behind it must never report ready;
+/// it must become ready after it catches up. Block-sync commits do not count for readiness.
+fn assert_not_ready_until_caught_up(cluster: &Cluster, replica: usize, target: u64) {
+    let node = &cluster.nodes[replica];
+    let others: Vec<usize> = (0..VALIDATORS).filter(|&r| r != replica).collect();
+    let deadline = Instant::now() + SCENARIO_TIMEOUT;
+    let mut saw_syncing = false;
+    loop {
+        // Tip before readiness, own height after: both only grow, so a ready replica is
+        // compared with a tip no newer than the moment it reported ready.
+        let tip = cluster.min_height(&others);
+        let readiness = node.readiness();
+        let height = cluster.height(replica);
+        match readiness {
+            Ok(()) => {
+                assert!(
+                    height + READY_TIP_SLACK >= tip,
+                    "reported ready at height {height}, peers' tip was at least {tip}"
+                );
+                if height >= target {
+                    break;
+                }
+            }
+            Err(reason) => saw_syncing |= reason.as_str() == "syncing",
+        }
+        assert!(
+            Instant::now() < deadline,
+            "lagging replica at {height} (wanted {target}) not ready: {readiness:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Sessions can be short; the metric is the robust check, this one is informative.
+    eprintln!("lagging replica observed syncing in a probe: {saw_syncing}");
 }
