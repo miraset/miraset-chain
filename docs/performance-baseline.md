@@ -114,9 +114,13 @@ Observed while building and running the measurement; none is fixed here.
 2. **The mempool is unbounded and does linear work per insert** (duplicate scan and full sort by
    fee, sender, nonce). Under sustained overload it grows without limit and admission slows
    down. 8.4.3 admission limits.
+   **Fixed after these measurements** (e421ace, TODO 8.4.3): bounded, indexed mempool.
 3. **Admission does not verify signatures, nonces or balances**; only duplicates (400) and
    draining (503) are refused. Invalid items occupy the mempool until block production skips
    them. 8.4.3.
+   **Fixed after these measurements** (e421ace): admission checks committed state, and items
+   that fail execution are evicted. The baseline numbers predate both changes; rerun the sweep
+   before comparing.
 4. **Blocks are produced continuously, also when empty**: about 30–35 blocks/s on the idle
    five-validator devnet (LAN), about 500/s on a single validator. Every block is stored, so
    chain data grows with wall time, not only with load (the soak will quantify it). Candidate:
