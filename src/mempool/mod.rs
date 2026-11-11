@@ -1,3 +1,3 @@
 pub mod pool;
 
-pub use pool::Mempool;
+pub use pool::{InsertError, Mempool, MempoolLimits, ReceiptVerdict, TxVerdict};

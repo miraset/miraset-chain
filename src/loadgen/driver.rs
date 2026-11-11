@@ -42,7 +42,8 @@ impl Lag {
 
 /// An item whose send failed in transport: it may or may not have been admitted (or even
 /// committed). Before it is re-sent, committed state is checked; a re-send that the node
-/// answers as a duplicate (400) was admitted by the earlier attempt.
+/// answers as a conflict (409: already pending or already committed) was admitted by the
+/// earlier attempt.
 struct Retry<T> {
     item: T,
     scheduled: Instant,
@@ -57,8 +58,8 @@ enum Outcome {
 fn classify(result: Result<StatusCode, HttpError>, is_retry: bool) -> Outcome {
     match result {
         Ok(status) if status.is_success() => Outcome::Admitted,
-        // The node answers 400 only for a duplicate: our earlier attempt got in.
-        Ok(StatusCode::BAD_REQUEST) if is_retry => Outcome::Admitted,
+        // 409 means already pending or already committed: our earlier attempt got in.
+        Ok(StatusCode::CONFLICT) if is_retry => Outcome::Admitted,
         Ok(status) => Outcome::Rejected(format!("status {}", status.as_u16())),
         Err(_) => Outcome::Unknown,
     }
@@ -299,11 +300,15 @@ mod tests {
     #[test]
     fn test_duplicate_answer_counts_as_admission_only_on_a_retry() {
         assert!(matches!(
-            classify(Ok(StatusCode::BAD_REQUEST), true),
+            classify(Ok(StatusCode::CONFLICT), true),
             Outcome::Admitted
         ));
         assert!(matches!(
-            classify(Ok(StatusCode::BAD_REQUEST), false),
+            classify(Ok(StatusCode::CONFLICT), false),
+            Outcome::Rejected(_)
+        ));
+        assert!(matches!(
+            classify(Ok(StatusCode::BAD_REQUEST), true),
             Outcome::Rejected(_)
         ));
         assert!(matches!(

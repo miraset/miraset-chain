@@ -24,7 +24,16 @@ fn start_node(ready_max_commit_age: Duration) -> TestNode {
     let key = SigningKey::from_bytes(&[11u8; 32]);
     let vk = key.verifying_key();
     let kv_store = MemKVStore::new();
-    init_genesis(kv_store.clone(), &[(vk, 100)], &[("alice", 5_000)]);
+    let funded = hex::encode(
+        SigningKey::from_bytes(&[13u8; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+    init_genesis(
+        kv_store.clone(),
+        &[(vk, 100)],
+        &[("alice", 5_000), (funded.as_str(), 5_000)],
+    );
     let mut config = NodeConfig::devnet(key);
     config.max_view_time = Duration::from_millis(200);
     config.ready_max_commit_age = ready_max_commit_age;

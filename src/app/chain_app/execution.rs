@@ -63,6 +63,14 @@ impl BlockExecution {
             .unwrap_or_else(|| MirasetApp::read_account(tree, address))
     }
 
+    /// The account nonce a transaction from `address` must carry next on top of this state.
+    pub(super) fn account_nonce<K: KVStore>(&self, tree: &Tree<'_, '_, K>, address: &str) -> u64 {
+        self.local_accounts.get(address).map_or_else(
+            || MirasetApp::read_account(tree, address).nonce,
+            |a| a.nonce,
+        )
+    }
+
     fn take_worker<K: KVStore>(&mut self, tree: &Tree<'_, '_, K>, id: &str) -> Option<WorkerInfo> {
         self.local_workers
             .remove(id)

@@ -17,6 +17,7 @@ use crate::core::types::{
     compute_state_commitment,
 };
 use crate::mempool::Mempool;
+use crate::node::admission::{self, AdmissionError};
 use crate::node::config::NodeConfig;
 use crate::observability::{
     AdmissionKind, AdmissionReject, Lifecycle, NodeMetrics, NotReadyReason, ReadinessInput,
@@ -204,8 +205,14 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                         let datum = &data.vec()[0];
                         match BlockPayload::from_bytes(datum.bytes()) {
                             Ok(payload) => {
+                                // Every node commits every block, so this also clears copies
+                                // of a nonce or task that were admitted on this node but
+                                // committed through another one.
                                 for tx in &payload.transactions {
-                                    mempool_for_event.remove_tx(&tx.sender, tx.nonce);
+                                    mempool_for_event.prune_sender_up_to_nonce(
+                                        &tx.sender,
+                                        tx.nonce.saturating_add(1),
+                                    );
                                 }
                                 for receipt in &payload.compute_receipts {
                                     mempool_for_event.remove_receipt(&receipt.task_id);
@@ -348,9 +355,16 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
 
     /// Height of the highest committed block, if any block has been committed.
     pub fn highest_committed_height(&self) -> Option<u64> {
+        self.highest_committed().map(|(_, height)| height)
+    }
+
+    /// Hash and height of the highest committed block, read from one snapshot so the two
+    /// always describe the same block.
+    pub fn highest_committed(&self) -> Option<(CryptoHash, u64)> {
         let snapshot = self.block_tree_camera().snapshot();
         let hash = snapshot.highest_committed_block().ok().flatten()?;
-        snapshot.block_height(&hash).ok().flatten().map(|h| h.int())
+        let height = snapshot.block_height(&hash).ok().flatten()?.int();
+        Some((hash, height))
     }
 
     /// Hash of the committed block at `height`; `None` above the highest committed height.
@@ -365,49 +379,75 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             .flatten()
     }
 
-    /// Submit a transaction to the local mempool.
+    /// Check a transaction against committed state, then admit it to the local mempool.
     pub fn submit_transaction(&self, tx: Transaction) -> Result<(), AdmissionError> {
-        self.admit(AdmissionKind::Transaction, || self.mempool.insert_tx(tx))
-    }
-
-    /// Submit a compute receipt to the local mempool.
-    pub fn submit_receipt(&self, receipt: ComputeReceipt) -> Result<(), AdmissionError> {
-        self.admit(AdmissionKind::Receipt, || {
-            self.mempool.insert_receipt(receipt)
+        self.admit(AdmissionKind::Transaction, || {
+            if self.mempool.contains_tx(&tx.sender, tx.nonce) {
+                return Err(AdmissionError::Duplicate);
+            }
+            let committed = self.get_account(&tx.sender).unwrap_or(AccountState {
+                balance: 0,
+                nonce: 0,
+            });
+            let next_nonce = self
+                .mempool
+                .last_pending_nonce(&tx.sender)
+                .and_then(|last| last.checked_add(1))
+                .map_or(committed.nonce, |next| next.max(committed.nonce));
+            let min_fee = self.mempool.limits().min_fee;
+            admission::check_transaction(&tx, &committed, next_nonce, min_fee)?;
+            let (sender, nonce) = (tx.sender.clone(), tx.nonce);
+            self.mempool.insert_tx(tx)?;
+            // A block may have committed this nonce between the check and the insert, after the
+            // commit hook pruned the pool; do not leave a stale transaction behind.
+            if self.get_account(&sender).is_some_and(|a| a.nonce > nonce) {
+                self.mempool
+                    .prune_sender_up_to_nonce(&sender, nonce.saturating_add(1));
+                return Err(AdmissionError::Replay("nonce already used"));
+            }
+            Ok(())
         })
     }
 
-    /// Refuse while draining, otherwise insert; count the outcome.
+    /// Check a compute receipt against committed state, then admit it to the local mempool.
+    pub fn submit_receipt(&self, receipt: ComputeReceipt) -> Result<(), AdmissionError> {
+        self.admit(AdmissionKind::Receipt, || {
+            if self.mempool.contains_receipt(&receipt.task_id) {
+                return Err(AdmissionError::Duplicate);
+            }
+            let settled = self.is_task_settled(&receipt.task_id);
+            let client = (!receipt.client_address.is_empty())
+                .then(|| self.get_account(&receipt.client_address))
+                .flatten();
+            admission::check_receipt(&receipt, settled, client.as_ref())?;
+            let task_id = receipt.task_id.clone();
+            self.mempool.insert_receipt(receipt)?;
+            // Same race as for transactions: the task may have settled meanwhile.
+            if self.is_task_settled(&task_id) {
+                self.mempool.remove_receipt(&task_id);
+                return Err(AdmissionError::Replay("task already settled"));
+            }
+            Ok(())
+        })
+    }
+
+    /// Refuse while draining, otherwise check and insert; count the outcome.
     fn admit(
         &self,
         kind: AdmissionKind,
-        insert: impl FnOnce() -> bool,
+        check_and_insert: impl FnOnce() -> Result<(), AdmissionError>,
     ) -> Result<(), AdmissionError> {
         let outcome = if self.lifecycle.is_draining() {
             Err(AdmissionError::Draining)
-        } else if insert() {
-            Ok(())
         } else {
-            Err(AdmissionError::Duplicate)
+            check_and_insert()
         };
         match outcome {
             Ok(()) => self.metrics.record_admitted(kind),
-            Err(AdmissionError::Duplicate) => self
+            Err(err) => self
                 .metrics
-                .record_rejected(kind, AdmissionReject::Duplicate),
-            Err(AdmissionError::Draining) => self
-                .metrics
-                .record_rejected(kind, AdmissionReject::Draining),
+                .record_rejected(kind, AdmissionReject::from(err)),
         }
         outcome
     }
-}
-
-/// Why a transaction or receipt was not admitted to the mempool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum AdmissionError {
-    #[error("already exists in mempool")]
-    Duplicate,
-    #[error("node is shutting down and not admitting new work")]
-    Draining,
 }

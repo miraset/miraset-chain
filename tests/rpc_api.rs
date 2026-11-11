@@ -14,6 +14,51 @@ use miraset_chain::storage::MemKVStore;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+/// Funded account whose key signs the submissions in these tests.
+fn payer() -> SigningKey {
+    SigningKey::from_bytes(&[21u8; 32])
+}
+
+fn coordinator() -> SigningKey {
+    SigningKey::from_bytes(&[22u8; 32])
+}
+
+fn address(key: &SigningKey) -> String {
+    hex::encode(key.verifying_key().to_bytes())
+}
+
+fn signed_transfer(key: &SigningKey, nonce: u64, amount: u64) -> Transaction {
+    let mut tx = Transaction::new(address(key), nonce, "bob", amount, 10);
+    tx.sign_with(key);
+    tx
+}
+
+fn signed_receipt(task_id: &str, client: &str) -> ComputeReceipt {
+    let mut receipt = ComputeReceipt::new(
+        task_id,
+        client,
+        "worker_h100",
+        "coordinator_1",
+        "model_hash_1",
+        "proof_1",
+        100,
+        25,
+        20,
+    );
+    receipt.sign_with(&coordinator());
+    receipt
+}
+
+async fn post<T: serde::Serialize>(app: &axum::Router, path: &str, body: &T) -> StatusCode {
+    let req = Request::builder()
+        .uri(path)
+        .method("POST")
+        .header("Content-Type", "application/json")
+        .body(Body::from(serde_json::to_vec(body).unwrap()))
+        .unwrap();
+    app.clone().oneshot(req).await.unwrap().status()
+}
+
 fn setup_test_node() -> (Arc<MirasetNode<MemKVStore, ChannelNetwork>>, u64) {
     let keypair = SigningKey::from_bytes(&[7u8; 32]);
     let vk = keypair.verifying_key();
@@ -22,7 +67,12 @@ fn setup_test_node() -> (Arc<MirasetNode<MemKVStore, ChannelNetwork>>, u64) {
     let kv_store = MemKVStore::new();
 
     let validators = vec![(vk, 100)];
-    let initial_accounts = vec![("alice", 5000), ("bob", 100)];
+    let payer_address = address(&payer());
+    let initial_accounts = vec![
+        ("alice", 5000),
+        ("bob", 100),
+        (payer_address.as_str(), 5000),
+    ];
 
     init_genesis(kv_store.clone(), &validators, &initial_accounts);
 
@@ -150,47 +200,21 @@ async fn test_rpc_tx_and_receipt_submission() {
     let status: ApiResponse<MempoolStatusResponse> = serde_json::from_slice(&body).unwrap();
     assert_eq!(status.data.unwrap().pending_txs, 0);
 
-    // Submit valid transaction
-    let tx = Transaction::new("alice", 0, "bob", 200, 10);
-    let req = Request::builder()
-        .uri("/tx/submit")
-        .method("POST")
-        .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_vec(&tx).unwrap()))
-        .unwrap();
-    let resp = app.clone().oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Signed, funded transfer is admitted; the same one again conflicts.
+    let tx = signed_transfer(&payer(), 0, 200);
+    assert_eq!(post(&app, "/tx/submit", &tx).await, StatusCode::OK);
+    assert_eq!(post(&app, "/tx/submit", &tx).await, StatusCode::CONFLICT);
 
-    // Duplicate transaction submission should be rejected
-    let req_dup = Request::builder()
-        .uri("/tx/submit")
-        .method("POST")
-        .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_vec(&tx).unwrap()))
-        .unwrap();
-    let resp_dup = app.clone().oneshot(req_dup).await.unwrap();
-    assert_eq!(resp_dup.status(), StatusCode::BAD_REQUEST);
-
-    // Submit compute receipt
-    let receipt = ComputeReceipt::new(
-        "task_rpc_101",
-        "alice",
-        "worker_h100",
-        "coordinator_1",
-        "model_hash_1",
-        "proof_1",
-        100,
-        25,
-        20,
+    // Coordinator-signed receipt with a funded client is admitted; again conflicts.
+    let receipt = signed_receipt("task_rpc_101", "alice");
+    assert_eq!(
+        post(&app, "/receipt/submit", &receipt).await,
+        StatusCode::OK
     );
-    let req_rcpt = Request::builder()
-        .uri("/receipt/submit")
-        .method("POST")
-        .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_vec(&receipt).unwrap()))
-        .unwrap();
-    let resp_rcpt = app.clone().oneshot(req_rcpt).await.unwrap();
-    assert_eq!(resp_rcpt.status(), StatusCode::OK);
+    assert_eq!(
+        post(&app, "/receipt/submit", &receipt).await,
+        StatusCode::CONFLICT
+    );
 
     // Check mempool status has updated
     let req = Request::builder()
@@ -268,17 +292,99 @@ async fn test_rpc_worker_bond_submission() {
         vram_gib: 24,
         endpoint: "127.0.0.1:8080".to_string(),
     };
-    let tx = Transaction::new_worker_bond("alice", 0, 5, bond_action).unwrap();
+    let mut tx = Transaction::new_worker_bond(address(&payer()), 0, 5, bond_action).unwrap();
+    tx.sign_with(&payer());
+    assert_eq!(post(&app, "/tx/submit", &tx).await, StatusCode::OK);
+}
 
-    let req = Request::builder()
-        .uri("/tx/submit")
-        .method("POST")
-        .header("Content-Type", "application/json")
-        .body(Body::from(serde_json::to_vec(&tx).unwrap()))
-        .unwrap();
+#[tokio::test]
+async fn test_rpc_rejects_items_that_can_never_apply() {
+    let (node, chain_id) = setup_test_node();
+    let app = create_router(RpcState { node, chain_id });
 
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Unsigned sender.
+    let unsigned = Transaction::new("alice", 0, "bob", 1, 10);
+    assert_eq!(
+        post(&app, "/tx/submit", &unsigned).await,
+        StatusCode::BAD_REQUEST
+    );
+    // Signed by a key other than the sender's.
+    let mut forged = Transaction::new(address(&payer()), 0, "bob", 1, 10);
+    forged.sign_with(&coordinator());
+    assert_eq!(
+        post(&app, "/tx/submit", &forged).await,
+        StatusCode::BAD_REQUEST
+    );
+    // Unfunded sender.
+    let broke = SigningKey::from_bytes(&[23u8; 32]);
+    assert_eq!(
+        post(&app, "/tx/submit", &signed_transfer(&broke, 0, 1)).await,
+        StatusCode::BAD_REQUEST
+    );
+    // Overspending the committed balance.
+    assert_eq!(
+        post(&app, "/tx/submit", &signed_transfer(&payer(), 0, 5_000)).await,
+        StatusCode::BAD_REQUEST
+    );
+    // Receipt without a coordinator signature; receipt whose client cannot pay.
+    let unsigned_receipt = ComputeReceipt::new("t-x", "alice", "w", "c", "m", "p", 10, 1, 1);
+    assert_eq!(
+        post(&app, "/receipt/submit", &unsigned_receipt).await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post(&app, "/receipt/submit", &signed_receipt("t-y", "charlie")).await,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn test_rpc_rejects_replayed_nonce_and_settled_task() {
+    let (node, chain_id) = setup_test_node();
+    let app = create_router(RpcState {
+        node: Arc::clone(&node),
+        chain_id,
+    });
+    let payer_address = address(&payer());
+    assert_eq!(
+        post(&app, "/tx/submit", &signed_transfer(&payer(), 0, 1)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(
+            &app,
+            "/receipt/submit",
+            &signed_receipt("task-replay", "alice")
+        )
+        .await,
+        StatusCode::OK
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while node.get_account(&payer_address).map(|a| a.nonce) != Some(1)
+        || !node.is_task_settled("task-replay")
+    {
+        assert!(std::time::Instant::now() < deadline, "items not committed");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Same nonce with a different payload: the nonce is already used.
+    assert_eq!(
+        post(&app, "/tx/submit", &signed_transfer(&payer(), 0, 2)).await,
+        StatusCode::CONFLICT
+    );
+    // A new receipt for a settled task (different worker reward) is a replay.
+    let mut replay = signed_receipt("task-replay", "alice");
+    replay.worker_reward = 1;
+    replay.sign_with(&coordinator());
+    assert_eq!(
+        post(&app, "/receipt/submit", &replay).await,
+        StatusCode::CONFLICT
+    );
+    // The next nonce is still admitted.
+    assert_eq!(
+        post(&app, "/tx/submit", &signed_transfer(&payer(), 1, 1)).await,
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]

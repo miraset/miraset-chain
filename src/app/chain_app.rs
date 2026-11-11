@@ -1,7 +1,7 @@
 use crate::core::types::{
     AccountState, BlockPayload, ComputeReceipt, EpochInfo, Transaction, WorkerInfo,
 };
-use crate::mempool::Mempool;
+use crate::mempool::{Mempool, ReceiptVerdict, TxVerdict};
 use hotstuff_rs::app::{
     App, ProduceBlockRequest, ProduceBlockResponse, ValidateBlockRequest, ValidateBlockResponse,
 };
@@ -11,6 +11,12 @@ use hotstuff_rs::types::update_sets::AppStateUpdates;
 
 mod execution;
 use execution::BlockExecution;
+
+/// Most transactions and receipts a produced block carries.
+pub const MAX_BLOCK_TXS: usize = 100;
+pub const MAX_BLOCK_RECEIPTS: usize = 20;
+/// Candidates that fail execution before block production stops trying more of a kind.
+const MAX_FAILED_CANDIDATES: usize = 256;
 
 /// Application state machine implementing `hotstuff_rs::app::App`.
 pub struct MirasetApp {
@@ -200,19 +206,50 @@ fn try_apply(
 
 impl<K: KVStore> App<K> for MirasetApp {
     fn produce_block(&mut self, request: ProduceBlockRequest<'_, K>) -> ProduceBlockResponse {
-        let (candidate_txs, candidate_receipts) = self.mempool.peek_for_block(100, 20);
-        // Greedy selection in mempool order: a candidate is kept if it applies on top of the
-        // ones kept before it (transactions first, then receipts, as execution orders them).
+        // Greedy selection: a candidate is kept if it applies on top of the ones kept before it
+        // (transactions first, then receipts, as execution orders them). The pool offers sender
+        // chains by head fee, each in nonce order; nonce mismatches are decided without
+        // executing. A candidate that fails execution is evicted from the pool (with its
+        // sender's later nonces), so it cannot fail again in the next block; the failures per
+        // block are bounded, and each block makes progress through them. Eviction is local to
+        // this node's pool: a transaction that only failed on this fork's state is dropped and
+        // must be resubmitted.
         let tree = request.block_tree();
         let mut execution = BlockExecution::new(tree);
-        let selected_txs: Vec<Transaction> = candidate_txs
-            .into_iter()
-            .filter(|tx| try_apply(&mut execution, |e| e.apply_transaction(tree, tx)))
-            .collect();
-        let selected_receipts: Vec<ComputeReceipt> = candidate_receipts
-            .into_iter()
-            .filter(|receipt| try_apply(&mut execution, |e| e.apply_receipt(tree, receipt)))
-            .collect();
+        let mut failures = 0usize;
+        let selected_txs: Vec<Transaction> = self.mempool.select_txs(MAX_BLOCK_TXS, |tx| {
+            let expected = execution.account_nonce(tree, &tx.sender);
+            if tx.nonce < expected {
+                return TxVerdict::Skip;
+            }
+            if tx.nonce > expected {
+                return TxVerdict::DropSender;
+            }
+            if try_apply(&mut execution, |e| e.apply_transaction(tree, tx)) {
+                TxVerdict::Included
+            } else {
+                failures += 1;
+                if failures >= MAX_FAILED_CANDIDATES {
+                    TxVerdict::Stop
+                } else {
+                    TxVerdict::Evict
+                }
+            }
+        });
+        failures = 0;
+        let selected_receipts: Vec<ComputeReceipt> =
+            self.mempool.select_receipts(MAX_BLOCK_RECEIPTS, |receipt| {
+                if try_apply(&mut execution, |e| e.apply_receipt(tree, receipt)) {
+                    ReceiptVerdict::Included
+                } else {
+                    failures += 1;
+                    if failures >= MAX_FAILED_CANDIDATES {
+                        ReceiptVerdict::Stop
+                    } else {
+                        ReceiptVerdict::Evict
+                    }
+                }
+            });
 
         // `finish` is the same code validators run after applying the payload, so the state
         // root and updates match what `validate_block` will compute.
@@ -332,7 +369,9 @@ mod tests {
     #[test]
     fn test_app_creation_with_mempool() {
         let mempool = Mempool::new();
-        mempool.insert_tx(Transaction::new("alice", 1, "bob", 100, 5));
+        mempool
+            .insert_tx(Transaction::new("alice", 1, "bob", 100, 5))
+            .unwrap();
         let receipt = ComputeReceipt::new(
             "t1",
             "client_alice",
@@ -344,7 +383,7 @@ mod tests {
             20,
             18,
         );
-        mempool.insert_receipt(receipt);
+        mempool.insert_receipt(receipt).unwrap();
 
         let app = MirasetApp::new(mempool);
         assert_eq!(app.mempool().tx_count(), 1);

@@ -232,11 +232,15 @@ where
     )
 }
 
-/// Duplicates are client errors; refusals while draining tell the client to retry elsewhere.
+/// Map an admission refusal to an HTTP status: 400 for items that can never apply, 409 for
+/// items already pending or committed, 429 for a sender over its quota, 503 when the node cannot
+/// take work (full mempool, draining) and the client should retry later or elsewhere.
 fn admission_status(err: AdmissionError) -> StatusCode {
     match err {
-        AdmissionError::Duplicate => StatusCode::BAD_REQUEST,
-        AdmissionError::Draining => StatusCode::SERVICE_UNAVAILABLE,
+        AdmissionError::Invalid(_) => StatusCode::BAD_REQUEST,
+        AdmissionError::Duplicate | AdmissionError::Replay(_) => StatusCode::CONFLICT,
+        AdmissionError::SenderLimit => StatusCode::TOO_MANY_REQUESTS,
+        AdmissionError::MempoolFull | AdmissionError::Draining => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
 
@@ -376,14 +380,10 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
-    let highest_block = state
-        .node
-        .highest_committed_block()
-        .map(|hash| hex::encode(hash.bytes()));
-
+    let highest = state.node.highest_committed();
     Json(ApiResponse::ok(LatestBlockResponse {
-        highest_committed_block: highest_block,
-        height: state.node.highest_committed_height(),
+        highest_committed_block: highest.map(|(hash, _)| hex::encode(hash.bytes())),
+        height: highest.map(|(_, height)| height),
     }))
 }
 

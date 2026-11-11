@@ -9,26 +9,55 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::vote_refusals::{VoteGuardLayer, VoteRefusals};
+use crate::node::AdmissionError;
 
 /// Rejection reasons for transaction and receipt admission. Fixed set of label values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionReject {
     Duplicate,
     Draining,
+    Invalid,
+    Replay,
+    MempoolFull,
+    SenderLimit,
 }
 
 impl AdmissionReject {
-    const ALL: [AdmissionReject; 2] = [AdmissionReject::Duplicate, AdmissionReject::Draining];
+    const ALL: [AdmissionReject; 6] = [
+        AdmissionReject::Duplicate,
+        AdmissionReject::Draining,
+        AdmissionReject::Invalid,
+        AdmissionReject::Replay,
+        AdmissionReject::MempoolFull,
+        AdmissionReject::SenderLimit,
+    ];
 
     fn as_str(self) -> &'static str {
         match self {
             AdmissionReject::Duplicate => "duplicate",
             AdmissionReject::Draining => "draining",
+            AdmissionReject::Invalid => "invalid",
+            AdmissionReject::Replay => "replay",
+            AdmissionReject::MempoolFull => "mempool_full",
+            AdmissionReject::SenderLimit => "sender_limit",
         }
     }
 
     fn index(self) -> usize {
         self as usize
+    }
+}
+
+impl From<AdmissionError> for AdmissionReject {
+    fn from(err: AdmissionError) -> Self {
+        match err {
+            AdmissionError::Duplicate => Self::Duplicate,
+            AdmissionError::Draining => Self::Draining,
+            AdmissionError::Invalid(_) => Self::Invalid,
+            AdmissionError::Replay(_) => Self::Replay,
+            AdmissionError::MempoolFull => Self::MempoolFull,
+            AdmissionError::SenderLimit => Self::SenderLimit,
+        }
     }
 }
 
@@ -452,7 +481,7 @@ mod tests {
         );
         let series = text.lines().filter(|l| !l.starts_with('#')).count();
         assert_eq!(
-            series, 16,
+            series, 24,
             "fixed series without a commit, the p2p counter or vote refusals"
         );
     }
