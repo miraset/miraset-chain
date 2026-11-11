@@ -61,6 +61,28 @@ impl From<AdmissionError> for AdmissionReject {
     }
 }
 
+/// Why the RPC refused a submission before admission. Fixed set of label values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcReject {
+    Unauthorized,
+    RateLimited,
+}
+
+impl RpcReject {
+    const ALL: [RpcReject; 2] = [RpcReject::Unauthorized, RpcReject::RateLimited];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            RpcReject::Unauthorized => "unauthorized",
+            RpcReject::RateLimited => "rate_limited",
+        }
+    }
+
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
 /// What is admitted: a transaction or a compute receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionKind {
@@ -103,6 +125,7 @@ pub struct NodeMetrics {
     sync_sessions_total: AtomicU64,
     blocks_synced_total: AtomicU64,
     admission: [AdmissionCounters; AdmissionKind::ALL.len()],
+    rpc_rejected: [AtomicU64; RpcReject::ALL.len()],
     p2p_dropped: OnceLock<Arc<AtomicU64>>,
     vote_refusals: [OnceLock<Arc<VoteRefusals>>; VoteGuardLayer::ALL.len()],
 }
@@ -119,6 +142,7 @@ impl Default for NodeMetrics {
             sync_sessions_total: AtomicU64::new(0),
             blocks_synced_total: AtomicU64::new(0),
             admission: Default::default(),
+            rpc_rejected: Default::default(),
             p2p_dropped: OnceLock::new(),
             vote_refusals: Default::default(),
         }
@@ -220,6 +244,10 @@ impl NodeMetrics {
         self.admission[kind.index()].rejected[reason.index()].fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_rpc_rejected(&self, reason: RpcReject) {
+        self.rpc_rejected[reason.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Export the transport's dropped-message counter. Only the first call takes effect.
     pub fn attach_p2p_dropped(&self, counter: Arc<AtomicU64>) {
         let _ = self.p2p_dropped.set(counter);
@@ -301,6 +329,20 @@ impl NodeMetrics {
                     reason.as_str()
                 );
             }
+        }
+
+        counter(
+            &mut out,
+            "miraset_rpc_rejected_total",
+            "Submissions refused by the RPC before admission (API key, rate limit).",
+        );
+        for reason in RpcReject::ALL {
+            let value = self.rpc_rejected[reason.index()].load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "miraset_rpc_rejected_total{{reason=\"{}\"}} {value}",
+                reason.as_str()
+            );
         }
 
         gauge(
@@ -481,7 +523,7 @@ mod tests {
         );
         let series = text.lines().filter(|l| !l.starts_with('#')).count();
         assert_eq!(
-            series, 24,
+            series, 26,
             "fixed series without a commit, the p2p counter or vote refusals"
         );
     }

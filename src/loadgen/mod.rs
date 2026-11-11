@@ -50,6 +50,9 @@ pub struct LoadConfig {
     pub drain_timeout: Duration,
     pub fund_amount: u64,
     pub run_id: u64,
+    /// RPC API token sent as `Authorization: Bearer` on submissions, for nodes started with
+    /// `--rpc-api-keys`.
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -129,10 +132,31 @@ pub struct LoadReport {
     pub oldest_pending_secs: Option<f64>,
 }
 
+fn is_loopback_url(url: &str) -> bool {
+    let authority = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Fund senders, offer the load, drain, and report.
 pub async fn run(config: &LoadConfig) -> Result<LoadReport, LoadError> {
     config.validate()?;
-    let client = RpcClient::new();
+    if config.api_key.is_some() {
+        for url in config.rpc_urls.iter().filter(|url| !is_loopback_url(url)) {
+            tracing::warn!(%url, "sending the RPC API token over plain HTTP to a non-loopback node");
+        }
+    }
+    let client = RpcClient::new().with_bearer(config.api_key.clone());
     let observer_url = config.rpc_urls[0].clone();
     let sender_keys: Vec<SigningKey> = (0..config.senders)
         .map(|i| workload::derive_key(config.run_id, "sender", i))
@@ -353,6 +377,7 @@ mod tests {
             drain_timeout: Duration::from_secs(5),
             fund_amount: 1_000,
             run_id: 1,
+            api_key: None,
         }
     }
 
@@ -417,6 +442,24 @@ mod tests {
         ];
         for case in cases {
             assert!(case.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn test_loopback_urls_are_recognised() {
+        for url in [
+            "http://127.0.0.1:8545",
+            "http://localhost:1",
+            "http://[::1]:8545/x",
+        ] {
+            assert!(is_loopback_url(url), "{url}");
+        }
+        for url in [
+            "http://node0:8545",
+            "http://10.0.0.1:8545",
+            "http://[2001:db8::1]:1",
+        ] {
+            assert!(!is_loopback_url(url), "{url}");
         }
     }
 }

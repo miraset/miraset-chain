@@ -15,7 +15,7 @@ use miraset_chain::node::{
 use miraset_chain::observability::logging::SAFETY_LOG_TARGET;
 use miraset_chain::observability::{LogFormat, VoteGuardLayer, init_logging};
 use miraset_chain::process_hardening;
-use miraset_chain::rpc::start_rpc_server;
+use miraset_chain::rpc::{self, ApiKeys, RateLimit, RpcAccess, start_rpc_server};
 use miraset_chain::signer::process::{
     SIGNER_HALT_EXIT_CODE, SignerExit, SignerOptions, run_signer,
 };
@@ -102,6 +102,24 @@ struct StartArgs {
     #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=86_400))]
     ready_max_commit_age_secs: u64,
 
+    /// File of RPC API keys (`<name> <sha256-hex>` per line, see `rpc-key`; must not be group-
+    /// or world-writable; read at start, so revoking a key needs a restart). When set, POST
+    /// /v1/transactions and /v1/receipts require `Authorization: Bearer <token>`; without it
+    /// submissions are open (devnet only). The RPC is plain HTTP: put TLS in front of it
+    /// whenever tokens cross a network
+    #[arg(long)]
+    rpc_api_keys: Option<PathBuf>,
+
+    /// Submissions per second each client may sustain: per API key name, or per client IP (IPv6
+    /// /64) without keys. Behind a reverse proxy all clients share the proxy's IP, so use API
+    /// keys there
+    #[arg(long, default_value_t = 50.0, value_parser = parse_positive_rate)]
+    rpc_submit_rate: f64,
+
+    /// Submissions each client may send at once before the rate applies
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
+    rpc_submit_burst: u32,
+
     /// On SIGTERM/SIGINT, refuse admission and report not ready for this long before stopping,
     /// so load balancers and clients move away first
     #[arg(long, default_value_t = 2_000, value_parser = clap::value_parser!(u64).range(0..=60_000))]
@@ -180,6 +198,14 @@ enum Commands {
         /// <keys-dir>/faucet/faucet.key (one mount per container)
         #[arg(long)]
         keys_dir: Option<PathBuf>,
+    },
+    /// Create an RPC API token: prints JSON with the token (a full credential: hand it to the
+    /// client over a secure channel and keep it out of logs) and the line to add to the node's
+    /// --rpc-api-keys file (which stores only the token's SHA-256)
+    RpcKey {
+        /// Key name: 1-64 characters of [A-Za-z0-9_.-]; rate limits are kept per name
+        #[arg(long)]
+        name: String,
     },
     /// Print a signed transfer as JSON, ready to POST to /v1/transactions
     SignTransfer {
@@ -274,6 +300,15 @@ async fn main() -> CliResult {
             faucet_balance,
             keys_dir: keys_dir.as_deref(),
         }),
+        Commands::RpcKey { name } => {
+            let (token, line) = rpc::access::generate_key(&name)
+                .ok_or("key name must be 1-64 characters of [A-Za-z0-9_.-]")?;
+            println!(
+                "{}",
+                serde_json::json!({ "name": name, "token": token, "key_file_line": line })
+            );
+            Ok(())
+        }
         Commands::SignTransfer {
             key_file,
             to,
@@ -327,6 +362,38 @@ async fn main() -> CliResult {
     }
 }
 
+/// Environment variable holding the RPC API token `loadgen` sends with submissions.
+const LOADGEN_API_KEY_ENV: &str = "MIRASET_RPC_API_KEY";
+
+fn parse_positive_rate(value: &str) -> Result<f64, String> {
+    match value.parse::<f64>() {
+        Ok(rate) if rate.is_finite() && rate > 0.0 => Ok(rate),
+        _ => Err("must be a positive number".to_string()),
+    }
+}
+
+/// Submission access policy from the start flags (TODO 8.4.3).
+fn rpc_access(cli: &StartArgs) -> Result<RpcAccess, Box<dyn std::error::Error>> {
+    let keys = match &cli.rpc_api_keys {
+        Some(path) => {
+            let keys = ApiKeys::load(path)?;
+            tracing::info!(keys = keys.len(), "RPC submissions require an API key");
+            Some(keys)
+        }
+        None => {
+            tracing::warn!(
+                "RPC submissions are open: no --rpc-api-keys file (acceptable on a private devnet only)"
+            );
+            None
+        }
+    };
+    let limit = RateLimit {
+        rate_per_sec: cli.rpc_submit_rate,
+        burst: cli.rpc_submit_burst,
+    };
+    Ok(RpcAccess::new(keys, Some(limit)))
+}
+
 /// Run one offline maintenance command and print its JSON report on stdout. Errors carry their
 /// exit code (`MaintenanceError::exit_code`).
 fn run_db(command: &DbCommand) -> Result<(), MaintenanceError> {
@@ -372,6 +439,10 @@ async fn run_loadgen(args: &LoadgenArgs) -> CliResult {
         drain_timeout: Duration::from_secs(args.drain_timeout_secs),
         fund_amount: args.fund_amount,
         run_id: rand::random(),
+        // From the environment so the token does not show in the process list.
+        api_key: std::env::var(LOADGEN_API_KEY_ENV)
+            .ok()
+            .filter(|token| !token.is_empty()),
     };
     let report = miraset_chain::loadgen::run(&config)
         .await
@@ -500,10 +571,12 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
         "starting MIRASET experimental/devnet validator (ADR-0016 Proposed)"
     );
 
+    let access = rpc_access(cli)?;
     let mut rpc = tokio::spawn(start_rpc_server(
         Arc::clone(&node),
         genesis.chain_id,
         cli.rpc_addr,
+        access,
     ));
     let outcome: CliResult = tokio::select! {
         signal = shutdown_signal() => signal.map_err(Into::into),
@@ -757,7 +830,7 @@ async fn run_devnet_demo() {
     let rpc_addr: SocketAddr = "127.0.0.1:8545".parse().unwrap();
     let rpc_node = Arc::clone(&node);
     tokio::spawn(async move {
-        if let Err(e) = start_rpc_server(rpc_node, chain_id, rpc_addr).await {
+        if let Err(e) = start_rpc_server(rpc_node, chain_id, rpc_addr, RpcAccess::open()).await {
             eprintln!("RPC server error: {}", e);
         }
     });

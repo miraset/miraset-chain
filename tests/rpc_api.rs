@@ -529,3 +529,198 @@ async fn test_rpc_contract_is_versioned_and_admission_is_not_finality() {
     assert_eq!(answer.status, "pending");
     assert_eq!(answer.id, format!("{}:0", address(&payer())));
 }
+
+/// TODO 8.4.3 access decisions: API key on submissions, per-client rate limits, body limit.
+mod access {
+    use super::*;
+    use axum::extract::ConnectInfo;
+    use miraset_chain::rpc::{ApiKeys, RateLimit, RpcAccess, create_router_with_access};
+    use std::net::SocketAddr;
+
+    const TOKEN: &str = "control-plane-token";
+
+    fn keys() -> ApiKeys {
+        let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(TOKEN.as_bytes()));
+        ApiKeys::parse(&format!("control-plane {hash}\n")).unwrap()
+    }
+
+    fn submit(path: &str, body: Vec<u8>, token: Option<&str>, ip: [u8; 4]) -> Request<Body> {
+        let mut builder = Request::builder()
+            .uri(path)
+            .method("POST")
+            .header("Content-Type", "application/json");
+        if let Some(token) = token {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        let mut req = builder.body(Body::from(body)).unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from((ip, 40_000))));
+        req
+    }
+
+    fn tx_body(nonce: u64) -> Vec<u8> {
+        serde_json::to_vec(&signed_transfer(&payer(), nonce, 1)).unwrap()
+    }
+
+    async fn metrics_text(app: &axum::Router) -> String {
+        let req = Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_submissions_require_a_known_api_key_and_reads_stay_open() {
+        let (node, chain_id) = setup_test_node();
+        let access = RpcAccess::new(Some(keys()), None).with_metrics(Arc::clone(node.metrics()));
+        let app = create_router_with_access(
+            RpcState {
+                node: Arc::clone(&node),
+                chain_id,
+            },
+            Arc::new(access),
+        );
+        let ip = [10, 0, 0, 1];
+
+        let resp = app
+            .clone()
+            .oneshot(submit("/v1/transactions", tx_body(0), None, ip))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.headers()["www-authenticate"], "Bearer");
+        let resp = app
+            .clone()
+            .oneshot(submit("/v1/receipts", tx_body(0), Some("guess"), ip))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = app
+            .clone()
+            .oneshot(submit("/v1/transactions", tx_body(0), Some(TOKEN), ip))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let req = Request::builder()
+            .uri(format!("/v1/accounts/{}", address(&payer())))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert!(
+            metrics_text(&app)
+                .await
+                .contains("miraset_rpc_rejected_total{reason=\"unauthorized\"} 2")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_is_per_client_and_answers_429_with_retry_after() {
+        let (node, chain_id) = setup_test_node();
+        let limit = RateLimit {
+            rate_per_sec: 0.01,
+            burst: 2,
+        };
+        let access = RpcAccess::new(None, Some(limit)).with_metrics(Arc::clone(node.metrics()));
+        let app = create_router_with_access(
+            RpcState {
+                node: Arc::clone(&node),
+                chain_id,
+            },
+            Arc::new(access),
+        );
+        let first = [10, 0, 0, 1];
+        for nonce in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(submit("/v1/transactions", tx_body(nonce), None, first))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        }
+        let resp = app
+            .clone()
+            .oneshot(submit("/v1/transactions", tx_body(2), None, first))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        let retry: u64 = resp.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(retry >= 1);
+        // Another client address has its own bucket.
+        let resp = app
+            .clone()
+            .oneshot(submit("/v1/transactions", tx_body(2), None, [10, 0, 0, 2]))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(
+            metrics_text(&app)
+                .await
+                .contains("miraset_rpc_rejected_total{reason=\"rate_limited\"} 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_oversized_request_bodies_are_refused() {
+        let (node, chain_id) = setup_test_node();
+        let app = create_router(RpcState { node, chain_id });
+        let mut tx = signed_transfer(&payer(), 0, 1);
+        tx.payload = vec![7; miraset_chain::rpc::server::MAX_REQUEST_BODY_BYTES];
+        let body = serde_json::to_vec(&tx).unwrap();
+        for path in ["/v1/transactions", "/v1/receipts"] {
+            let resp = app
+                .clone()
+                .oneshot(submit(path, body.clone(), None, [10, 0, 0, 1]))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+
+            // Chunked: no Content-Length to reject up front, counted while reading.
+            let chunks: Vec<Result<Vec<u8>, std::io::Error>> =
+                body.chunks(4096).map(|c| Ok(c.to_vec())).collect();
+            let stream = Body::from_stream(tokio_stream::iter(chunks));
+            let mut req = Request::builder()
+                .uri(path)
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(stream)
+                .unwrap();
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 1))));
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{path} chunked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_missing_key_is_refused_before_the_body_is_read() {
+        let (node, chain_id) = setup_test_node();
+        let app = create_router_with_access(
+            RpcState { node, chain_id },
+            Arc::new(RpcAccess::new(Some(keys()), None)),
+        );
+        // Neither malformed JSON nor an oversized body is looked at without a key.
+        for body in [b"{not json".to_vec(), vec![b'x'; 200 * 1024]] {
+            let resp = app
+                .clone()
+                .oneshot(submit("/v1/transactions", body, None, [10, 0, 0, 1]))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+}

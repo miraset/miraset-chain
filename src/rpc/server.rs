@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
+    middleware,
     response::{
         IntoResponse,
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -14,12 +15,23 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::timeout::TimeoutLayer;
 
+use super::access::{RpcAccess, guard_submission};
 use crate::core::types::{ComputeReceipt, Transaction};
+
+/// Largest request body accepted (a transaction or receipt is well below this); larger ones
+/// get 413.
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+
+/// Longest a request (other than the event stream) may take, including reading its body;
+/// slower ones get 408.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 use crate::node::{AdmissionError, MirasetNode};
 
 /// Response for health check.
@@ -144,10 +156,24 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    create_router_with_access(state, Arc::new(RpcAccess::open()))
+}
+
+/// Build the router with an access policy for the submission endpoints.
+pub fn create_router_with_access<K, N>(state: RpcState<K, N>, access: Arc<RpcAccess>) -> Router
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
+
+    let submissions = Router::new()
+        .route("/v1/transactions", post(submit_tx_handler))
+        .route("/v1/receipts", post(submit_receipt_handler))
+        .route_layer(middleware::from_fn_with_state(access, guard_submission));
 
     Router::new()
         // Operational probes and metrics: unversioned, for orchestrators and scrapers.
@@ -156,8 +182,6 @@ where
         .route("/metrics", get(metrics_handler))
         // Client contract, version 1 (TODO 8.4.3, docs/rpc-v1.md).
         .route("/v1/health", get(health_handler))
-        .route("/v1/transactions", post(submit_tx_handler))
-        .route("/v1/receipts", post(submit_receipt_handler))
         .route("/v1/accounts/{address}", get(get_account_handler))
         .route("/v1/workers/{worker_id}", get(get_worker_handler))
         .route("/v1/epochs/current", get(get_current_epoch_handler))
@@ -166,7 +190,14 @@ where
         .route("/v1/blocks/latest", get(latest_block_handler))
         .route("/v1/blocks/{height}", get(block_at_height_handler))
         .route("/v1/mempool", get(mempool_status_handler))
+        .merge(submissions)
+        // Bounded request time for everything except the event stream, added below.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            REQUEST_TIMEOUT,
+        ))
         .route("/v1/events/blocks", get(sse_block_events_handler))
+        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
         .layer(cors)
         .with_state(state)
 }
@@ -468,13 +499,20 @@ pub async fn start_rpc_server<K, N>(
     node: Arc<MirasetNode<K, N>>,
     chain_id: u64,
     addr: SocketAddr,
+    access: RpcAccess,
 ) -> Result<(), std::io::Error>
 where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    let access = Arc::new(access.with_metrics(Arc::clone(node.metrics())));
     let state = RpcState { node, chain_id };
-    let app = create_router(state);
+    let app = create_router_with_access(state, access);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await
+    // Client addresses key the rate limit when no API keys are configured.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
 }

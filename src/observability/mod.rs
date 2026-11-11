@@ -6,7 +6,7 @@ pub mod readiness;
 pub mod vote_refusals;
 
 pub use logging::{LogFormat, init_logging};
-pub use metrics::{AdmissionKind, AdmissionReject, NodeMetrics, ScrapeState};
+pub use metrics::{AdmissionKind, AdmissionReject, NodeMetrics, RpcReject, ScrapeState};
 pub use readiness::{
     DEFAULT_READY_MAX_COMMIT_AGE, Lifecycle, NotReadyReason, ReadinessInput, evaluate_readiness,
 };

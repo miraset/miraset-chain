@@ -31,7 +31,7 @@ tower = { version = "0.5", features = ["util"] }
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 http-body-util = "0.1"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "timeout"] }
 zeroize = "1"
 
 [dev-dependencies]

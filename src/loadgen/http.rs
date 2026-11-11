@@ -37,6 +37,8 @@ pub enum HttpError {
 #[derive(Clone)]
 pub struct RpcClient {
     client: Client<HttpConnector, Full<Bytes>>,
+    /// `Authorization` header value for POST requests (submissions), if any.
+    authorization: Option<String>,
 }
 
 impl Default for RpcClient {
@@ -49,7 +51,14 @@ impl RpcClient {
     pub fn new() -> Self {
         Self {
             client: Client::builder(TokioExecutor::new()).build_http(),
+            authorization: None,
         }
+    }
+
+    /// Send `Authorization: Bearer <token>` with every POST.
+    pub fn with_bearer(mut self, token: Option<String>) -> Self {
+        self.authorization = token.map(|token| format!("Bearer {token}"));
+        self
     }
 
     /// GET a JSON body; any non-2xx status is an error.
@@ -78,10 +87,15 @@ impl RpcClient {
         url: &str,
         body: Bytes,
     ) -> Result<(StatusCode, Bytes), HttpError> {
-        let request = Request::builder()
+        let is_post = method == Method::POST;
+        let mut builder = Request::builder()
             .method(method)
             .uri(url)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if let (true, Some(value)) = (is_post, &self.authorization) {
+            builder = builder.header("authorization", value);
+        }
+        let request = builder
             .body(Full::new(body))
             .map_err(|e| HttpError::Request(e.to_string()))?;
         let exchange = async {
