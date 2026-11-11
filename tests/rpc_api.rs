@@ -724,3 +724,43 @@ mod access {
         }
     }
 }
+
+/// TODO 8.4.3: reads say how fresh the committed state behind them is (AT11: stale reads are
+/// labeled), found or not.
+#[tokio::test]
+async fn test_reads_are_labeled_with_committed_height_and_staleness() {
+    let (node, chain_id) = setup_test_node();
+    let app = create_router(RpcState {
+        node: Arc::clone(&node),
+        chain_id,
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while node.highest_committed_height().is_none() || node.freshness().1.is_some() {
+        assert!(std::time::Instant::now() < deadline, "no fresh commit");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let (status, found) = get_json::<serde_json::Value>(&app, "/v1/accounts/alice").await;
+    assert_eq!(status, StatusCode::OK);
+    let meta = found.meta.expect("meta on a read");
+    assert!(!meta.stale);
+    assert_eq!(meta.stale_reason, None);
+    assert!(meta.committed_height.is_some());
+    assert!(meta.last_commit_age_secs.is_some());
+
+    // Not found is labeled too: absence is only as fresh as the state it was read from.
+    let (status, missing) = get_json::<serde_json::Value>(&app, "/v1/accounts/nobody").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(missing.meta.is_some());
+
+    // A halted node keeps serving its last committed state, labeled stale.
+    node.safety_halt().trigger("test halt");
+    let (_, after) = get_json::<serde_json::Value>(&app, "/v1/blocks/latest").await;
+    let meta = after.meta.expect("meta");
+    assert!(meta.stale);
+    assert_eq!(meta.stale_reason.as_deref(), Some("halted"));
+
+    // The mempool is not committed state: no freshness label.
+    let (_, health) = get_json::<serde_json::Value>(&app, "/v1/mempool").await;
+    assert!(health.meta.is_none());
+}

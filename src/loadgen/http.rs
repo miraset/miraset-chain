@@ -194,6 +194,12 @@ fn parse_event_block(text: &str) -> Result<Option<CommitEvent>, HttpError> {
             data.push_str(value.trim_start());
         }
     }
+    if name.as_deref() == Some("lagged") {
+        // The node dropped events for this subscriber; the observer re-reads state on the
+        // next commit, so stamps of items committed meanwhile come late.
+        tracing::warn!(%data, "commit stream lagged; commit stamps may be late");
+        return Ok(None);
+    }
     if name.as_deref() != Some("commit_block") || data.is_empty() {
         return Ok(None); // keep-alive comment or another event type
     }

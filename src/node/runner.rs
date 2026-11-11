@@ -231,6 +231,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                     timestamp_secs,
                     tx_count,
                     receipt_count,
+                    height,
                 });
             })
             .build()
@@ -280,6 +281,24 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             last_commit_age: self.metrics.last_consensus_commit_age(),
             max_commit_age: self.ready_max_commit_age,
         })
+    }
+
+    /// How fresh reads from this node's committed state are: the time since its last commit
+    /// through consensus (absent since start or since a block-sync session began) and, if the
+    /// node may be behind the chain, why — halted, syncing, or no consensus commit recently.
+    /// Commits made by block sync do not count: until the node commits through consensus again
+    /// it cannot tell that it has reached the tip. The age is read once, so both answers agree.
+    pub fn freshness(&self) -> (Option<Duration>, Option<NotReadyReason>) {
+        let age = self.metrics.last_consensus_commit_age();
+        let stale = evaluate_readiness(ReadinessInput {
+            halted: self.safety_halt.is_halted(),
+            draining: false,
+            syncing: self.metrics.is_syncing(),
+            last_commit_age: age,
+            max_commit_age: self.ready_max_commit_age,
+        })
+        .err();
+        (age, stale)
     }
 
     /// Metrics in Prometheus text format, with gauges sampled now.

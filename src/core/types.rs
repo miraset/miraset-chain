@@ -577,6 +577,9 @@ pub struct CommitEvent {
     pub timestamp_secs: u64,
     pub tx_count: usize,
     pub receipt_count: usize,
+    /// Height of the committed block (absent if it could not be read).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u64>,
 }
 
 /// Consolidated block payload containing transactions, PoCC receipts, and deterministic state commitment root.

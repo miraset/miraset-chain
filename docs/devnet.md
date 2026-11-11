@@ -22,7 +22,9 @@ docker compose down -v                # stop and delete the chain (keys, genesis
 
 RPC for `nodeN` is published on `127.0.0.1:854{5+N}` (node0 = 8545 … node4 = 8549). Useful
 endpoints: `/v1/health`, `/v1/blocks/latest` (hash + height), `/v1/blocks/{h}`, `/v1/accounts/{addr}`,
-`/v1/transactions`, `/v1/mempool`, `/v1/events/blocks` (SSE).
+`/v1/transactions`, `/v1/mempool`, `/v1/events/blocks` (SSE). The full client contract (status codes,
+freshness labels, API keys, rate limits) is [`docs/rpc-v1.md`](rpc-v1.md); the devnet runs
+without an API key file, so submissions are open.
 
 Operations endpoints (TODO 8.4.4):
 

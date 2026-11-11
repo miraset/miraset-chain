@@ -19,11 +19,12 @@ use std::time::Duration;
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::timeout::TimeoutLayer;
 
 use super::access::{RpcAccess, guard_submission};
-use crate::core::types::{ComputeReceipt, Transaction};
+use crate::core::types::{CommitEvent, ComputeReceipt, Transaction};
 
 /// Largest request body accepted (a transaction or receipt is well below this); larger ones
 /// get 413.
@@ -65,6 +66,28 @@ pub struct ApiResponse<T> {
     pub data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Freshness of the committed state a read was served from (reads only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<ReadMeta>,
+}
+
+/// How fresh this node's committed state is. Taken before the data is read, so the data is
+/// at least as new as `committed_height`. Each node serves its own committed state; a node can
+/// lag the chain, which `stale` reports.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ReadMeta {
+    /// Highest committed height in this node's store; absent before the first commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub committed_height: Option<u64>,
+    /// Seconds since this node last committed a block through consensus; absent since the
+    /// process started or since a block-sync session began, until the next such commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_commit_age_secs: Option<f64>,
+    /// True when the node may be behind the chain: `halted`, `syncing`, `no_commit_yet` or
+    /// `commit_stale` (see `stale_reason`).
+    pub stale: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_reason: Option<String>,
 }
 
 impl<T> ApiResponse<T> {
@@ -73,6 +96,7 @@ impl<T> ApiResponse<T> {
             success: true,
             data: Some(data),
             error: None,
+            meta: None,
         }
     }
 
@@ -81,7 +105,28 @@ impl<T> ApiResponse<T> {
             success: false,
             data: None,
             error: Some(msg.into()),
+            meta: None,
         }
+    }
+
+    /// Label a read with the freshness of the state it came from.
+    pub fn with_meta(mut self, meta: ReadMeta) -> Self {
+        self.meta = Some(meta);
+        self
+    }
+}
+
+fn read_meta<K, N>(state: &RpcState<K, N>) -> ReadMeta
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    let (age, staleness) = state.node.freshness();
+    ReadMeta {
+        committed_height: state.node.highest_committed_height(),
+        last_commit_age_secs: age.map(|age| age.as_secs_f64()),
+        stale: staleness.is_some(),
+        stale_reason: staleness.map(|reason| reason.as_str().to_string()),
     }
 }
 
@@ -347,11 +392,15 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    let meta = read_meta(&state);
     match state.node.get_account(&address) {
-        Some(account) => (StatusCode::OK, Json(ApiResponse::ok(account))),
+        Some(account) => (
+            StatusCode::OK,
+            Json(ApiResponse::ok(account).with_meta(meta)),
+        ),
         None => (
             StatusCode::NOT_FOUND,
-            Json(ApiResponse::err("Account not found in committed state")),
+            Json(ApiResponse::err("Account not found in committed state").with_meta(meta)),
         ),
     }
 }
@@ -364,11 +413,15 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    let meta = read_meta(&state);
     match state.node.get_worker(&worker_id) {
-        Some(worker) => (StatusCode::OK, Json(ApiResponse::ok(worker))),
+        Some(worker) => (
+            StatusCode::OK,
+            Json(ApiResponse::ok(worker).with_meta(meta)),
+        ),
         None => (
             StatusCode::NOT_FOUND,
-            Json(ApiResponse::err("Worker not found in committed state")),
+            Json(ApiResponse::err("Worker not found in committed state").with_meta(meta)),
         ),
     }
 }
@@ -378,13 +431,12 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    let meta = read_meta(&state);
     match state.node.get_current_epoch() {
-        Some(epoch) => (StatusCode::OK, Json(ApiResponse::ok(epoch))),
+        Some(epoch) => (StatusCode::OK, Json(ApiResponse::ok(epoch).with_meta(meta))),
         None => (
             StatusCode::NOT_FOUND,
-            Json(ApiResponse::err(
-                "Current epoch not found in committed state",
-            )),
+            Json(ApiResponse::err("Current epoch not found in committed state").with_meta(meta)),
         ),
     }
 }
@@ -397,14 +449,15 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    let meta = read_meta(&state);
     match state.node.get_epoch(epoch_id) {
-        Some(epoch) => (StatusCode::OK, Json(ApiResponse::ok(epoch))),
+        Some(epoch) => (StatusCode::OK, Json(ApiResponse::ok(epoch).with_meta(meta))),
         None => (
             StatusCode::NOT_FOUND,
-            Json(ApiResponse::err(format!(
-                "Epoch {} not found in committed state",
-                epoch_id
-            ))),
+            Json(
+                ApiResponse::err(format!("Epoch {} not found in committed state", epoch_id))
+                    .with_meta(meta),
+            ),
         ),
     }
 }
@@ -417,10 +470,11 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    let meta = read_meta(&state);
     let settled = state.node.is_task_settled(&task_id);
     (
         StatusCode::OK,
-        Json(ApiResponse::ok(TaskSettlementResponse { task_id, settled })),
+        Json(ApiResponse::ok(TaskSettlementResponse { task_id, settled }).with_meta(meta)),
     )
 }
 
@@ -429,11 +483,15 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    let meta = read_meta(&state);
     let highest = state.node.highest_committed();
-    Json(ApiResponse::ok(LatestBlockResponse {
-        highest_committed_block: highest.map(|(hash, _)| hex::encode(hash.bytes())),
-        height: highest.map(|(_, height)| height),
-    }))
+    Json(
+        ApiResponse::ok(LatestBlockResponse {
+            highest_committed_block: highest.map(|(hash, _)| hex::encode(hash.bytes())),
+            height: highest.map(|(_, height)| height),
+        })
+        .with_meta(meta),
+    )
 }
 
 async fn block_at_height_handler<K, N>(
@@ -444,17 +502,21 @@ where
     K: KVStore + Send + Sync + 'static,
     N: Network + Send + Sync + 'static,
 {
+    let meta = read_meta(&state);
     match state.node.committed_block_at_height(height) {
         Some(hash) => (
             StatusCode::OK,
-            Json(ApiResponse::ok(BlockAtHeightResponse {
-                height,
-                hash: hex::encode(hash.bytes()),
-            })),
+            Json(
+                ApiResponse::ok(BlockAtHeightResponse {
+                    height,
+                    hash: hex::encode(hash.bytes()),
+                })
+                .with_meta(meta),
+            ),
         ),
         None => (
             StatusCode::NOT_FOUND,
-            Json(ApiResponse::err("no committed block at this height")),
+            Json(ApiResponse::err("no committed block at this height").with_meta(meta)),
         ),
     }
 }
@@ -483,15 +545,29 @@ where
     N: Network + Send + Sync + 'static,
 {
     let receiver = state.node.subscribe_commits();
-    let stream = BroadcastStream::new(receiver).filter_map(|res| match res {
-        Ok(event) => {
-            let json = serde_json::to_string(&event).unwrap_or_default();
-            Some(Ok(SseEvent::default().event("commit_block").data(json)))
-        }
-        Err(_) => None,
-    });
-
+    let stream = BroadcastStream::new(receiver).map(|item| Ok::<_, Infallible>(sse_event(item)));
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// One commit as a `commit_block` event. A subscriber too slow for the node's event buffer gets
+/// a `lagged` event with the number of commits it missed instead of a silent gap; it should
+/// re-read state (`/v1/blocks/latest`) before relying on the stream again.
+fn sse_event(item: Result<CommitEvent, BroadcastStreamRecvError>) -> SseEvent {
+    let (name, data) = sse_payload(item);
+    SseEvent::default().event(name).data(data)
+}
+
+fn sse_payload(item: Result<CommitEvent, BroadcastStreamRecvError>) -> (&'static str, String) {
+    match item {
+        Ok(event) => (
+            "commit_block",
+            serde_json::to_string(&event).unwrap_or_default(),
+        ),
+        Err(BroadcastStreamRecvError::Lagged(missed)) => (
+            "lagged",
+            serde_json::json!({ "missed": missed }).to_string(),
+        ),
+    }
 }
 
 /// Start an RPC server on the specified address.
@@ -515,4 +591,27 @@ where
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_commit_events_carry_height_and_lag_is_reported_not_skipped() {
+        let event = CommitEvent {
+            block_hash: "ab".into(),
+            timestamp_secs: 1,
+            tx_count: 2,
+            receipt_count: 0,
+            height: Some(7),
+        };
+        let (name, data) = sse_payload(Ok(event.clone()));
+        assert_eq!(name, "commit_block");
+        assert_eq!(serde_json::from_str::<CommitEvent>(&data).unwrap(), event);
+
+        let (name, data) = sse_payload(Err(BroadcastStreamRecvError::Lagged(42)));
+        assert_eq!(name, "lagged");
+        assert_eq!(data, r#"{"missed":42}"#);
+    }
 }
