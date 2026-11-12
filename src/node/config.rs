@@ -106,6 +106,10 @@ impl NodeConfig {
         if self.epoch_length == 0 {
             return Err("epoch_length must be non-zero");
         }
+        // A zero limit makes block sync serve and fetch nothing (vendored patch #12).
+        if self.block_sync_request_limit == 0 {
+            return Err("block_sync_request_limit must be non-zero");
+        }
         if self.progress_msg_buffer_capacity == 0 {
             return Err("progress_msg_buffer_capacity must be non-zero");
         }
@@ -155,6 +159,18 @@ mod tests {
 
         cfg.experimental_mode = false;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_node_config_rejects_zero_block_sync_limit() {
+        let key = SigningKey::from_bytes(&[1u8; 32]);
+        let base = NodeConfig::devnet(key);
+        let zero = NodeConfig {
+            block_sync_request_limit: 0,
+            ..base.clone()
+        };
+        assert!(zero.validate().is_err());
+        assert!(base.validate().is_ok());
     }
 
     #[test]

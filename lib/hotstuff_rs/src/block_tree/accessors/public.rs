@@ -48,6 +48,12 @@ impl<S: KVGet> BlockTreeSnapshot<S> {
         height: BlockHeight,
         limit: u32,
     ) -> Result<Vec<Block>, BlockTreeError> {
+        // MIRASET PATCH #12: `limit = 0` means no blocks. Upstream's `len == limit` checks never
+        // matched 0, so it returned every block to the tip. Callers bound `limit` (the sync
+        // server caps it at its own request limit) before this pre-allocation.
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         let mut res = Vec::with_capacity(limit as usize);
 
         // Get committed blocks starting from the specified height.

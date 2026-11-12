@@ -33,7 +33,7 @@
 //! broadcasting [`BlockSyncAdvertiseMessage`]s.
 
 use std::{
-    cmp::max,
+    cmp::min,
     sync::mpsc::{Receiver, Sender, TryRecvError},
     thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime},
@@ -121,7 +121,10 @@ impl<N: Network + 'static, K: KVStore> BlockSyncServer<N, K> {
                 let bt_snapshot = self.block_tree_camera.snapshot();
                 let blocks_res = bt_snapshot.blocks_from_height_to_newest(
                     start_height,
-                    max(limit, self.config.request_limit),
+                    // MIRASET PATCH #12: the server's own limit caps every response. Upstream
+                    // used `max`, so any peer could ask for the whole chain (and, through the
+                    // accessor's pre-allocation, for gigabytes with `limit = u32::MAX`).
+                    min(limit, self.config.request_limit),
                 );
                 let highest_pc_res = bt_snapshot.highest_pc();
 
