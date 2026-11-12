@@ -8,7 +8,9 @@
 use super::http::{HttpError, RpcClient};
 use super::tracker::{Kind, Tracker, lock};
 use super::workload::{self, TRANSFER_AMOUNT, TRANSFER_FEE};
-use crate::core::types::{AccountState, ComputeReceipt, Transaction};
+use crate::core::types::{
+    AccountState, ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
+};
 use crate::rpc::{ApiResponse, TaskSettlementResponse};
 use ed25519_dalek::SigningKey;
 use hyper::StatusCode;
@@ -145,7 +147,11 @@ pub async fn run_transfers(
 pub struct ReceiptStream {
     pub index: usize,
     pub run_id: u64,
+    /// The devnet's genesis coordinator key.
     pub coordinator: SigningKey,
+    /// Owner key of this stream's registered worker; signs every receipt as the worker.
+    pub worker_owner: SigningKey,
+    pub price_per_token: u64,
     /// Funded client accounts, used in turn.
     pub clients: Vec<String>,
     pub worker_id: String,
@@ -184,9 +190,11 @@ pub async fn run_receipts(
                 let task_id = workload::task_id(stream.run_id, stream.index, seq);
                 let item = workload::signed_receipt(
                     &stream.coordinator,
+                    &stream.worker_owner,
                     task_id,
                     client_address,
                     &stream.worker_id,
+                    stream.price_per_token,
                 );
                 (item, tick, false)
             }
@@ -219,6 +227,70 @@ pub enum FundingError {
     Rejected { nonce: u64, reason: String },
     #[error("funding transfers not committed within {0:?}")]
     Timeout(Duration),
+    #[error("receipt setup failed: {0}")]
+    Setup(String),
+}
+
+/// Genesis protocol parameters (price per token) from `GET /v1/params`.
+pub async fn protocol_params(
+    client: &RpcClient,
+    node_url: &str,
+) -> Result<ProtocolParams, FundingError> {
+    let url = format!("{node_url}/v1/params");
+    let response: ApiResponse<ProtocolParams> = client
+        .get_json(&url)
+        .await
+        .map_err(|e| FundingError::Setup(format!("{url}: {e}")))?;
+    response
+        .data
+        .ok_or_else(|| FundingError::Setup(format!("{url}: no data")))
+}
+
+/// Register one worker per `(owner key, worker id)` with the minimum bond (each owner's first
+/// transaction) and wait until all are committed.
+pub async fn register_workers(
+    client: &RpcClient,
+    node_url: &str,
+    workers: &[(SigningKey, String)],
+    timeout: Duration,
+) -> Result<(), FundingError> {
+    let submit = format!("{node_url}/v1/transactions");
+    for (owner, worker_id) in workers {
+        let action = WorkerBondAction::Register {
+            worker_id: worker_id.clone(),
+            bond_amount: MIN_WORKER_BOND,
+            vram_gib: 0,
+            endpoint: String::new(),
+        };
+        let mut tx =
+            Transaction::new_worker_bond(workload::address(owner), 0, TRANSFER_FEE, action)
+                .map_err(|e| FundingError::Setup(e.to_string()))?;
+        tx.sign_with(owner);
+        match client.post_json(&submit, &tx).await {
+            Ok(status) if status.is_success() => {}
+            Ok(status) => {
+                return Err(FundingError::Setup(format!(
+                    "registering {worker_id}: status {status}"
+                )));
+            }
+            Err(e) => return Err(FundingError::Setup(format!("registering {worker_id}: {e}"))),
+        }
+    }
+    let deadline = Instant::now() + timeout;
+    for (_, worker_id) in workers {
+        let url = format!("{node_url}/v1/workers/{worker_id}");
+        while client
+            .get_json::<ApiResponse<serde_json::Value>>(&url)
+            .await
+            .is_err()
+        {
+            if Instant::now() >= deadline {
+                return Err(FundingError::Timeout(timeout));
+            }
+            tokio::time::sleep(FUNDING_POLL).await;
+        }
+    }
+    Ok(())
 }
 
 /// Send `amount` from the faucet to each address through `node_url` and wait until all are

@@ -1,5 +1,5 @@
 use crate::core::types::{
-    AccountState, BlockPayload, ComputeReceipt, EpochInfo, Transaction, WorkerInfo,
+    AccountState, BlockPayload, ComputeReceipt, EpochInfo, ProtocolParams, Transaction, WorkerInfo,
 };
 use crate::mempool::{Mempool, ReceiptVerdict, TxVerdict};
 use hotstuff_rs::app::{
@@ -83,6 +83,20 @@ impl MirasetApp {
         true
     }
 
+    /// Genesis protocol parameters (TODO 8.5.1).
+    pub fn protocol_params_key() -> Vec<u8> {
+        b"params:protocol".to_vec()
+    }
+
+    /// Protocol parameters from state; defaults (no coordinators, no governance) if absent.
+    pub fn read_protocol_params<K: KVStore>(
+        tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
+    ) -> ProtocolParams {
+        tree.app_state(&Self::protocol_params_key())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
     pub fn current_epoch_key() -> Vec<u8> {
         b"epoch:current".to_vec()
     }
@@ -143,6 +157,11 @@ impl MirasetApp {
         sender_acc: &AccountState,
     ) -> Result<AccountState, &'static str> {
         tx.verify_signature()?;
+        // One key, one account: the sender address is the key in lowercase hex (TODO 8.5.1;
+        // signature checks accept either case).
+        if tx.sender.bytes().any(|b| b.is_ascii_uppercase()) {
+            return Err("sender must be lowercase hex");
+        }
 
         if tx.nonce != sender_acc.nonce {
             return Err("transaction nonce does not match expected account nonce");
@@ -401,7 +420,7 @@ mod tests {
             "gpu_worker",
             "coord_hq",
             "model_70b",
-            "zk_proof_hash",
+            "receipt_anchor",
             500,
             100,
             90,
@@ -523,6 +542,7 @@ mod tests {
             epoch_tokens: 333,
             owner_address: "o1".to_string(),
             endpoint: String::new(),
+            unbonding: 0,
         };
         let w2 = WorkerInfo {
             worker_id: "worker_beta".to_string(),
@@ -535,6 +555,7 @@ mod tests {
             epoch_tokens: 333,
             owner_address: "o2".to_string(),
             endpoint: String::new(),
+            unbonding: 0,
         };
         let w3 = WorkerInfo {
             worker_id: "worker_gamma".to_string(),
@@ -547,6 +568,7 @@ mod tests {
             epoch_tokens: 333,
             owner_address: "o3".to_string(),
             endpoint: String::new(),
+            unbonding: 0,
         };
 
         let d1 = cfg

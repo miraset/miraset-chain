@@ -13,8 +13,8 @@ use tokio::sync::broadcast;
 use crate::app::MirasetApp;
 use crate::consensus::SafetyHalt;
 use crate::core::types::{
-    AccountState, BlockPayload, CommitEvent, ComputeReceipt, EpochInfo, Transaction, WorkerInfo,
-    compute_state_commitment,
+    AccountState, BlockPayload, CommitEvent, ComputeReceipt, EpochInfo, ProtocolParams,
+    Transaction, WorkerInfo, compute_state_commitment,
 };
 use crate::mempool::Mempool;
 use crate::node::admission::{self, AdmissionError};
@@ -41,8 +41,12 @@ pub struct MirasetNode<K: KVStore, N: Network + 'static> {
     ready_max_commit_age: Duration,
 }
 
-/// Canonical genesis application entries (accounts and epoch 0), in deterministic order.
-fn genesis_app_entries(initial_accounts: &[(&str, u64)]) -> Vec<(Vec<u8>, Vec<u8>)> {
+/// Canonical genesis application entries (accounts, protocol parameters and epoch 0), in
+/// deterministic order.
+fn genesis_app_entries(
+    initial_accounts: &[(&str, u64)],
+    params: &ProtocolParams,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut entries: Vec<(Vec<u8>, Vec<u8>)> = initial_accounts
         .iter()
         .map(|(address, balance)| {
@@ -57,7 +61,13 @@ fn genesis_app_entries(initial_accounts: &[(&str, u64)]) -> Vec<(Vec<u8>, Vec<u8
         })
         .collect();
 
-    let initial_epoch = EpochInfo::new(0, 0, 100_000);
+    entries.push((
+        MirasetApp::protocol_params_key(),
+        params
+            .to_bytes()
+            .expect("Serialization of protocol parameters failed"),
+    ));
+    let initial_epoch = EpochInfo::new(0, 0, params.epoch_reward_budget);
     let epoch_bytes = initial_epoch
         .to_bytes()
         .expect("Serialization of genesis epoch failed");
@@ -78,15 +88,41 @@ fn genesis_commitment_of(entries: &[(Vec<u8>, Vec<u8>)]) -> [u8; 32] {
 /// Nodes started from a genesis file pass this as `NodeConfig::expected_genesis_hash` so a
 /// store initialized from a different genesis fails closed.
 pub fn genesis_state_commitment(initial_accounts: &[(&str, u64)]) -> [u8; 32] {
-    genesis_commitment_of(&genesis_app_entries(initial_accounts))
+    genesis_state_commitment_with_params(initial_accounts, &ProtocolParams::default())
+}
+
+/// Genesis state commitment for a genesis with explicit protocol parameters.
+pub fn genesis_state_commitment_with_params(
+    initial_accounts: &[(&str, u64)],
+    params: &ProtocolParams,
+) -> [u8; 32] {
+    genesis_commitment_of(&genesis_app_entries(initial_accounts, params))
 }
 
 /// Initialize genesis block tree storage with the given chain ID, validators, and initial accounts.
 pub fn init_genesis_with_chain_id<K: KVStore>(
+    kv_store: K,
+    chain_id: u64,
+    validators: &[(VerifyingKey, u64)],
+    initial_accounts: &[(&str, u64)],
+) {
+    init_genesis_with_params(
+        kv_store,
+        chain_id,
+        validators,
+        initial_accounts,
+        &ProtocolParams::default(),
+    );
+}
+
+/// Initialize genesis storage with explicit protocol parameters (coordinators, governance,
+/// price per token, epoch reward budget).
+pub fn init_genesis_with_params<K: KVStore>(
     mut kv_store: K,
     chain_id: u64,
     validators: &[(VerifyingKey, u64)],
     initial_accounts: &[(&str, u64)],
+    params: &ProtocolParams,
 ) {
     // Do not overwrite an already-initialized store
     if read_recovery_metadata(&kv_store).ok().flatten().is_some() {
@@ -100,7 +136,7 @@ pub fn init_genesis_with_chain_id<K: KVStore>(
 
     let val_set_state = ValidatorSetState::new(val_set.clone(), val_set, None, true);
 
-    let genesis_entries = genesis_app_entries(initial_accounts);
+    let genesis_entries = genesis_app_entries(initial_accounts, params);
     let genesis_hash = genesis_commitment_of(&genesis_entries);
     let mut app_updates = AppStateUpdates::new();
     for (key, value) in genesis_entries {
@@ -335,6 +371,15 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
     }
 
     /// Read a registered worker's state from the committed state.
+    /// Genesis protocol parameters from committed state (defaults if absent).
+    pub fn protocol_params(&self) -> ProtocolParams {
+        let snapshot = self.block_tree_camera().snapshot();
+        snapshot
+            .committed_app_state(&MirasetApp::protocol_params_key())
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_default()
+    }
+
     pub fn get_worker(&self, worker_id: &str) -> Option<WorkerInfo> {
         let snapshot = self.block_tree_camera().snapshot();
         let raw = snapshot.committed_app_state(&MirasetApp::worker_key(worker_id))?;
@@ -415,6 +460,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                 .map_or(committed.nonce, |next| next.max(committed.nonce));
             let min_fee = self.mempool.limits().min_fee;
             admission::check_transaction(&tx, &committed, next_nonce, min_fee)?;
+            admission::check_system_transaction(&tx, &self.protocol_params())?;
             let (sender, nonce) = (tx.sender.clone(), tx.nonce);
             self.mempool.insert_tx(tx)?;
             // A block may have committed this nonce between the check and the insert, after the
@@ -434,11 +480,18 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             if self.mempool.contains_receipt(&receipt.task_id) {
                 return Err(AdmissionError::Duplicate);
             }
-            let settled = self.is_task_settled(&receipt.task_id);
+            let params = self.protocol_params();
+            let worker = self.get_worker(&receipt.worker_id);
             let client = (!receipt.client_address.is_empty())
                 .then(|| self.get_account(&receipt.client_address))
                 .flatten();
-            admission::check_receipt(&receipt, settled, client.as_ref())?;
+            let ctx = admission::ReceiptContext {
+                params: &params,
+                task_settled: self.is_task_settled(&receipt.task_id),
+                worker: worker.as_ref(),
+                client: client.as_ref(),
+            };
+            admission::check_receipt(&receipt, &ctx)?;
             let task_id = receipt.task_id.clone();
             self.mempool.insert_receipt(receipt)?;
             // Same race as for transactions: the task may have settled meanwhile.

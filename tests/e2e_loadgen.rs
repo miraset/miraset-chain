@@ -18,6 +18,8 @@ fn loadgen_command(v: &Validator, extra: &[&str]) -> Command {
     command
         .args(["loadgen", "--rpc", &rpc, "--faucet-key"])
         .arg(v.devnet_dir().join("faucet.key"))
+        .arg("--coordinator-key")
+        .arg(v.devnet_dir().join("coordinator.key"))
         .args(extra);
     command
 }

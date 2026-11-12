@@ -4,14 +4,13 @@ use hotstuff_rs::types::signer::ValidatorSigner;
 use miraset_chain::consensus::{
     GuardIdentity, GuardedNetwork, GuardedSigner, OpenMode, SafetyHalt, SigningGuard,
 };
-use miraset_chain::core::types::{ComputeReceipt, Transaction};
+use miraset_chain::core::types::{
+    ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
+};
 use miraset_chain::devnet::{self, DevnetSpec};
 use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub, TcpNetwork};
-use miraset_chain::node::{
-    GenesisConfig, MirasetNode, NodeConfig, genesis_state_commitment, init_genesis,
-    init_genesis_with_chain_id,
-};
+use miraset_chain::node::{GenesisConfig, MirasetNode, NodeConfig, init_genesis_with_params};
 use miraset_chain::observability::logging::SAFETY_LOG_TARGET;
 use miraset_chain::observability::{LogFormat, VoteGuardLayer, init_logging};
 use miraset_chain::process_hardening;
@@ -251,6 +250,10 @@ struct LoadgenArgs {
     /// Funded key that pays for the senders (the devnet faucet key)
     #[arg(long)]
     faucet_key: PathBuf,
+    /// Genesis coordinator key that co-signs receipts (devnet: /keys/coordinator/coordinator.key);
+    /// required unless --receipt-share is 0
+    #[arg(long)]
+    coordinator_key: Option<PathBuf>,
     #[arg(long, default_value_t = 32)]
     senders: usize,
     /// Offered items (transfers + receipts) per second across all nodes
@@ -415,7 +418,7 @@ fn expected_chain(path: &Path) -> Result<ExpectedChain, MaintenanceError> {
         .map_err(|e| MaintenanceError::Io(format!("cannot load {}: {e}", path.display())))?;
     Ok(ExpectedChain {
         chain_id: genesis.chain_id,
-        genesis_hash: genesis_state_commitment(&genesis.initial_accounts()),
+        genesis_hash: genesis.state_commitment(),
     })
 }
 
@@ -431,6 +434,11 @@ async fn run_loadgen(args: &LoadgenArgs) -> CliResult {
             .map(|u| u.trim_end_matches('/').to_string())
             .collect(),
         faucet: devnet::read_key_file(&args.faucet_key)?,
+        coordinator: args
+            .coordinator_key
+            .as_deref()
+            .map(devnet::read_key_file)
+            .transpose()?,
         senders: args.senders,
         rate: args.rate,
         receipt_share: args.receipt_share,
@@ -513,13 +521,14 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
     let kv_store = RedbKVStore::open(cli.data_dir.join(CHAIN_DB_FILE))
         .map_err(|e| format!("cannot open database: {e}"))?
         .with_safety_halt(safety_halt.clone());
-    let genesis_hash = genesis_state_commitment(&genesis.initial_accounts());
+    let genesis_hash = genesis.state_commitment();
     let guard = open_signing_guard(cli, &kv_store, genesis.chain_id, &vk, genesis_hash)?;
-    init_genesis_with_chain_id(
+    init_genesis_with_params(
         kv_store.clone(),
         genesis.chain_id,
         &genesis.validator_powers()?,
         &genesis.initial_accounts(),
+        &genesis.protocol,
     );
     genesis.verify_store_validator_set(&kv_store)?;
 
@@ -804,12 +813,20 @@ async fn run_devnet_demo() {
     let alice_key = SigningKey::from_bytes(&[7u8; 32]);
     let alice_addr = hex::encode(alice_key.verifying_key().to_bytes());
     let coordinator_key = SigningKey::from_bytes(&[8u8; 32]);
+    let worker_owner_key = SigningKey::from_bytes(&[9u8; 32]);
+    let worker_owner = hex::encode(worker_owner_key.verifying_key().to_bytes());
+    // TODO 8.5.1: receipts need a genesis coordinator and a registered, bonded worker.
+    let params = ProtocolParams {
+        coordinators: vec![hex::encode(coordinator_key.verifying_key().to_bytes())],
+        price_per_token: 2,
+        ..ProtocolParams::default()
+    };
 
     let validators = vec![(vk, 100)];
     let initial_accounts = vec![
         (alice_addr.as_str(), 1_000_000),
         ("bob", 250_000),
-        ("worker_4090", 10_000),
+        (worker_owner.as_str(), 10_000),
     ];
 
     println!("\n[2] Initializing Genesis Accounts:");
@@ -817,7 +834,13 @@ async fn run_devnet_demo() {
         println!("    - Account '{}': {} MIRA", acc, bal);
     }
     println!("    (Account '{alice_addr}' is addressed below as 'alice')");
-    init_genesis(kv_store.clone(), &validators, &initial_accounts);
+    init_genesis_with_params(
+        kv_store.clone(),
+        1337,
+        &validators,
+        &initial_accounts,
+        &params,
+    );
 
     // 4. Start Node
     println!("\n[3] Starting MIRASET Replica Node (Chain ID: 1337)...");
@@ -854,22 +877,41 @@ async fn run_devnet_demo() {
     println!("    - Tx: Alice -> Bob (Amount: 75,000, Fee: 150)");
     node.submit_transaction(tx1).expect("Tx submission failed");
 
-    // 7. Submit sample PoCC compute receipt, co-signed by the coordinator
-    println!("\n[5] Submitting PoCC Compute Receipt to Mempool:");
+    // 7. Register a worker with the minimum bond, then settle a receipt it and the coordinator
+    // signed: 250 tokens at price 2, paid by Alice to the worker's owner.
+    println!("\n[5] Registering worker_4090 and submitting a PoCC compute receipt:");
+    let register = WorkerBondAction::Register {
+        worker_id: "worker_4090".into(),
+        bond_amount: MIN_WORKER_BOND,
+        vram_gib: 24,
+        endpoint: String::new(),
+    };
+    let mut bond_tx = Transaction::new_worker_bond(&worker_owner, 0, 10, register)
+        .expect("worker bond transaction");
+    bond_tx.sign_with(&worker_owner_key);
+    node.submit_transaction(bond_tx)
+        .expect("Worker registration failed");
+    for _ in 0..100 {
+        if node.get_worker("worker_4090").is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let mut receipt1 = ComputeReceipt::new(
         "inference_task_gpt_oss_1",
         &alice_addr,
         "worker_4090",
         "coordinator_east",
         "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069",
-        "zkp:0x892a71f0923058b73a4cf02",
+        "receipt-anchor:0x892a71f0923058b73a4cf02",
         250,
-        600,
+        500,
         500,
     );
     receipt1.sign_with(&coordinator_key);
+    receipt1.sign_as_worker(&worker_owner_key);
     println!(
-        "    - Worker: {} completed task '{}' (Reward: 500 MIRA, Client Cost: 600 MIRA)",
+        "    - Worker: {} completed task '{}' (250 tokens; Alice pays 500 to the worker's owner)",
         receipt1.worker_id, receipt1.task_id
     );
     node.submit_receipt(receipt1)

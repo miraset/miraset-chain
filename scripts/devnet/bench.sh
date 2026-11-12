@@ -73,7 +73,8 @@ record_environment
 for rate in $rates; do
   echo "=== offered rate $rate/s ($profile) ==="
   $COMPOSE run --rm -T loadgen loadgen "${IN_NETWORK_RPCS[@]}" \
-    --faucet-key /keys/faucet/faucet.key --senders "$senders" --rate "$rate" \
+    --faucet-key /keys/faucet/faucet.key --coordinator-key /keys/coordinator/coordinator.key \
+    --senders "$senders" --rate "$rate" \
     --receipt-share "$share" --duration-secs "$duration" --warmup-secs "$warmup" \
     --fund-amount "$(fund_amount "$rate")" >"$out/rate-$rate.json" 2>"$out/rate-$rate.log"
   check_agreement

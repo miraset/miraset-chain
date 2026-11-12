@@ -34,6 +34,8 @@ services:
     volumes:
       - devnet-config:/devnet
       - faucet-key:/keys/faucet
+      - coordinator-key:/keys/coordinator
+      - governance-key:/keys/governance
       - node0-key:/keys/node0
       - node1-key:/keys/node1
       - node2-key:/keys/node2
@@ -56,7 +58,8 @@ services:
     image: miraset-chain:devnet
     build: .
     profiles: [tools]
-    volumes: [faucet-key:/keys/faucet:ro]
+    # Also the devnet coordinator key (TODO 8.5.1): receipts need a genesis coordinator.
+    volumes: [faucet-key:/keys/faucet:ro, coordinator-key:/keys/coordinator:ro]
     networks: [devnet]
 
   node0:
@@ -97,6 +100,10 @@ volumes:
   devnet-config: {}
   # One key per volume (key custody D5).
   faucet-key: {}
+  # Genesis coordinator (receipt co-signer) and governance (slashing, epoch close) keys,
+  # TODO 8.5.1. No validator mounts them.
+  coordinator-key: {}
+  governance-key: {}
   node0-key: {}
   node1-key: {}
   node2-key: {}

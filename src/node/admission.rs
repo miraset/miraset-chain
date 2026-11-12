@@ -7,7 +7,10 @@
 //! accumulated over a sender's pending chain and system payloads are not interpreted here;
 //! block production re-checks everything on top of its parent and evicts what fails.
 
-use crate::core::types::{AccountState, ComputeReceipt, Transaction};
+use crate::core::types::{
+    AccountState, ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
+    WorkerInfo,
+};
 use crate::mempool::InsertError;
 
 /// Why a transaction or receipt was not admitted to the mempool.
@@ -84,32 +87,127 @@ pub fn check_transaction(
     tx.verify_signature().map_err(AdmissionError::Invalid)
 }
 
-/// Check a compute receipt: task replay, client confirmation, the client's committed balance,
-/// then the coordinator signature. `client` is the committed client account when the receipt
-/// names one.
+/// Check a transaction to a system recipient against who may send it (TODO 8.5.1), so a
+/// stranger's slash or epoch close is refused here instead of failing in every block until it
+/// is evicted. Mirrors the execution rules; ordinary transfers pass unchanged.
+pub fn check_system_transaction(
+    tx: &Transaction,
+    params: &ProtocolParams,
+) -> Result<(), AdmissionError> {
+    match tx.recipient.as_str() {
+        "system:epoch_manager" => {
+            if !params.is_governance(&tx.sender) {
+                return Err(AdmissionError::Invalid(
+                    "only governance may close an epoch",
+                ));
+            }
+            if tx.amount != 0 || tx.payload.len() != 8 {
+                return Err(AdmissionError::Invalid(
+                    "epoch close carries no amount and an 8-byte epoch id",
+                ));
+            }
+            Ok(())
+        }
+        "system:worker_registry" => {
+            let action: WorkerBondAction = serde_json::from_slice(&tx.payload)
+                .map_err(|_| AdmissionError::Invalid("malformed worker registry action"))?;
+            match action {
+                WorkerBondAction::Register { bond_amount, .. } if tx.amount != bond_amount => Err(
+                    AdmissionError::Invalid("registration amount must equal the bond"),
+                ),
+                WorkerBondAction::Register { .. } => Ok(()),
+                WorkerBondAction::Unbond { .. } if tx.amount != 0 => {
+                    Err(AdmissionError::Invalid("unbond carries no amount"))
+                }
+                WorkerBondAction::Unbond { .. } => Ok(()),
+                WorkerBondAction::Slash { .. } if !params.is_governance(&tx.sender) => {
+                    Err(AdmissionError::Invalid("only governance may slash"))
+                }
+                WorkerBondAction::Slash { .. } if tx.amount != 0 => {
+                    Err(AdmissionError::Invalid("slash carries no amount"))
+                }
+                WorkerBondAction::Slash { .. } => Ok(()),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Committed state a receipt is judged against.
+pub struct ReceiptContext<'a> {
+    pub params: &'a ProtocolParams,
+    pub task_settled: bool,
+    /// The committed worker the receipt names, if registered.
+    pub worker: Option<&'a WorkerInfo>,
+    /// The committed client account the receipt names, if it exists.
+    pub client: Option<&'a AccountState>,
+}
+
+/// Check a compute receipt against the settlement rules (TODO 8.5.1, see `ComputeReceipt`):
+/// authorized coordinator, task not settled, registered and bonded worker, client confirmation
+/// and payment `tokens × price` within the client's committed balance, then the coordinator and
+/// worker signatures.
 pub fn check_receipt(
     receipt: &ComputeReceipt,
-    task_settled: bool,
-    client: Option<&AccountState>,
+    ctx: &ReceiptContext<'_>,
 ) -> Result<(), AdmissionError> {
     if receipt.task_id.is_empty() || receipt.worker_id.is_empty() {
         return Err(AdmissionError::Invalid("missing task or worker identifier"));
     }
-    if task_settled {
+    if !ctx.params.is_coordinator(&receipt.coordinator_pubkey) {
+        return Err(AdmissionError::Invalid("coordinator is not authorized"));
+    }
+    if ctx.task_settled {
         return Err(AdmissionError::Replay("task already settled"));
     }
-    if !receipt.client_address.is_empty() {
-        if !receipt.client_confirmed {
-            return Err(AdmissionError::Invalid("client did not confirm delivery"));
-        }
-        let balance = client.map_or(0, |account| account.balance);
-        if receipt.client_cost > balance {
-            return Err(AdmissionError::Invalid(
-                "insufficient committed client balance",
-            ));
-        }
+    let worker = ctx
+        .worker
+        .filter(|w| w.active && w.stake >= MIN_WORKER_BOND && !w.owner_address.is_empty())
+        .ok_or(AdmissionError::Invalid(
+            "worker is not registered with a bond",
+        ))?;
+    if receipt.client_address.is_empty() || !receipt.client_confirmed {
+        return Err(AdmissionError::Invalid(
+            "receipt must name a client that confirmed delivery",
+        ));
     }
-    receipt.verify_signature().map_err(AdmissionError::Invalid)
+    if receipt.tokens_computed == 0 {
+        return Err(AdmissionError::Invalid("receipt has no output tokens"));
+    }
+    if receipt
+        .client_address
+        .bytes()
+        .any(|b| b.is_ascii_uppercase())
+    {
+        return Err(AdmissionError::Invalid(
+            "client address must be lowercase hex",
+        ));
+    }
+    if receipt.client_address == worker.owner_address {
+        return Err(AdmissionError::Invalid(
+            "client and worker owner are the same account",
+        ));
+    }
+    let cost = receipt
+        .tokens_computed
+        .checked_mul(ctx.params.price_per_token)
+        .ok_or(AdmissionError::Invalid("cost overflow"))?;
+    if receipt.client_cost != cost || receipt.worker_reward != cost {
+        return Err(AdmissionError::Invalid(
+            "client_cost and worker_reward must equal tokens x price_per_token",
+        ));
+    }
+    if cost > ctx.client.map_or(0, |account| account.balance) {
+        return Err(AdmissionError::Invalid(
+            "insufficient committed client balance",
+        ));
+    }
+    receipt
+        .verify_signature()
+        .map_err(AdmissionError::Invalid)?;
+    receipt
+        .verify_worker_signature(&worker.owner_address)
+        .map_err(AdmissionError::Invalid)
 }
 
 #[cfg(test)]
@@ -138,21 +236,65 @@ mod tests {
         AccountState { balance, nonce }
     }
 
-    fn signed_receipt(client_cost: u64, confirmed: bool) -> ComputeReceipt {
-        let mut receipt = ComputeReceipt::new(
-            "task-1",
-            "client",
-            "worker-1",
-            "coord",
-            "m",
-            "p",
-            client_cost,
-            5,
-            5,
-        );
-        receipt.client_confirmed = confirmed;
-        receipt.sign_with(&key(9));
+    const COORDINATOR: u8 = 9;
+    const WORKER_OWNER: u8 = 8;
+    const PRICE: u64 = 2;
+
+    fn params() -> ProtocolParams {
+        ProtocolParams {
+            coordinators: vec![address(&key(COORDINATOR))],
+            price_per_token: PRICE,
+            ..ProtocolParams::default()
+        }
+    }
+
+    fn worker() -> WorkerInfo {
+        WorkerInfo {
+            worker_id: "worker-1".into(),
+            stake: MIN_WORKER_BOND,
+            completed_tasks: 0,
+            rewards_accumulated: 0,
+            active: true,
+            vram_gib: 24,
+            uptime_bps: 10_000,
+            epoch_tokens: 0,
+            owner_address: address(&key(WORKER_OWNER)),
+            endpoint: String::new(),
+            unbonding: 0,
+        }
+    }
+
+    /// 5 tokens at price 2: cost 10, signed by the coordinator and the worker.
+    fn signed_receipt() -> ComputeReceipt {
+        let mut receipt =
+            ComputeReceipt::new("task-1", "client", "worker-1", "coord", "m", "p", 5, 10, 10);
+        receipt.sign_with(&key(COORDINATOR));
+        receipt.sign_as_worker(&key(WORKER_OWNER));
         receipt
+    }
+
+    fn resign(mut receipt: ComputeReceipt) -> ComputeReceipt {
+        receipt.sign_with(&key(COORDINATOR));
+        receipt.sign_as_worker(&key(WORKER_OWNER));
+        receipt
+    }
+
+    fn check(
+        receipt: &ComputeReceipt,
+        settled: bool,
+        worker: Option<&WorkerInfo>,
+        client: Option<&AccountState>,
+    ) -> Result<(), AdmissionError> {
+        let params = params();
+        check_receipt(
+            receipt,
+            &ReceiptContext {
+                params: &params,
+                task_settled: settled,
+                worker,
+                client,
+            },
+        )
     }
 
     #[test]
@@ -232,28 +374,173 @@ mod tests {
     }
 
     #[test]
-    fn test_receipt_checks_signature_replay_confirmation_and_client_funds() {
-        let funded = account(100, 0);
+    fn test_valid_receipt_is_admitted_and_replay_is_refused() {
+        let (w, funded) = (worker(), account(100, 0));
         assert_eq!(
-            check_receipt(&signed_receipt(10, true), false, Some(&funded)),
+            check(&signed_receipt(), false, Some(&w), Some(&funded)),
             Ok(())
         );
         assert_eq!(
-            check_receipt(&signed_receipt(10, true), true, Some(&funded)),
+            check(&signed_receipt(), true, Some(&w), Some(&funded)),
             Err(AdmissionError::Replay("task already settled"))
         );
+    }
+
+    #[test]
+    fn test_receipts_from_unauthorized_coordinators_or_unsigned_by_the_worker_are_invalid() {
+        let (w, funded) = (worker(), account(100, 0));
+        let invalid = |r: &ComputeReceipt| {
+            matches!(
+                check(r, false, Some(&w), Some(&funded)),
+                Err(AdmissionError::Invalid(_))
+            )
+        };
+        // Self-signed by a key that is not a genesis coordinator.
+        let mut forged = signed_receipt();
+        forged.sign_with(&key(77));
+        assert!(invalid(&forged));
+        // No worker signature, or one by another key.
+        let mut unsigned = signed_receipt();
+        unsigned.worker_signature.clear();
+        assert!(invalid(&unsigned));
+        let mut other = signed_receipt();
+        other.sign_as_worker(&key(78));
+        assert!(invalid(&other));
+        // Payload changed after signing.
+        let mut tampered = signed_receipt();
+        tampered.tokens_computed = 50;
+        assert!(invalid(&tampered));
+    }
+
+    #[test]
+    fn test_receipts_need_a_bonded_worker_and_a_paying_client() {
+        let funded = account(100, 0);
+        let w = worker();
+        let invalid =
+            |r: &ComputeReceipt, worker: Option<&WorkerInfo>, client: Option<&AccountState>| {
+                matches!(
+                    check(r, false, worker, client),
+                    Err(AdmissionError::Invalid(_))
+                )
+            };
+        // Unknown or unbonded worker.
+        assert!(invalid(&signed_receipt(), None, Some(&funded)));
+        let unbonded = WorkerInfo {
+            stake: MIN_WORKER_BOND - 1,
+            active: false,
+            ..worker()
+        };
+        assert!(invalid(&signed_receipt(), Some(&unbonded), Some(&funded)));
+        // Cost not equal to tokens x price, in either field.
+        let mut cheap = signed_receipt();
+        cheap.client_cost = 9;
+        assert!(invalid(&resign(cheap), Some(&w), Some(&funded)));
+        let mut generous = signed_receipt();
+        generous.worker_reward = 11;
+        assert!(invalid(&resign(generous), Some(&w), Some(&funded)));
+        // No client, unconfirmed delivery, client cannot pay, worker paying itself.
+        let mut no_client = signed_receipt();
+        no_client.client_address.clear();
+        assert!(invalid(&resign(no_client), Some(&w), Some(&funded)));
+        let mut unconfirmed = signed_receipt();
+        unconfirmed.client_confirmed = false;
+        assert!(invalid(&resign(unconfirmed), Some(&w), Some(&funded)));
+        assert!(invalid(&signed_receipt(), Some(&w), Some(&account(9, 0))));
+        let mut wash = signed_receipt();
+        wash.client_address = w.owner_address.clone();
+        assert!(invalid(&resign(wash), Some(&w), Some(&funded)));
+    }
+
+    #[test]
+    fn test_system_transactions_need_the_right_sender_and_no_amount() {
+        let governance = key(30);
+        let stranger = key(31);
+        let params = ProtocolParams {
+            governance: vec![address(&governance)],
+            ..ProtocolParams::default()
+        };
+        let tx = |signer: &SigningKey, recipient: &str, amount: u64, payload: Vec<u8>| {
+            let mut tx = Transaction::new(address(signer), 0, recipient, amount, 1);
+            tx.payload = payload;
+            tx
+        };
+        let close = 0u64.to_be_bytes().to_vec();
+        let slash = |amount| {
+            WorkerBondAction::Slash {
+                worker_id: "w".into(),
+                slash_amount: 10,
+                reason: "r".into(),
+            }
+            .to_bytes()
+            .map(|p| (amount, p))
+            .unwrap()
+        };
+        let ok = |t: &Transaction| check_system_transaction(t, &params).is_ok();
+
+        assert!(ok(&tx(
+            &governance,
+            "system:epoch_manager",
+            0,
+            close.clone()
+        )));
+        assert!(!ok(&tx(
+            &stranger,
+            "system:epoch_manager",
+            0,
+            close.clone()
+        )));
+        assert!(!ok(&tx(&governance, "system:epoch_manager", 5, close)));
+        let (amount, payload) = slash(0);
+        assert!(ok(&tx(
+            &governance,
+            "system:worker_registry",
+            amount,
+            payload.clone()
+        )));
+        assert!(!ok(&tx(
+            &stranger,
+            "system:worker_registry",
+            0,
+            payload.clone()
+        )));
+        assert!(!ok(&tx(&governance, "system:worker_registry", 7, payload)));
+        assert!(!ok(&tx(
+            &stranger,
+            "system:worker_registry",
+            0,
+            b"garbage".to_vec()
+        )));
+        let unbond = WorkerBondAction::Unbond {
+            worker_id: "w".into(),
+            amount: 5,
+        }
+        .to_bytes()
+        .unwrap();
+        assert!(ok(&tx(
+            &stranger,
+            "system:worker_registry",
+            0,
+            unbond.clone()
+        )));
+        assert!(!ok(&tx(&stranger, "system:worker_registry", 5, unbond)));
+        assert!(ok(&tx(&stranger, "bob", 5, Vec::new())));
+    }
+
+    #[test]
+    fn test_zero_token_and_uppercase_client_receipts_are_invalid() {
+        let (w, funded) = (worker(), account(100, 0));
+        let mut empty = signed_receipt();
+        empty.tokens_computed = 0;
+        empty.client_cost = 0;
+        empty.worker_reward = 0;
         assert!(matches!(
-            check_receipt(&signed_receipt(10, false), false, Some(&funded)),
+            check(&resign(empty), false, Some(&w), Some(&funded)),
             Err(AdmissionError::Invalid(_))
         ));
+        let mut upper = signed_receipt();
+        upper.client_address = "CLIENT".into();
         assert!(matches!(
-            check_receipt(&signed_receipt(10, true), false, None),
-            Err(AdmissionError::Invalid(_))
-        ));
-        let mut tampered = signed_receipt(10, true);
-        tampered.client_cost = 1;
-        assert!(matches!(
-            check_receipt(&tampered, false, Some(&funded)),
+            check(&resign(upper), false, Some(&w), Some(&funded)),
             Err(AdmissionError::Invalid(_))
         ));
     }

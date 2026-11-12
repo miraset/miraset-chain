@@ -5,7 +5,10 @@ use http_body_util::BodyExt;
 use miraset_chain::core::types::{ComputeReceipt, Transaction};
 use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub};
-use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
+use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis_with_params};
+
+mod common;
+use common::pocc::Pocc;
 use miraset_chain::rpc::{
     ApiResponse, BlockAtHeightResponse, HealthResponse, LatestBlockResponse, MempoolStatusResponse,
     RpcState, SubmissionResponse, TaskSettlementResponse, create_router,
@@ -33,20 +36,9 @@ fn signed_transfer(key: &SigningKey, nonce: u64, amount: u64) -> Transaction {
     tx
 }
 
+/// A receipt for 50 tokens (cost 100) by the fixture's coordinator and registered worker.
 fn signed_receipt(task_id: &str, client: &str) -> ComputeReceipt {
-    let mut receipt = ComputeReceipt::new(
-        task_id,
-        client,
-        "worker_h100",
-        "coordinator_1",
-        "model_hash_1",
-        "proof_1",
-        100,
-        25,
-        20,
-    );
-    receipt.sign_with(&coordinator());
-    receipt
+    Pocc::default().receipt(task_id, client, 50)
 }
 
 async fn post<T: serde::Serialize>(app: &axum::Router, path: &str, body: &T) -> StatusCode {
@@ -74,13 +66,33 @@ fn setup_test_node() -> (Arc<MirasetNode<MemKVStore, ChannelNetwork>>, u64) {
         (payer_address.as_str(), 5000),
     ];
 
-    init_genesis(kv_store.clone(), &validators, &initial_accounts);
+    let pocc = Pocc::default();
+    let parties = pocc.genesis_accounts();
+    let mut initial_accounts = initial_accounts;
+    initial_accounts.extend(parties.iter().map(|(a, b)| (a.as_str(), *b)));
+    init_genesis_with_params(
+        kv_store.clone(),
+        1337,
+        &validators,
+        &initial_accounts,
+        &pocc.params(),
+    );
 
     let mempool = Mempool::new();
     let config = NodeConfig::devnet(keypair);
     let chain_id = config.chain_id;
 
     let node = Arc::new(MirasetNode::start(config, kv_store, network, mempool));
+    // Receipts need a registered, bonded worker (TODO 8.5.1).
+    assert!(node.submit_transaction(pocc.register(0)).is_ok());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while node.get_worker(&pocc.worker_id).is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "worker not registered"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     (node, chain_id)
 }
 
@@ -387,9 +399,7 @@ async fn test_rpc_rejects_replayed_nonce_and_settled_task() {
         StatusCode::CONFLICT
     );
     // A new receipt for a settled task (different worker reward) is a replay.
-    let mut replay = signed_receipt("task-replay", "alice");
-    replay.worker_reward = 1;
-    replay.sign_with(&coordinator());
+    let replay = Pocc::default().receipt("task-replay", "alice", 60);
     assert_eq!(
         post(&app, "/v1/receipts", &replay).await,
         StatusCode::CONFLICT
@@ -763,4 +773,15 @@ async fn test_reads_are_labeled_with_committed_height_and_staleness() {
     // The mempool is not committed state: no freshness label.
     let (_, health) = get_json::<serde_json::Value>(&app, "/v1/mempool").await;
     assert!(health.meta.is_none());
+}
+
+#[tokio::test]
+async fn test_protocol_params_are_readable() {
+    let (node, chain_id) = setup_test_node();
+    let app = create_router(RpcState { node, chain_id });
+    let (status, resp) =
+        get_json::<miraset_chain::core::types::ProtocolParams>(&app, "/v1/params").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp.data.unwrap(), Pocc::default().params());
+    assert!(resp.meta.is_some());
 }

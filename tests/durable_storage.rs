@@ -1,11 +1,22 @@
 use ed25519_dalek::SigningKey;
-use miraset_chain::core::types::{ComputeReceipt, Transaction};
+use miraset_chain::core::types::Transaction;
 use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub};
-use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
+use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis_with_params};
 use miraset_chain::storage::RedbKVStore;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+mod common;
+use common::pocc::Pocc;
+
+fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        thread::sleep(Duration::from_millis(25));
+    }
+}
 
 #[test]
 fn test_node_consensus_with_durable_redb() {
@@ -20,9 +31,19 @@ fn test_node_consensus_with_durable_redb() {
     let network = ChannelNetwork::new(vk, hub);
     let kv_store = RedbKVStore::open(&db_path).expect("failed to open redb store");
 
+    let pocc = Pocc::new("worker_gpu_redb", 206);
     let validators = vec![(vk, 100)];
-    let initial_accounts = vec![(alice_addr.as_str(), 20_000), ("bob", 500)];
-    init_genesis(kv_store.clone(), &validators, &initial_accounts);
+    let parties = pocc.genesis_accounts();
+    let mut initial_accounts: Vec<(&str, u64)> =
+        parties.iter().map(|(a, b)| (a.as_str(), *b)).collect();
+    initial_accounts.extend([(alice_addr.as_str(), 20_000), ("bob", 500)]);
+    init_genesis_with_params(
+        kv_store.clone(),
+        1337,
+        &validators,
+        &initial_accounts,
+        &pocc.params(),
+    );
 
     let mempool = Mempool::new();
     let config = NodeConfig::devnet(signing_key.clone());
@@ -30,44 +51,30 @@ fn test_node_consensus_with_durable_redb() {
     // 1. Start node with durable Redb store
     let node = MirasetNode::start(config, kv_store, network, mempool);
 
-    // Submit a signed transaction
+    assert!(node.submit_transaction(pocc.register(0)).is_ok());
+    wait_for("worker registration", || {
+        node.get_worker("worker_gpu_redb").is_some()
+    });
+
+    // A signed transfer and a 250-token receipt (cost 500) paid by alice.
     let mut tx = Transaction::new(&alice_addr, 0, "bob", 2_000, 100);
     tx.sign_with(&alice_key);
     assert!(node.submit_transaction(tx).is_ok());
-
-    // Submit signed compute receipt
-    let coord_key = SigningKey::from_bytes(&[99u8; 32]);
-    let mut receipt = ComputeReceipt::new(
-        "redb_task_01",
-        &alice_addr,
-        "worker_gpu_redb",
-        "coord_secure",
-        "model_llama3",
-        "proof_zk_ok",
-        300,
-        500,
-        450,
+    assert!(
+        node.submit_receipt(pocc.receipt("redb_task_01", &alice_addr, 250))
+            .is_ok()
     );
-    receipt.sign_with(&coord_key);
-    assert!(node.submit_receipt(receipt).is_ok());
+    wait_for("transfer and receipt", || {
+        node.is_task_settled("redb_task_01")
+            && node.get_account("bob").map(|a| a.balance) == Some(2_500)
+    });
 
-    // Allow block to be proposed and committed to Redb
-    thread::sleep(Duration::from_millis(1500));
-
-    // Verify state committed
-    assert!(node.is_task_settled("redb_task_01"));
-    let alice = node.get_account(&alice_addr).expect("alice not found");
-    // Initial 20_000 - tx(2_000 + 100) - client_cost(500) = 17_400
-    assert_eq!(alice.balance, 17_400);
-
-    let bob = node.get_account("bob").expect("bob not found");
-    assert_eq!(bob.balance, 2_500);
-
+    // Initial 20_000 - transfer(2_000 + 100) - job cost(500) = 17_400
+    assert_eq!(node.get_account(&alice_addr).unwrap().balance, 17_400);
     let worker = node
         .get_worker("worker_gpu_redb")
         .expect("worker not found");
-    assert_eq!(worker.completed_tasks, 1);
-    assert_eq!(worker.rewards_accumulated, 450);
+    assert_eq!((worker.completed_tasks, worker.epoch_tokens), (1, 250));
 
     let highest_qc_block = node.highest_committed_block();
     assert!(highest_qc_block.is_some());
@@ -94,7 +101,7 @@ fn test_node_consensus_with_durable_redb() {
         .get_worker("worker_gpu_redb")
         .expect("reloaded worker not found");
     assert_eq!(reloaded_worker.completed_tasks, 1);
-    assert_eq!(reloaded_worker.rewards_accumulated, 450);
+    assert_eq!(reloaded_worker.epoch_tokens, 250);
 
     drop(node2);
 

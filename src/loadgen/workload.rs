@@ -1,7 +1,8 @@
-//! Workload items: run-scoped throwaway keys, signed transfers and coordinator-signed receipts.
+//! Workload items: run-scoped throwaway keys, signed transfers and receipts co-signed by the
+//! devnet's genesis coordinator and a run-scoped worker.
 //!
-//! Every key here is derived from a random run ID and used only for one load run on a devnet;
-//! none of them is a validator or faucet key.
+//! Every derived key here comes from a random run ID and is used only for one load run on a
+//! devnet; none of them is a validator, faucet or coordinator key.
 
 use crate::core::types::{ComputeReceipt, Transaction};
 use ed25519_dalek::SigningKey;
@@ -11,10 +12,8 @@ use sha2::{Digest, Sha256};
 /// by sender and nonce, as in `Mempool::insert_tx`).
 pub const TRANSFER_FEE: u64 = 10;
 pub const TRANSFER_AMOUNT: u64 = 1;
-/// Per-receipt client debit, worker reward and token count.
-pub const RECEIPT_CLIENT_COST: u64 = 1;
-pub const RECEIPT_WORKER_REWARD: u64 = 1;
-pub const RECEIPT_TOKENS: u64 = 100;
+/// Output tokens per receipt; the client pays `RECEIPT_TOKENS × price_per_token` (TODO 8.5.1).
+pub const RECEIPT_TOKENS: u64 = 5;
 
 const DOMAIN: &[u8] = b"miraset-loadgen-v1";
 
@@ -51,24 +50,35 @@ pub fn task_id(run_id: u64, stream: usize, seq: u64) -> String {
     format!("lg-{run_id:016x}-{stream:03}-{seq:012}")
 }
 
+/// Worker registered for receipt stream `stream` of run `run_id`.
+pub fn worker_id(run_id: u64, stream: usize) -> String {
+    format!("lg-{run_id:016x}-worker-{stream:03}")
+}
+
+/// A receipt for `RECEIPT_TOKENS` paid by `client_address`, priced at `price_per_token`, signed
+/// by the coordinator and by the worker's owner key.
 pub fn signed_receipt(
     coordinator: &SigningKey,
+    worker_owner: &SigningKey,
     task_id: String,
     client_address: &str,
     worker_id: &str,
+    price_per_token: u64,
 ) -> ComputeReceipt {
+    let cost = RECEIPT_TOKENS.saturating_mul(price_per_token);
     let mut receipt = ComputeReceipt::new(
         task_id,
         client_address,
         worker_id,
         "loadgen-coordinator",
         "loadgen-model",
-        "loadgen-proof",
+        "loadgen-receipt-anchor",
         RECEIPT_TOKENS,
-        RECEIPT_CLIENT_COST,
-        RECEIPT_WORKER_REWARD,
+        cost,
+        cost,
     );
     receipt.sign_with(coordinator);
+    receipt.sign_as_worker(worker_owner);
     receipt
 }
 
@@ -105,8 +115,19 @@ mod tests {
         assert_eq!(tx.nonce, 4);
 
         let coordinator = derive_key(3, "coordinator", 0);
-        let receipt = signed_receipt(&coordinator, task_id(3, 0, 1), &address(&sender), "w");
+        let owner = derive_key(3, "worker", 0);
+        let receipt = signed_receipt(
+            &coordinator,
+            &owner,
+            task_id(3, 0, 1),
+            &address(&sender),
+            "w",
+            2,
+        );
         assert!(receipt.verify_signature().is_ok());
+        assert!(receipt.verify_worker_signature(&address(&owner)).is_ok());
+        assert_eq!(receipt.client_cost, RECEIPT_TOKENS * 2);
+        assert_eq!(receipt.worker_reward, RECEIPT_TOKENS * 2);
         assert!(receipt.client_confirmed);
     }
 }

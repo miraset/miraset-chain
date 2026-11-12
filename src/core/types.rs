@@ -8,6 +8,9 @@ pub const PROTOCOL_ENCODING_VERSION: u8 = 1;
 pub const DOMAIN_TX_SIGN_V1: &[u8] = b"MIRASET:TX:SIGN:v1";
 pub const DOMAIN_TX_COMMIT_V1: &[u8] = b"MIRASET:TX:COMMIT:v1";
 pub const DOMAIN_RECEIPT_SIGN_V1: &[u8] = b"MIRASET:RECEIPT:SIGN:v1";
+/// Worker signatures sign the receipt under their own domain, so a coordinator signature can
+/// never stand in for a worker's (or the reverse).
+pub const DOMAIN_RECEIPT_WORKER_SIGN_V1: &[u8] = b"MIRASET:RECEIPT:WORKER:v1";
 pub const DOMAIN_RECEIPT_COMMIT_V1: &[u8] = b"MIRASET:RECEIPT:COMMIT:v1";
 pub const DOMAIN_BLOCK_COMMIT_V1: &[u8] = b"MIRASET:BLOCK:COMMIT:v1";
 pub const DOMAIN_STATE_COMMIT_V1: &[u8] = b"MIRASET:STATE:COMMIT:v1";
@@ -346,16 +349,24 @@ impl Transaction {
     }
 }
 
-/// Compute receipt for MIRASET Proof of Compute & Capacity (PoCC).
+/// Compute receipt for MIRASET Proof of Compute & Capacity (PoCC): one settled job (TODO 8.5.1).
 ///
-/// Workflow:
-/// 1. GPU Worker runs as an independent client-side program on the provider node, executes LLM
-///    inference via a local engine (e.g. Ollama, vLLM), and streams outputs directly to the client.
-/// 2. Once the client receives all tokens/results, delivery is confirmed.
-/// 3. The Coordinator co-signs the receipt with the client cost debit and worker reward.
-/// 4. The Coordinator submits the receipt to MIRASET L1 (`POST /v1/receipts`).
-/// 5. Chain consensus verifies client confirmation, debits the client's escrow/account balance,
-///    credits the worker, and marks the task as settled (anti-replay).
+/// PoCC is Proof of Compute **& Capacity** (SOW §6), an accounting of useful work and available
+/// capacity. A receipt does **not** prove that inference was correct or that a customer paid off
+/// chain: `proof_hash` is an opaque commitment the coordinator and worker sign (SOW §6.3 receipt
+/// anchor, for audit and disputes), and the chain never checks it against model output.
+///
+/// The chain settles a receipt only if (REWARDS.md §3.3, §6; ADR-0007, ADR-0009):
+/// - it is co-signed by a coordinator key listed in genesis (`ProtocolParams::coordinators`);
+/// - it is signed by the worker's registered key (the worker's `owner_address`), and the worker
+///   is registered with at least `MIN_WORKER_BOND`;
+/// - the task was not settled before;
+/// - it names a client account that confirmed delivery, and
+///   `client_cost == worker_reward == tokens_computed × price_per_token`; the chain debits the
+///   client and credits the worker's owner exactly that amount.
+///
+/// Settlement is immediate; the SOW §8 challenge window is not implemented (disputes use
+/// governance slashing).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputeReceipt {
     #[serde(default = "default_protocol_version")]
@@ -387,9 +398,13 @@ pub struct ComputeReceipt {
     /// Coordinator co-signature or authentication tag (hex-encoded Ed25519 signature).
     #[serde(default)]
     pub signature: String,
-    /// Optional Ed25519 hex public key of the coordinator.
+    /// Ed25519 hex public key of the coordinator; must be listed in genesis.
     #[serde(default)]
     pub coordinator_pubkey: String,
+    /// Worker's Ed25519 signature (hex) over the same signing bytes, by the key registered as
+    /// the worker's owner.
+    #[serde(default)]
+    pub worker_signature: String,
 }
 
 impl ComputeReceipt {
@@ -420,6 +435,7 @@ impl ComputeReceipt {
             client_confirmed: true,
             signature: String::new(),
             coordinator_pubkey: String::new(),
+            worker_signature: String::new(),
         }
     }
 
@@ -462,6 +478,7 @@ impl ComputeReceipt {
         buf.push(u8::from(self.client_confirmed));
         write_length_prefixed(&mut buf, self.signature.as_bytes());
         write_length_prefixed(&mut buf, self.coordinator_pubkey.as_bytes());
+        write_length_prefixed(&mut buf, self.worker_signature.as_bytes());
         Ok(buf)
     }
 
@@ -494,6 +511,7 @@ impl ComputeReceipt {
         };
         let signature = read_length_prefixed_string(&mut input)?;
         let coordinator_pubkey = read_length_prefixed_string(&mut input)?;
+        let worker_signature = read_length_prefixed_string(&mut input)?;
         if !input.is_empty() {
             return Err("noncanonical trailing bytes in receipt");
         }
@@ -512,6 +530,7 @@ impl ComputeReceipt {
             client_confirmed,
             signature,
             coordinator_pubkey,
+            worker_signature,
         })
     }
 
@@ -533,7 +552,35 @@ impl ComputeReceipt {
         self.coordinator_pubkey = hex::encode(signing_key.verifying_key().to_bytes());
     }
 
-    /// Verify signature if signature and coordinator_pubkey are provided.
+    /// Bytes the worker signs: the receipt's signing bytes under the worker domain.
+    pub fn worker_sign_bytes(&self) -> Vec<u8> {
+        let mut bytes = DOMAIN_RECEIPT_WORKER_SIGN_V1.to_vec();
+        bytes.extend_from_slice(&self.canonical_sign_bytes()[DOMAIN_RECEIPT_SIGN_V1.len()..]);
+        bytes
+    }
+
+    /// Sign this receipt as the worker whose registered key is `signing_key`.
+    pub fn sign_as_worker(&mut self, signing_key: &ed25519_dalek::SigningKey) {
+        use ed25519_dalek::Signer;
+        let sig = signing_key.sign(&self.worker_sign_bytes());
+        self.worker_signature = hex::encode(sig.to_bytes());
+    }
+
+    /// Verify the worker signature against the worker's registered key (hex).
+    pub fn verify_worker_signature(&self, worker_pubkey: &str) -> Result<(), &'static str> {
+        if self.worker_signature.is_empty() {
+            return Err("missing worker signature");
+        }
+        verify_ed25519(
+            worker_pubkey,
+            &self.worker_signature,
+            &self.worker_sign_bytes(),
+        )
+        .map_err(|_| "worker signature verification failed")
+    }
+
+    /// Verify the coordinator signature against the key the receipt names. Whether that key is
+    /// an authorized coordinator is checked by the caller against `ProtocolParams`.
     pub fn verify_signature(&self) -> Result<(), &'static str> {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
@@ -567,6 +614,127 @@ impl ComputeReceipt {
         verifying_key
             .verify(&sign_bytes, &sig)
             .map_err(|_| "Ed25519 signature verification failed")
+    }
+}
+
+/// Verify an Ed25519 signature given hex public key and hex signature.
+fn verify_ed25519(pubkey_hex: &str, signature_hex: &str, message: &[u8]) -> Result<(), ()> {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let pubkey: [u8; 32] = hex::decode(pubkey_hex)
+        .map_err(|_| ())?
+        .try_into()
+        .map_err(|_| ())?;
+    let signature: [u8; 64] = hex::decode(signature_hex)
+        .map_err(|_| ())?
+        .try_into()
+        .map_err(|_| ())?;
+    let key = VerifyingKey::from_bytes(&pubkey).map_err(|_| ())?;
+    key.verify(message, &Signature::from_bytes(&signature))
+        .map_err(|_| ())
+}
+
+/// Largest per-epoch reward budget a genesis may set (10^15 base units).
+pub const MAX_EPOCH_REWARD_BUDGET: u64 = 1_000_000_000_000_000;
+
+/// Protocol parameters fixed at genesis (TODO 8.5.1; owner decision 2026-11-12). Stored in
+/// genesis state, so the genesis commitment covers them; changing them needs a new genesis.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolParams {
+    /// Coordinator public keys (hex) allowed to co-sign compute receipts (ADR-0009).
+    #[serde(default)]
+    pub coordinators: Vec<String>,
+    /// Governance public keys (hex) allowed to slash worker bonds and close epochs.
+    #[serde(default)]
+    pub governance: Vec<String>,
+    /// Price of one output token, debited from the client and paid to the worker (REWARDS §6).
+    #[serde(default = "default_price_per_token")]
+    pub price_per_token: u64,
+    /// Protocol reward minted for each epoch (ADR-0004: 5M MIR per month ≈ 6 944 per 60-minute
+    /// epoch); undistributed amounts roll over to the next epoch.
+    #[serde(default = "default_epoch_reward_budget")]
+    pub epoch_reward_budget: u64,
+}
+
+fn default_price_per_token() -> u64 {
+    1
+}
+
+fn default_epoch_reward_budget() -> u64 {
+    6_944
+}
+
+impl Default for ProtocolParams {
+    fn default() -> Self {
+        Self {
+            coordinators: Vec::new(),
+            governance: Vec::new(),
+            price_per_token: default_price_per_token(),
+            epoch_reward_budget: default_epoch_reward_budget(),
+        }
+    }
+}
+
+impl ProtocolParams {
+    /// Whether `pubkey` (hex, any case) is an authorized receipt coordinator.
+    pub fn is_coordinator(&self, pubkey: &str) -> bool {
+        self.coordinators
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(pubkey))
+    }
+
+    /// Whether `pubkey` (hex, any case) is a governance key.
+    pub fn is_governance(&self, pubkey: &str) -> bool {
+        self.governance
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(pubkey))
+    }
+
+    /// Keys are 32-byte hex Ed25519 public keys, unique within and across the two lists (one
+    /// key, one role); the price and the epoch budget are positive, and the budget is small
+    /// enough that rolled-over budgets cannot overflow for an implausible number of epochs.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.price_per_token == 0 {
+            return Err("price_per_token must be positive".into());
+        }
+        if self.epoch_reward_budget == 0 || self.epoch_reward_budget > MAX_EPOCH_REWARD_BUDGET {
+            return Err(format!(
+                "epoch_reward_budget must be in 1..={MAX_EPOCH_REWARD_BUDGET}"
+            ));
+        }
+        let lower: std::collections::BTreeSet<String> = self
+            .coordinators
+            .iter()
+            .map(|k| k.to_ascii_lowercase())
+            .collect();
+        if let Some(key) = self
+            .governance
+            .iter()
+            .find(|k| lower.contains(&k.to_ascii_lowercase()))
+        {
+            return Err(format!("key {key} is both coordinator and governance"));
+        }
+        for (role, keys) in [
+            ("coordinator", &self.coordinators),
+            ("governance", &self.governance),
+        ] {
+            let mut seen = std::collections::BTreeSet::new();
+            for key in keys {
+                let bytes: [u8; 32] = hex::decode(key)
+                    .ok()
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or_else(|| format!("{role} key {key} is not 32-byte hex"))?;
+                ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+                    .map_err(|_| format!("{role} key {key} is not an Ed25519 public key"))?;
+                if !seen.insert(key.to_ascii_lowercase()) {
+                    return Err(format!("duplicate {role} key {key}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
     }
 }
 
@@ -747,6 +915,10 @@ pub struct WorkerInfo {
     /// Network endpoint or multiaddr for direct peer job dispatch (optional).
     #[serde(default)]
     pub endpoint: String,
+    /// Bond withdrawn with `Unbond` but not yet paid out: it stays slashable and is released to
+    /// the owner when the current epoch closes (TODO 8.5.1), so unbonding cannot outrun a slash.
+    #[serde(default)]
+    pub unbonding: u64,
 }
 
 impl WorkerInfo {
@@ -778,6 +950,10 @@ pub struct EpochRewardConfig {
     pub min_uptime_bps: u64,
     /// Saturation cap for VRAM contribution in GiB (e.g. 80 GiB).
     pub vram_cap_gib: u64,
+    /// Whether uptime and VRAM are measured (REWARDS §3.1-3.2). Until signed measurements
+    /// exist, self-reported values must not earn capacity rewards: the capacity pool is left
+    /// undistributed and rolls over (§5.2 zero-denominator rule; owner decision 2026-11-12).
+    pub capacity_measured: bool,
 }
 
 impl Default for EpochRewardConfig {
@@ -787,6 +963,7 @@ impl Default for EpochRewardConfig {
             capacity_split_bps: 4000,
             min_uptime_bps: 9000,
             vram_cap_gib: 80,
+            capacity_measured: false,
         }
     }
 }
@@ -798,6 +975,10 @@ pub struct EpochRewardDistribution {
     pub compute_pool: u64,
     pub capacity_pool: u64,
     pub worker_rewards: std::collections::BTreeMap<String, u64>,
+    /// Part of `total_reward` not paid to any worker (no tokens, no measured capacity); it
+    /// rolls over to the next epoch.
+    #[serde(default)]
+    pub undistributed: u64,
 }
 
 impl EpochRewardConfig {
@@ -832,8 +1013,10 @@ impl EpochRewardConfig {
         }
 
         // 1. Compute pool distribution: proportional to epoch_tokens
+        // Only workers still bonded share the compute pool (TODO 8.5.1): unbonding does not
+        // keep a claim on rewards; their tokens' share stays undistributed and rolls over.
         let mut total_tokens: u128 = 0;
-        for w in &sorted_workers {
+        for w in sorted_workers.iter().filter(|w| w.active) {
             total_tokens = total_tokens
                 .checked_add(w.epoch_tokens as u128)
                 .ok_or("total epoch tokens overflow")?;
@@ -843,7 +1026,7 @@ impl EpochRewardConfig {
             let active_workers: Vec<&WorkerInfo> = sorted_workers
                 .iter()
                 .copied()
-                .filter(|w| w.epoch_tokens > 0)
+                .filter(|w| w.active && w.epoch_tokens > 0)
                 .collect();
             for (idx, w) in active_workers.iter().enumerate() {
                 let share = if idx == active_workers.len() - 1 {
@@ -872,7 +1055,7 @@ impl EpochRewardConfig {
         let mut total_capacity_score: u128 = 0;
 
         for w in &sorted_workers {
-            if !w.active || w.uptime_bps < self.min_uptime_bps {
+            if !self.capacity_measured || !w.active || w.uptime_bps < self.min_uptime_bps {
                 capacity_scores.push(0u128);
                 continue;
             }
@@ -921,11 +1104,21 @@ impl EpochRewardConfig {
             }
         }
 
+        let mut distributed = 0u64;
+        for reward in worker_rewards.values() {
+            distributed = distributed
+                .checked_add(*reward)
+                .ok_or("distributed rewards overflow")?;
+        }
+        let undistributed = total_budget
+            .checked_sub(distributed)
+            .ok_or("distributed more than the budget")?;
         Ok(EpochRewardDistribution {
             total_reward: total_budget,
             compute_pool,
             capacity_pool,
             worker_rewards,
+            undistributed,
         })
     }
 
@@ -1049,7 +1242,11 @@ mod tests {
 
     #[test]
     fn test_epoch_reward_distribution_60_40() {
-        let config = EpochRewardConfig::default(); // 60% compute, 40% capacity
+        // 60% compute, 40% capacity, with measured capacity.
+        let config = EpochRewardConfig {
+            capacity_measured: true,
+            ..EpochRewardConfig::default()
+        };
 
         let w1 = WorkerInfo {
             worker_id: "worker_a".to_string(),
@@ -1062,6 +1259,7 @@ mod tests {
             epoch_tokens: 120_000,
             owner_address: "owner_a".to_string(),
             endpoint: "10.0.0.1:8000".to_string(),
+            unbonding: 0,
         };
 
         let w2 = WorkerInfo {
@@ -1075,6 +1273,7 @@ mod tests {
             epoch_tokens: 80_000,
             owner_address: "owner_b".to_string(),
             endpoint: "10.0.0.2:8000".to_string(),
+            unbonding: 0,
         };
 
         let total_budget = 3000; // 1800 compute, 1200 capacity
@@ -1198,5 +1397,65 @@ mod tests {
             ..Default::default()
         };
         assert!(block.to_canonical_bytes().is_err());
+    }
+
+    fn hex_key(seed: u8) -> String {
+        hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .to_bytes(),
+        )
+    }
+
+    #[test]
+    fn test_protocol_params_validation() {
+        let good = ProtocolParams {
+            coordinators: vec![hex_key(1)],
+            governance: vec![hex_key(2)],
+            ..ProtocolParams::default()
+        };
+        assert!(good.validate().is_ok());
+        let bad = [
+            ProtocolParams {
+                price_per_token: 0,
+                ..good.clone()
+            },
+            ProtocolParams {
+                epoch_reward_budget: 0,
+                ..good.clone()
+            },
+            ProtocolParams {
+                epoch_reward_budget: MAX_EPOCH_REWARD_BUDGET + 1,
+                ..good.clone()
+            },
+            ProtocolParams {
+                coordinators: vec!["zz".into()],
+                ..good.clone()
+            },
+            ProtocolParams {
+                coordinators: vec![hex_key(1), hex_key(1).to_uppercase()],
+                ..good.clone()
+            },
+            ProtocolParams {
+                governance: vec![hex_key(1)],
+                ..good.clone()
+            },
+        ];
+        for params in bad {
+            assert!(params.validate().is_err(), "accepted {params:?}");
+        }
+    }
+
+    #[test]
+    fn test_coordinator_and_worker_signatures_are_not_interchangeable() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let mut receipt = ComputeReceipt::new("t", "c", "w", "co", "m", "p", 1, 1, 1);
+        receipt.sign_with(&key);
+        // The coordinator signature, copied into the worker slot, is not a worker signature.
+        receipt.worker_signature = receipt.signature.clone();
+        assert!(receipt.verify_worker_signature(&hex_key(5)).is_err());
+        receipt.sign_as_worker(&key);
+        assert!(receipt.verify_worker_signature(&hex_key(5)).is_ok());
+        assert_ne!(receipt.worker_signature, receipt.signature);
     }
 }

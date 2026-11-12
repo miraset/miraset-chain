@@ -4,6 +4,7 @@
 //! keys directory, each validator key and the faucet key get their own subdirectory so a
 //! deployment can mount one key per container (key custody proposal D5).
 
+use crate::core::types::ProtocolParams;
 use crate::node::{GenesisAccount, GenesisConfig, GenesisValidator};
 use std::path::{Path, PathBuf};
 
@@ -11,6 +12,8 @@ pub use crate::keys::{generate_signing_key, read_key_file, write_key_file};
 
 pub const GENESIS_FILE: &str = "genesis.json";
 pub const FAUCET_KEY_FILE: &str = "faucet.key";
+pub const COORDINATOR_KEY_FILE: &str = "coordinator.key";
+pub const GOVERNANCE_KEY_FILE: &str = "governance.key";
 const VALIDATOR_POWER: u64 = 100;
 
 /// Parameters for [`init_devnet`].
@@ -43,10 +46,27 @@ pub fn spec_validator_key_path(spec: &DevnetSpec<'_>, index: usize) -> PathBuf {
 
 /// Faucet key path for `spec`, honouring `keys_dir`.
 pub fn spec_faucet_key_path(spec: &DevnetSpec<'_>) -> PathBuf {
+    spec_role_key_path(spec, "faucet", FAUCET_KEY_FILE)
+}
+
+/// Path of a role key (`faucet`, `coordinator`, `governance`), honouring `keys_dir`.
+pub fn spec_role_key_path(spec: &DevnetSpec<'_>, role: &str, file: &str) -> PathBuf {
     match spec.keys_dir {
-        Some(root) => root.join("faucet").join(FAUCET_KEY_FILE),
-        None => spec.out_dir.join(FAUCET_KEY_FILE),
+        Some(root) => root.join(role).join(file),
+        None => spec.out_dir.join(file),
     }
+}
+
+fn create_role_key(
+    spec: &DevnetSpec<'_>,
+    role: &str,
+    file: &str,
+) -> Result<ed25519_dalek::SigningKey, String> {
+    let key = generate_signing_key();
+    let path = spec_role_key_path(spec, role, file);
+    ensure_key_dir(&path)?;
+    write_key_file(&path, &key)?;
+    Ok(key)
 }
 
 /// Create the parent directory of a key file (owner-only when it is new).
@@ -98,10 +118,11 @@ pub fn init_devnet(spec: &DevnetSpec<'_>) -> Result<bool, String> {
         });
     }
 
-    let faucet = generate_signing_key();
-    let faucet_path = spec_faucet_key_path(spec);
-    ensure_key_dir(&faucet_path)?;
-    write_key_file(&faucet_path, &faucet)?;
+    let faucet = create_role_key(spec, "faucet", FAUCET_KEY_FILE)?;
+    // TODO 8.5.1: one coordinator (receipt co-signer) and one governance key (slashing, epoch
+    // close) for the devnet.
+    let coordinator = create_role_key(spec, "coordinator", COORDINATOR_KEY_FILE)?;
+    let governance = create_role_key(spec, "governance", GOVERNANCE_KEY_FILE)?;
     let genesis = GenesisConfig {
         chain_id: spec.chain_id,
         validators,
@@ -109,6 +130,11 @@ pub fn init_devnet(spec: &DevnetSpec<'_>) -> Result<bool, String> {
             address: hex::encode(faucet.verifying_key().to_bytes()),
             balance: spec.faucet_balance,
         }],
+        protocol: ProtocolParams {
+            coordinators: vec![hex::encode(coordinator.verifying_key().to_bytes())],
+            governance: vec![hex::encode(governance.verifying_key().to_bytes())],
+            ..ProtocolParams::default()
+        },
     };
     genesis.validate()?;
 

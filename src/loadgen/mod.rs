@@ -14,6 +14,7 @@ pub mod stats;
 pub mod tracker;
 pub mod workload;
 
+use crate::core::types::MIN_WORKER_BOND;
 use driver::{Generator, Lag, ReceiptStream, TransferStream};
 use ed25519_dalek::SigningKey;
 use http::RpcClient;
@@ -53,6 +54,8 @@ pub struct LoadConfig {
     /// RPC API token sent as `Authorization: Bearer` on submissions, for nodes started with
     /// `--rpc-api-keys`.
     pub api_key: Option<String>,
+    /// A genesis coordinator key; required when receipts are offered (TODO 8.5.1).
+    pub coordinator: Option<SigningKey>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +91,9 @@ impl LoadConfig {
         }
         if self.fund_amount == 0 {
             return invalid("fund amount must be positive");
+        }
+        if self.receipt_share > 0.0 && self.coordinator.is_none() {
+            return invalid("receipts need a genesis coordinator key");
         }
         Ok(())
     }
@@ -172,6 +178,7 @@ pub async fn run(config: &LoadConfig) -> Result<LoadReport, LoadError> {
         FUNDING_TIMEOUT,
     )
     .await?;
+    let workers = prepare_receipt_workers(config, &client, &observer_url).await?;
 
     // Load starts after the commit stream has had time to connect.
     let start = Instant::now() + SUBSCRIBE_SETTLE;
@@ -216,8 +223,16 @@ pub async fn run(config: &LoadConfig) -> Result<LoadReport, LoadError> {
         duration_secs = config.duration.as_secs_f64(),
         "offering load"
     );
-    let mut generators =
-        spawn_generators(config, &client, sender_keys, &senders, end, &tracker, &lag);
+    let mut generators = spawn_generators(
+        config,
+        &client,
+        sender_keys,
+        &senders,
+        workers,
+        end,
+        &tracker,
+        &lag,
+    );
     while generators.join_next().await.is_some() {}
 
     let drain_deadline = Instant::now() + config.drain_timeout;
@@ -295,11 +310,58 @@ async fn log_progress(tracker: Arc<Mutex<Tracker>>) {
     }
 }
 
+/// Owners and the price for receipt streams: one worker per node, funded with the minimum
+/// bond and registered before load starts (TODO 8.5.1).
+struct ReceiptWorkers {
+    owners: Vec<SigningKey>,
+    price_per_token: u64,
+}
+
+async fn prepare_receipt_workers(
+    config: &LoadConfig,
+    client: &RpcClient,
+    observer_url: &str,
+) -> Result<Option<ReceiptWorkers>, LoadError> {
+    if config.receipt_interval().is_none() {
+        return Ok(None);
+    }
+    let params = driver::protocol_params(client, observer_url).await?;
+    let owners: Vec<SigningKey> = (0..config.rpc_urls.len())
+        .map(|i| workload::derive_key(config.run_id, "worker", i))
+        .collect();
+    let addresses: Vec<String> = owners.iter().map(workload::address).collect();
+    tracing::info!(
+        workers = owners.len(),
+        "funding and registering receipt workers"
+    );
+    driver::fund(
+        client,
+        observer_url,
+        &config.faucet,
+        &addresses,
+        MIN_WORKER_BOND + workload::TRANSFER_FEE,
+        FUNDING_TIMEOUT,
+    )
+    .await?;
+    let registrations: Vec<(SigningKey, String)> = owners
+        .iter()
+        .enumerate()
+        .map(|(i, owner)| (owner.clone(), workload::worker_id(config.run_id, i)))
+        .collect();
+    driver::register_workers(client, observer_url, &registrations, FUNDING_TIMEOUT).await?;
+    Ok(Some(ReceiptWorkers {
+        owners,
+        price_per_token: params.price_per_token,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn spawn_generators(
     config: &LoadConfig,
     client: &RpcClient,
     sender_keys: Vec<SigningKey>,
     senders: &[String],
+    workers: Option<ReceiptWorkers>,
     end: Instant,
     tracker: &Arc<Mutex<Tracker>>,
     lag: &Arc<Lag>,
@@ -327,7 +389,11 @@ fn spawn_generators(
             ));
         }
     }
-    if let Some(interval) = config.receipt_interval() {
+    let receipts = config
+        .receipt_interval()
+        .zip(workers)
+        .zip(config.coordinator.clone());
+    if let Some(((interval, workers), coordinator)) = receipts {
         for (index, node_url) in config.rpc_urls.iter().enumerate() {
             let generator = Generator {
                 node_url: node_url.clone(),
@@ -337,9 +403,11 @@ fn spawn_generators(
             let stream = ReceiptStream {
                 index,
                 run_id: config.run_id,
-                coordinator: workload::derive_key(config.run_id, "coordinator", index),
+                coordinator: coordinator.clone(),
+                worker_owner: workers.owners[index].clone(),
+                price_per_token: workers.price_per_token,
                 clients: senders.to_vec(),
-                worker_id: format!("lg-worker-{index}"),
+                worker_id: workload::worker_id(config.run_id, index),
             };
             set.spawn(driver::run_receipts(
                 client.clone(),
@@ -378,6 +446,7 @@ mod tests {
             fund_amount: 1_000,
             run_id: 1,
             api_key: None,
+            coordinator: Some(workload::derive_key(1, "coordinator", 0)),
         }
     }
 

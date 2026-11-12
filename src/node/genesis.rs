@@ -1,6 +1,7 @@
 //! Devnet genesis file: chain identity, static validator set with peer addresses, and funded
 //! accounts. Every validator must start from a byte-identical genesis file.
 
+use crate::core::types::ProtocolParams;
 use ed25519_dalek::VerifyingKey;
 use hotstuff_rs::block_tree::pluggables::KVGet;
 use hotstuff_rs::types::data_types::Power;
@@ -37,6 +38,10 @@ pub struct GenesisConfig {
     pub chain_id: u64,
     pub validators: Vec<GenesisValidator>,
     pub accounts: Vec<GenesisAccount>,
+    /// Receipt coordinators, governance keys, price and reward budget (TODO 8.5.1). Absent:
+    /// no coordinator or governance key, so no receipt settles and no epoch closes.
+    #[serde(default)]
+    pub protocol: ProtocolParams,
 }
 
 impl GenesisConfig {
@@ -72,6 +77,24 @@ impl GenesisConfig {
             }
             validate_host_port(&validator.p2p_addr)?;
         }
+        self.protocol.validate()?;
+        // Separate roles (ADR-0007): a validator key is never a coordinator or governance key.
+        for key in self
+            .protocol
+            .coordinators
+            .iter()
+            .chain(&self.protocol.governance)
+        {
+            if self
+                .validators
+                .iter()
+                .any(|v| v.pubkey.eq_ignore_ascii_case(key))
+            {
+                return Err(format!(
+                    "validator key {key} cannot also be a protocol authority"
+                ));
+            }
+        }
         let mut addresses = BTreeSet::new();
         for account in &self.accounts {
             if account.address.trim().is_empty() || account.address.trim() != account.address {
@@ -98,6 +121,11 @@ impl GenesisConfig {
             .iter()
             .map(|a| (a.address.as_str(), a.balance))
             .collect()
+    }
+
+    /// Genesis state commitment (accounts, protocol parameters, epoch 0).
+    pub fn state_commitment(&self) -> [u8; 32] {
+        crate::node::genesis_state_commitment_with_params(&self.initial_accounts(), &self.protocol)
     }
 
     /// P2P address table for every validator other than `local`.
@@ -187,6 +215,7 @@ mod tests {
                 address: pubkey(9),
                 balance: 1_000,
             }],
+            protocol: ProtocolParams::default(),
         }
     }
 
@@ -254,5 +283,23 @@ mod tests {
         let mut other = genesis.clone();
         other.validators[0].power = 7;
         assert!(other.verify_store_validator_set(&store).is_err());
+    }
+
+    #[test]
+    fn test_protocol_section_is_validated_and_part_of_the_genesis_hash() {
+        let mut genesis = sample();
+        let without = genesis.state_commitment();
+        // A genesis file without a `protocol` section still loads (no authorities).
+        let mut json: serde_json::Value = serde_json::to_value(&genesis).unwrap();
+        json.as_object_mut().unwrap().remove("protocol");
+        let parsed: GenesisConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.protocol, ProtocolParams::default());
+
+        genesis.protocol.coordinators = vec![pubkey(7)];
+        assert!(genesis.validate().is_ok());
+        assert_ne!(genesis.state_commitment(), without, "params are committed");
+        // A validator key cannot double as a protocol authority.
+        genesis.protocol.governance = vec![pubkey(1)];
+        assert!(genesis.validate().is_err());
     }
 }

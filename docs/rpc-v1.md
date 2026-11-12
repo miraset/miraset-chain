@@ -26,7 +26,7 @@ document records the engineering contract chosen for the devnet, not a productio
 | Method and path | Purpose | Success |
 |---|---|---|
 | `POST /v1/transactions` | submit a signed `Transaction` | `202 {status: "pending", id: "<sender>:<nonce>"}` |
-| `POST /v1/receipts` | submit a coordinator-signed `ComputeReceipt` | `202 {status: "pending", id: "<task_id>"}` |
+| `POST /v1/receipts` | submit a `ComputeReceipt` co-signed by a genesis coordinator and the worker | `202 {status: "pending", id: "<task_id>"}` |
 | `GET /v1/accounts/{address}` | committed balance and nonce | `200`, `404` if absent |
 | `GET /v1/workers/{id}` | committed worker record | `200`, `404` |
 | `GET /v1/epochs/current`, `/v1/epochs/{id}` | committed epoch | `200`, `404` |
@@ -34,6 +34,7 @@ document records the engineering contract chosen for the devnet, not a productio
 | `GET /v1/blocks/latest` | `{highest_committed_block, height}` from one snapshot | `200` |
 | `GET /v1/blocks/{height}` | `{height, hash}` of a committed block | `200`, `404` above the tip |
 | `GET /v1/mempool` | `{pending_txs, pending_receipts}` on this node | `200` |
+| `GET /v1/params` | genesis protocol parameters: `coordinators`, `governance` (hex keys), `price_per_token`, `epoch_reward_budget` | `200` |
 | `GET /v1/events/blocks` | Server-Sent Events, see below | `200 text/event-stream` |
 | `GET /v1/health` | `{status: ok|halted, chain_id, reason?}` (not enveloped) | `200`, `503` when halted |
 
@@ -43,7 +44,7 @@ restrict them at the proxy if that matters.
 
 ## Freshness of reads
 
-Every committed-state read (`accounts`, `workers`, `epochs`, `tasks`, `blocks`), found or not,
+Every committed-state read (`accounts`, `workers`, `epochs`, `tasks`, `blocks`, `params`), found or not,
 carries `meta`:
 
 | Field | Meaning |
@@ -80,9 +81,9 @@ ready (`/readyz`) or `stale: false` on reads.
 
 | Status | When |
 |---|---|
-| `400` | invalid transaction: missing sender or recipient, uppercase sender, fee below the floor (1), nonce gap (it must equal the committed nonce or follow the sender's last pending nonce), amount + fee overflowing or above the committed balance, unsigned or forged; invalid receipt: missing task or worker id, bad coordinator signature, and when it names a client account: not confirmed by the client, or the client's committed balance below its cost |
+| `400` | invalid transaction: missing sender or recipient, uppercase sender, fee below the floor (1), nonce gap (it must equal the committed nonce or follow the sender's last pending nonce), amount + fee overflowing or above the committed balance, unsigned or forged; invalid receipt: missing task or worker id, coordinator key not listed in genesis or bad coordinator signature, worker not registered with the minimum bond or worker signature not by its registered key, no client or delivery not confirmed, client is the worker's owner, `client_cost` or `worker_reward` not equal to `tokens_computed × price_per_token`, client's committed balance below the cost |
 | `409` | already pending (duplicate), nonce already committed, task already settled |
-| `429` | the sender has 256 pending transactions, or the named client account 256 pending receipts (receipts without a client have no per-client quota); or the client's rate limit (below), with `Retry-After` in whole seconds (at least 1) |
+| `429` | the sender has 256 pending transactions, or the client account 256 pending receipts; or the client's rate limit (below), with `Retry-After` in whole seconds (at least 1) |
 | `503` | mempool full (20 000 transactions, 5 000 receipts; a better-paying transaction evicts the cheapest chain tail) or the node is draining |
 | `401` | key file configured and the API key is missing or unknown; `WWW-Authenticate: Bearer` |
 | `413` | body over 64 KiB |
@@ -94,8 +95,14 @@ transaction. A transaction that passes admission but fails execution (e.g. a sec
 the first one left unaffordable, a malformed system payload) is evicted together with the
 sender's later nonces and must be resubmitted. There is no replace-by-fee.
 
-Admission does not prove more than the checks above: receipts are verified against the
-coordinator key they carry, so coordinator authorization is still open (TODO 8.5.1).
+Receipt rules are the chain's settlement rules (`ComputeReceipt` in `src/core/types.rs`, TODO
+8.5.1); block execution enforces them again. A settled receipt proves that a genesis
+coordinator and a bonded worker signed it and that the client paid `tokens × price` on chain;
+it does not prove that the inference was correct or that anyone paid off chain (`proof_hash` is
+an opaque anchor). Known limits: the client does not sign; one coordinator key (with any bonded
+worker) can charge any funded account up to its balance, so coordinator keys are as sensitive
+as the funds they can move; and a receipt admitted for a worker that unbonds before settlement
+is evicted silently (the `202` was only admission).
 
 ## Access control
 

@@ -3,10 +3,13 @@
 //! mempool no longer makes a leader miss its views.
 
 use ed25519_dalek::SigningKey;
-use miraset_chain::core::types::{ComputeReceipt, Transaction};
+use miraset_chain::core::types::Transaction;
 use miraset_chain::mempool::{InsertError, Mempool};
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub};
-use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
+use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis_with_params};
+
+mod common;
+use common::pocc::Pocc;
 use miraset_chain::storage::MemKVStore;
 use sha2::{Digest, Sha256};
 use std::thread;
@@ -39,7 +42,11 @@ fn start(accounts: &[(&str, u64)], mempool: Mempool) -> MirasetNode<MemKVStore, 
     let validator = key(40);
     let vk = validator.verifying_key();
     let kv = MemKVStore::new();
-    init_genesis(kv.clone(), &[(vk, 1)], accounts);
+    let pocc = Pocc::default();
+    let parties = pocc.genesis_accounts();
+    let mut all: Vec<(&str, u64)> = parties.iter().map(|(a, b)| (a.as_str(), *b)).collect();
+    all.extend_from_slice(accounts);
+    init_genesis_with_params(kv.clone(), 1337, &[(vk, 1)], &all, &pocc.params());
     let config = NodeConfig {
         max_view_time: VIEW_TIME,
         ..NodeConfig::devnet(validator)
@@ -87,7 +94,6 @@ fn test_greedy_selection_keeps_valid_candidates_and_skips_invalid_ones() {
     let carol = key(43);
     let dave = key(44);
     let forger = key(45);
-    let coordinator = key(46);
     let (alice_addr, carol_addr, dave_addr) = (address(&alice), address(&carol), address(&dave));
 
     let mempool = Mempool::new();
@@ -111,31 +117,14 @@ fn test_greedy_selection_keeps_valid_candidates_and_skips_invalid_ones() {
     assert!(mempool.insert_tx(transfer(&dave, 0, "bob", 90)).is_ok());
     assert!(mempool.insert_tx(transfer(&dave, 1, "bob", 90)).is_ok());
     // Receipts: one valid; one whose client did not confirm delivery.
-    let mut settled = ComputeReceipt::new(
-        "task-ok",
-        &alice_addr,
-        "worker-1",
-        "coord",
-        "model",
-        "proof",
-        10,
-        5,
-        5,
-    );
-    settled.sign_with(&coordinator);
-    let mut unconfirmed = ComputeReceipt::new(
-        "task-unconfirmed",
-        &alice_addr,
-        "worker-1",
-        "coord",
-        "model",
-        "proof",
-        10,
-        5,
-        5,
-    );
+    // Receipts (fixture coordinator and worker, registered in the same block): one valid; one
+    // whose client did not confirm delivery.
+    let pocc = Pocc::default();
+    assert!(mempool.insert_tx(pocc.register(0)).is_ok());
+    let settled = pocc.receipt("task-ok", &alice_addr, 5);
+    let mut unconfirmed = pocc.receipt("task-unconfirmed", &alice_addr, 5);
     unconfirmed.client_confirmed = false;
-    unconfirmed.sign_with(&coordinator);
+    pocc.sign(&mut unconfirmed);
     assert!(mempool.insert_receipt(settled).is_ok());
     assert!(mempool.insert_receipt(unconfirmed).is_ok());
 

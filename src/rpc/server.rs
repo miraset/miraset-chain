@@ -235,6 +235,7 @@ where
         .route("/v1/blocks/latest", get(latest_block_handler))
         .route("/v1/blocks/{height}", get(block_at_height_handler))
         .route("/v1/mempool", get(mempool_status_handler))
+        .route("/v1/params", get(protocol_params_handler))
         .merge(submissions)
         // Bounded request time for everything except the event stream, added below.
         .layer(TimeoutLayer::with_status_code(
@@ -519,6 +520,17 @@ where
             Json(ApiResponse::err("no committed block at this height").with_meta(meta)),
         ),
     }
+}
+
+/// Genesis protocol parameters: authorized coordinators and governance keys, price per token,
+/// epoch reward budget (TODO 8.5.1). Coordinators need the price to build receipts.
+async fn protocol_params_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    let meta = read_meta(&state);
+    Json(ApiResponse::ok(state.node.protocol_params()).with_meta(meta))
 }
 
 async fn mempool_status_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse

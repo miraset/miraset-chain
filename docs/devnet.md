@@ -93,11 +93,16 @@ in [`docs/performance-baseline.md`](performance-baseline.md). No target is appro
   uid 10001, directories 0700). It is a no-op if genesis already exists.
 - Each validator container mounts only its own key volume, read-only, at
   `/var/lib/miraset-key`. The faucet key is visible only to the one-shot `faucet` tool container
-  (profile `tools`, no network) used by `transfer.sh`. The fault suite checks that each node
-  sees exactly one key file (TODO 8.3.4, key custody D5).
+  (profile `tools`, no network) used by `transfer.sh` and the `loadgen` tool. The fault suite
+  checks that each node sees exactly one key file (TODO 8.3.4, key custody D5).
+- Genesis also lists one devnet **coordinator** key (`coordinator-key` volume; co-signs compute
+  receipts) and one **governance** key (`governance-key`; slashes worker bonds and closes epochs,
+  which mints the epoch reward), plus `price_per_token` and `epoch_reward_budget` (TODO 8.5.1,
+  `GET /v1/params`). No validator mounts them; `loadgen` mounts the coordinator key read-only.
+  A genesis without them settles no receipt and closes no epoch.
 - Key files must be regular files (symlinks are refused), owned by the process user, with no
   group or other access. Nodes also refuse keys that are not genesis validators, and a database
-  created from a different genesis (accounts or validator set).
+  created from a different genesis (accounts, protocol parameters or validator set).
 - Every `miraset-chain` process disables core dumps and marks itself non-dumpable on Linux, so
   other processes of the same user cannot read its memory or environment (key custody D4).
 - Outside the devnet, the key can live in a separate signer process instead: run
@@ -120,6 +125,10 @@ in [`docs/performance-baseline.md`](performance-baseline.md). No target is appro
 - **Upgrading an existing devnet:** recreate it with `docker compose down -v`. Older devnets
   keep their keys in `devnet-config`, which the nodes no longer read, and have no guard
   volumes.
+  Since TODO 8.5.1 genesis also holds protocol parameters and receipts carry a worker signature
+  (the genesis hash, stored epochs and receipt encoding changed): a devnet created before it
+  fails closed on start ("genesis_hash mismatch") and must be recreated; an old `genesis.json`
+  without a `protocol` section loads but has no coordinator or governance key.
 - A consensus safety halt (guard fault, chain write failure, or a panic on any `hs-*` consensus
   thread) makes `/v1/health` return 503
   `{"status":"halted","reason":…}` and the process exit with code 3 after 5s; compose restarts it

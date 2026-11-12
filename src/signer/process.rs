@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::consensus::{GuardIdentity, GuardedSigner, OpenMode, SafetyHalt, SigningGuard};
 use crate::keys::read_key_file;
-use crate::node::{GenesisConfig, genesis_state_commitment};
+use crate::node::GenesisConfig;
 
 use super::server::{SignerService, bind_socket, serve};
 
@@ -84,7 +84,7 @@ fn load_signer(options: &SignerOptions) -> Result<Arc<GuardedSigner>, String> {
     let identity = GuardIdentity {
         chain_id: genesis.chain_id,
         validator: vk.to_bytes(),
-        genesis_hash: genesis_state_commitment(&genesis.initial_accounts()),
+        genesis_hash: genesis.state_commitment(),
     };
     let mode = if options.init_signing_guard {
         OpenMode::CreateIfMissing

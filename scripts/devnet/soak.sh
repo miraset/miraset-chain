@@ -75,7 +75,8 @@ python3 "$HERE/check_consensus.py" --rpc "$ALL_RPCS" --min-reachable 5
 
 echo "ts,node,rss_bytes,fds,data_bytes,height,restarts" >"$out/samples.csv"
 $COMPOSE run --rm -T loadgen loadgen "${IN_NETWORK_RPCS[@]}" \
-  --faucet-key /keys/faucet/faucet.key --senders "$senders" --rate "$rate" \
+  --faucet-key /keys/faucet/faucet.key --coordinator-key /keys/coordinator/coordinator.key \
+  --senders "$senders" --rate "$rate" \
   --duration-secs "$secs" --warmup-secs "$warmup" --fund-amount "$fund" \
   >"$out/load.json" 2>"$out/load.log" &
 load_pid=$!
