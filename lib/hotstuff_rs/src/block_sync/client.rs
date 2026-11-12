@@ -364,12 +364,13 @@ impl<N: Network> BlockSyncClient<N> {
                     }
 
                     for block in new_blocks {
-                        if !block.is_correct(block_tree)?
-                            || !safe_block(&block, block_tree, self.config.chain_id)?
-                        {
+                        let correct = block.is_correct(block_tree)?;
+                        if !correct || !safe_block(&block, block_tree, self.config.chain_id)? {
                             // Blacklist the sync server, unless the block only fails to
-                            // extend our own speculative tip (see `ahead` above).
-                            if !ahead {
+                            // extend our own speculative tip (see `ahead` above). A block whose
+                            // certificate does not verify is never an honest fork, so it is
+                            // blacklisted even when `ahead` (8.5.2 review of patch #10).
+                            if !ahead || !correct {
                                 self.block_sync_client_state.blacklist_sync_server(
                                     peer.clone(),
                                     self.config.blacklist_expiry_time,
