@@ -566,12 +566,16 @@ impl BlockSyncClientState {
     }
 
     /// Remove all sync servers whose blacklisting has expired from the blacklist.
+    ///
+    /// MIRASET PATCH #13: pop entries whose expiry has passed (`expiry <= now`). Upstream popped
+    /// those still in force (`expiry >= now`), so every blacklisting was lifted on the next tick.
+    /// Entries are pushed with a fixed expiry time, so the queue is ordered by expiry.
     fn remove_expired_blacklisted_servers(&mut self) {
         let now = Instant::now();
         while self
             .blacklist
             .front()
-            .is_some_and(|(_, expiry)| expiry >= &now)
+            .is_some_and(|(_, expiry)| expiry <= &now)
         {
             let _ = self.blacklist.pop_front();
         }
@@ -659,3 +663,7 @@ fn is_sync_server_address<K: KVStore>(
         None => Ok(false),
     }
 }
+
+#[cfg(test)]
+#[path = "blacklist_tests.rs"]
+mod blacklist_tests;
