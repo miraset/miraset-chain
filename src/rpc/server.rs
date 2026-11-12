@@ -236,6 +236,10 @@ where
         .route("/v1/blocks/{height}", get(block_at_height_handler))
         .route("/v1/mempool", get(mempool_status_handler))
         .route("/v1/params", get(protocol_params_handler))
+        .route(
+            "/v1/allowances/{client}/{coordinator}",
+            get(allowance_handler),
+        )
         .merge(submissions)
         // Bounded request time for everything except the event stream, added below.
         .layer(TimeoutLayer::with_status_code(
@@ -531,6 +535,39 @@ where
 {
     let meta = read_meta(&state);
     Json(ApiResponse::ok(state.node.protocol_params()).with_meta(meta))
+}
+
+/// What `coordinator` may still charge `client` through receipts (TODO 8.5.1).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AllowanceResponse {
+    pub client: String,
+    pub coordinator: String,
+    pub remaining: u64,
+}
+
+async fn allowance_handler<K, N>(
+    State(state): State<RpcState<K, N>>,
+    Path((client, coordinator)): Path<(String, String)>,
+) -> impl IntoResponse
+where
+    K: KVStore + Send + Sync + 'static,
+    N: Network + Send + Sync + 'static,
+{
+    let meta = read_meta(&state);
+    // Accounts and keys are lowercase hex on chain; accept either case in the path.
+    let (client, coordinator) = (
+        client.to_ascii_lowercase(),
+        coordinator.to_ascii_lowercase(),
+    );
+    let remaining = state.node.allowance(&client, &coordinator);
+    Json(
+        ApiResponse::ok(AllowanceResponse {
+            client,
+            coordinator,
+            remaining,
+        })
+        .with_meta(meta),
+    )
 }
 
 async fn mempool_status_handler<K, N>(State(state): State<RpcState<K, N>>) -> impl IntoResponse

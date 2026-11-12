@@ -371,6 +371,35 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
     }
 
     /// Read a registered worker's state from the committed state.
+    /// Remaining amount `coordinator` may charge `client` through receipts (committed).
+    pub fn allowance(&self, client: &str, coordinator: &str) -> u64 {
+        let snapshot = self.block_tree_camera().snapshot();
+        snapshot
+            .committed_app_state(&MirasetApp::allowance_key(client, coordinator))
+            .and_then(|raw| raw.try_into().ok().map(u64::from_be_bytes))
+            .unwrap_or(0)
+    }
+
+    /// Timestamp (Unix ms) of the highest committed block; 0 before the first.
+    pub fn committed_time_ms(&self) -> u64 {
+        let snapshot = self.block_tree_camera().snapshot();
+        snapshot
+            .committed_app_state(&MirasetApp::chain_time_key())
+            .and_then(|raw| raw.try_into().ok().map(u64::from_be_bytes))
+            .unwrap_or(0)
+    }
+
+    /// Whether the current epoch has lasted `epoch_seconds` of committed block time.
+    pub fn epoch_may_close(&self) -> bool {
+        let Some(epoch) = self.get_current_epoch() else {
+            return false;
+        };
+        let end = epoch
+            .start_timestamp
+            .saturating_add(self.protocol_params().epoch_seconds);
+        self.committed_time_ms() / 1000 >= end
+    }
+
     /// Genesis protocol parameters from committed state (defaults if absent).
     pub fn protocol_params(&self) -> ProtocolParams {
         let snapshot = self.block_tree_camera().snapshot();
@@ -460,7 +489,11 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                 .map_or(committed.nonce, |next| next.max(committed.nonce));
             let min_fee = self.mempool.limits().min_fee;
             admission::check_transaction(&tx, &committed, next_nonce, min_fee)?;
-            admission::check_system_transaction(&tx, &self.protocol_params())?;
+            admission::check_system_transaction(
+                &tx,
+                &self.protocol_params(),
+                self.epoch_may_close(),
+            )?;
             let (sender, nonce) = (tx.sender.clone(), tx.nonce);
             self.mempool.insert_tx(tx)?;
             // A block may have committed this nonce between the check and the insert, after the
@@ -490,6 +523,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                 task_settled: self.is_task_settled(&receipt.task_id),
                 worker: worker.as_ref(),
                 client: client.as_ref(),
+                allowance: self.allowance(&receipt.client_address, &receipt.coordinator_pubkey),
             };
             admission::check_receipt(&receipt, &ctx)?;
             let task_id = receipt.task_id.clone();

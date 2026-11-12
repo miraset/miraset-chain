@@ -7,8 +7,9 @@
 
 use super::MirasetApp;
 use crate::core::types::{
-    AccountState, ComputeReceipt, EpochInfo, EpochRewardConfig, EpochStatus, MIN_WORKER_BOND,
-    ProtocolParams, Transaction, WorkerBondAction, WorkerInfo, compute_state_commitment,
+    AccountState, AllowanceAction, ComputeReceipt, EpochInfo, EpochRewardConfig, EpochStatus,
+    MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction, WorkerInfo,
+    compute_state_commitment,
 };
 use hotstuff_rs::block_tree::accessors::app::AppBlockTreeView;
 use hotstuff_rs::block_tree::pluggables::KVStore;
@@ -26,6 +27,10 @@ pub(super) struct BlockExecution {
     local_accounts: BTreeMap<String, AccountState>,
     local_workers: BTreeMap<String, WorkerInfo>,
     local_tasks: BTreeSet<String>,
+    /// Allowances changed in this block: `(client, coordinator)` -> remaining.
+    local_allowances: BTreeMap<(String, String), u64>,
+    /// This block's timestamp (Unix ms), set by `set_block_time`.
+    block_time_ms: u64,
     worker_ids: Vec<String>,
     worker_ids_modified: bool,
     current_epoch: EpochInfo,
@@ -44,6 +49,8 @@ impl BlockExecution {
             local_accounts: BTreeMap::new(),
             local_workers: BTreeMap::new(),
             local_tasks: BTreeSet::new(),
+            local_allowances: BTreeMap::new(),
+            block_time_ms: 0,
             worker_ids: tree
                 .app_state(WORKER_IDS_KEY)
                 .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -74,6 +81,65 @@ impl BlockExecution {
         )
     }
 
+    /// Record this block's timestamp: strictly after the parent block's (TODO 8.5.1). The
+    /// first block also starts epoch 0, which genesis cannot date.
+    pub(super) fn set_block_time<K: KVStore>(
+        &mut self,
+        tree: &Tree<'_, '_, K>,
+        timestamp_ms: u64,
+    ) -> Option<()> {
+        let parent_ms = MirasetApp::read_chain_time_ms(tree);
+        if timestamp_ms <= parent_ms {
+            return None;
+        }
+        self.block_time_ms = timestamp_ms;
+        self.put(
+            MirasetApp::chain_time_key(),
+            timestamp_ms.to_be_bytes().to_vec(),
+        );
+        if parent_ms == 0 && self.current_epoch.epoch_id == 0 {
+            self.current_epoch.start_timestamp = timestamp_ms / 1000;
+            self.epoch_modified = true;
+        }
+        Some(())
+    }
+
+    fn allowance<K: KVStore>(
+        &self,
+        tree: &Tree<'_, '_, K>,
+        client: &str,
+        coordinator: &str,
+    ) -> u64 {
+        let key = (client.to_string(), coordinator.to_ascii_lowercase());
+        self.local_allowances
+            .get(&key)
+            .copied()
+            .unwrap_or_else(|| MirasetApp::read_allowance(tree, client, coordinator))
+    }
+
+    fn set_allowance(&mut self, client: &str, coordinator: &str, amount: u64) {
+        self.local_allowances.insert(
+            (client.to_string(), coordinator.to_ascii_lowercase()),
+            amount,
+        );
+    }
+
+    /// `system:allowance`: the sender sets what a coordinator may still charge it.
+    fn apply_allowance(&mut self, tx: &Transaction) -> Option<()> {
+        if tx.amount != 0 {
+            return None;
+        }
+        let action: AllowanceAction = serde_json::from_slice(&tx.payload).ok()?;
+        // Only for genesis coordinators: anything else would only add state (review M3).
+        if !self.params.is_coordinator(&action.coordinator) {
+            return None;
+        }
+        let key: [u8; 32] = hex::decode(&action.coordinator).ok()?.try_into().ok()?;
+        ed25519_dalek::VerifyingKey::from_bytes(&key).ok()?;
+        self.set_allowance(&tx.sender, &action.coordinator, action.amount);
+        Some(())
+    }
+
     fn take_worker<K: KVStore>(&mut self, tree: &Tree<'_, '_, K>, id: &str) -> Option<WorkerInfo> {
         self.local_workers
             .remove(id)
@@ -93,7 +159,9 @@ impl BlockExecution {
         self.local_accounts
             .insert(tx.sender.clone(), updated_sender);
 
-        if tx.recipient == "system:worker_registry" && !tx.payload.is_empty() {
+        if tx.recipient == "system:allowance" {
+            self.apply_allowance(tx)
+        } else if tx.recipient == "system:worker_registry" && !tx.payload.is_empty() {
             let action: WorkerBondAction = serde_json::from_slice(&tx.payload).ok()?;
             self.apply_worker_action(tree, tx, action)
         } else if tx.recipient == "system:epoch_manager" && !tx.payload.is_empty() {
@@ -210,6 +278,15 @@ impl BlockExecution {
             return None;
         }
         let epoch_bytes: [u8; 8] = tx.payload.as_slice().try_into().ok()?;
+        // At most one epoch per `epoch_seconds` of block time (ADR-0004 monthly emission).
+        let now_secs = self.block_time_ms / 1000;
+        let earliest = self
+            .current_epoch
+            .start_timestamp
+            .checked_add(self.params.epoch_seconds)?;
+        if now_secs < earliest {
+            return None;
+        }
         // Target epoch must match current active epoch
         if u64::from_be_bytes(epoch_bytes) != self.current_epoch.epoch_id {
             return None;
@@ -280,7 +357,7 @@ impl BlockExecution {
         // Advance to next active epoch: a fresh budget plus what this epoch did not pay out.
         self.current_epoch = EpochInfo::new(
             self.current_epoch.epoch_id.checked_add(1)?,
-            self.current_epoch.start_timestamp.checked_add(3600)?,
+            now_secs,
             self.params.epoch_reward_budget.checked_add(carried)?,
         );
         self.epoch_modified = true;
@@ -334,6 +411,14 @@ impl BlockExecution {
         if receipt.client_cost != cost || receipt.worker_reward != cost {
             return None;
         }
+        // The client must have allowed this coordinator to charge it at least the cost.
+        let allowed = self.allowance(tree, &receipt.client_address, &receipt.coordinator_pubkey);
+        let remaining = allowed.checked_sub(cost)?;
+        self.set_allowance(
+            &receipt.client_address,
+            &receipt.coordinator_pubkey,
+            remaining,
+        );
         let mut client = self.take_account(tree, &receipt.client_address);
         client.balance = client.balance.checked_sub(cost)?;
         self.local_accounts
@@ -378,6 +463,12 @@ impl BlockExecution {
         for (w_id, worker) in std::mem::take(&mut self.local_workers) {
             let val = serde_json::to_vec(&worker).ok()?;
             self.put(MirasetApp::worker_key(&w_id), val);
+        }
+        for ((client, coordinator), remaining) in std::mem::take(&mut self.local_allowances) {
+            self.put(
+                MirasetApp::allowance_key(&client, &coordinator),
+                remaining.to_be_bytes().to_vec(),
+            );
         }
         for (addr, acc) in std::mem::take(&mut self.local_accounts) {
             let val = serde_json::to_vec(&acc).ok()?;

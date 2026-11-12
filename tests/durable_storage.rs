@@ -56,8 +56,17 @@ fn test_node_consensus_with_durable_redb() {
         node.get_worker("worker_gpu_redb").is_some()
     });
 
-    // A signed transfer and a 250-token receipt (cost 500) paid by alice.
-    let mut tx = Transaction::new(&alice_addr, 0, "bob", 2_000, 100);
+    // Alice allows the coordinator to charge her, then a signed transfer and a 250-token
+    // receipt (cost 500) she pays.
+    assert!(
+        node.submit_transaction(pocc.allow(&alice_key, 0, 500))
+            .is_ok()
+    );
+    let coordinator = common::pocc::address(&pocc.coordinator);
+    wait_for("allowance", || {
+        node.allowance(&alice_addr, &coordinator) == 500
+    });
+    let mut tx = Transaction::new(&alice_addr, 1, "bob", 2_000, 100);
     tx.sign_with(&alice_key);
     assert!(node.submit_transaction(tx).is_ok());
     assert!(
@@ -69,8 +78,8 @@ fn test_node_consensus_with_durable_redb() {
             && node.get_account("bob").map(|a| a.balance) == Some(2_500)
     });
 
-    // Initial 20_000 - transfer(2_000 + 100) - job cost(500) = 17_400
-    assert_eq!(node.get_account(&alice_addr).unwrap().balance, 17_400);
+    // Initial 20_000 - allowance fee(1) - transfer(2_000 + 100) - job cost(500) = 17_399
+    assert_eq!(node.get_account(&alice_addr).unwrap().balance, 17_399);
     let worker = node
         .get_worker("worker_gpu_redb")
         .expect("worker not found");
@@ -95,7 +104,7 @@ fn test_node_consensus_with_durable_redb() {
     let reloaded_alice = node2
         .get_account(&alice_addr)
         .expect("reloaded alice not found");
-    assert_eq!(reloaded_alice.balance, 17_400);
+    assert_eq!(reloaded_alice.balance, 17_399);
 
     let reloaded_worker = node2
         .get_worker("worker_gpu_redb")

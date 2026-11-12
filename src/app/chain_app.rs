@@ -15,6 +15,30 @@ use execution::BlockExecution;
 /// Most transactions and receipts a produced block carries.
 pub const MAX_BLOCK_TXS: usize = 100;
 pub const MAX_BLOCK_RECEIPTS: usize = 20;
+/// How far a proposed block's timestamp may run ahead of a validator's clock. Validators need
+/// clocks synchronised well within this (NTP); a larger skew makes a validator refuse honest
+/// proposals.
+pub const MAX_FUTURE_DRIFT_MS: u64 = 10_000;
+/// How far a proposed block's timestamp may lag a validator's clock. Bounds how long a leader
+/// can hold chain time back (stamping parent + 1) and makes the first block carry real time,
+/// so epoch timing follows the wall clock. Larger than the future bound to absorb proposal
+/// delays and view timeouts.
+pub const MAX_PAST_DRIFT_MS: u64 = 60_000;
+
+/// Whether a proposal's timestamp is acceptable against this validator's clock (live proposals
+/// only; block sync accepts history). Monotonicity against the parent is checked by execution.
+pub fn timestamp_near_clock(timestamp_ms: u64, clock_ms: u64) -> bool {
+    timestamp_ms <= clock_ms.saturating_add(MAX_FUTURE_DRIFT_MS)
+        && timestamp_ms >= clock_ms.saturating_sub(MAX_PAST_DRIFT_MS)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 /// Candidates that fail execution before block production stops trying more of a kind.
 const MAX_FAILED_CANDIDATES: usize = 256;
 
@@ -81,6 +105,34 @@ impl MirasetApp {
 
         worker_ids.push(worker_id.to_string());
         true
+    }
+
+    /// Timestamp (Unix ms) of the latest block on this branch (TODO 8.5.1).
+    pub fn chain_time_key() -> Vec<u8> {
+        b"chain:time_ms".to_vec()
+    }
+
+    pub fn read_chain_time_ms<K: KVStore>(
+        tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
+    ) -> u64 {
+        tree.app_state(&Self::chain_time_key())
+            .and_then(|bytes| bytes.try_into().ok().map(u64::from_be_bytes))
+            .unwrap_or(0)
+    }
+
+    /// Remaining amount `coordinator` may charge `client` (TODO 8.5.1).
+    pub fn allowance_key(client: &str, coordinator: &str) -> Vec<u8> {
+        format!("allowance:{client}:{}", coordinator.to_ascii_lowercase()).into_bytes()
+    }
+
+    pub fn read_allowance<K: KVStore>(
+        tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
+        client: &str,
+        coordinator: &str,
+    ) -> u64 {
+        tree.app_state(&Self::allowance_key(client, coordinator))
+            .and_then(|bytes| bytes.try_into().ok().map(u64::from_be_bytes))
+            .unwrap_or(0)
     }
 
     /// Genesis protocol parameters (TODO 8.5.1).
@@ -198,6 +250,7 @@ impl MirasetApp {
         payload: &BlockPayload,
     ) -> Option<(AppStateUpdates, [u8; 32])> {
         let mut execution = BlockExecution::new(tree);
+        execution.set_block_time(tree, payload.timestamp_ms)?;
         for tx in &payload.transactions {
             execution.apply_transaction(tree, tx)?;
         }
@@ -234,7 +287,12 @@ impl<K: KVStore> App<K> for MirasetApp {
         // this node's pool: a transaction that only failed on this fork's state is dropped and
         // must be resubmitted.
         let tree = request.block_tree();
+        // Block time: the local clock, but always after the parent block's (TODO 8.5.1).
+        let timestamp_ms = now_ms().max(Self::read_chain_time_ms(tree).saturating_add(1));
         let mut execution = BlockExecution::new(tree);
+        execution
+            .set_block_time(tree, timestamp_ms)
+            .expect("a timestamp after the parent's is always accepted");
         let mut failures = 0usize;
         let selected_txs: Vec<Transaction> = self.mempool.select_txs(MAX_BLOCK_TXS, |tx| {
             let expected = execution.account_nonce(tree, &tx.sender);
@@ -272,14 +330,15 @@ impl<K: KVStore> App<K> for MirasetApp {
 
         // `finish` is the same code validators run after applying the payload, so the state
         // root and updates match what `validate_block` will compute.
-        let mut payload = BlockPayload::new(selected_txs, selected_receipts);
+        let mut payload =
+            BlockPayload::new(selected_txs, selected_receipts).with_timestamp_ms(timestamp_ms);
         let app_state_updates = match execution.finish() {
             Some((updates, state_root)) => {
                 payload.state_root = state_root;
                 Some(updates)
             }
             None => {
-                payload = BlockPayload::default();
+                payload = BlockPayload::default().with_timestamp_ms(timestamp_ms);
                 let (updates, state_root) =
                     Self::compute_state_updates_with_commitment(tree, &payload)
                         .expect("empty block state commitment must succeed");
@@ -306,6 +365,26 @@ impl<K: KVStore> App<K> for MirasetApp {
     fn validate_block(
         &mut self,
         request: ValidateBlockRequest<'_, '_, K>,
+    ) -> ValidateBlockResponse {
+        Self::validate(request, Some(now_ms()))
+    }
+
+    /// Blocks fetched by block sync are history: their time is checked against the parent's,
+    /// not against this node's clock.
+    fn validate_block_for_sync(
+        &mut self,
+        request: ValidateBlockRequest<'_, '_, K>,
+    ) -> ValidateBlockResponse {
+        Self::validate(request, None)
+    }
+}
+
+impl MirasetApp {
+    /// Validate a proposed block; with `clock_ms`, also refuse a timestamp more than
+    /// `MAX_FUTURE_DRIFT_MS` ahead of that clock (a proposer cannot pull epoch closes forward).
+    fn validate<K: KVStore>(
+        request: ValidateBlockRequest<'_, '_, K>,
+        clock_ms: Option<u64>,
     ) -> ValidateBlockResponse {
         let block = request.proposed_block();
 
@@ -337,6 +416,18 @@ impl<K: KVStore> App<K> for MirasetApp {
         }
 
         // Validate state transitions and deterministic state commitment root
+        if let Some(now) = clock_ms
+            && !timestamp_near_clock(payload.timestamp_ms, now)
+        {
+            tracing::warn!(
+                block_timestamp_ms = payload.timestamp_ms,
+                local_clock_ms = now,
+                "refusing proposal: block timestamp too far from this validator's clock \
+                 (check NTP)"
+            );
+            return ValidateBlockResponse::Invalid;
+        }
+
         match Self::compute_state_updates_with_commitment(request.block_tree(), &payload) {
             Some((updates, computed_state_root)) if computed_state_root == payload.state_root => {
                 ValidateBlockResponse::Valid {
@@ -346,13 +437,6 @@ impl<K: KVStore> App<K> for MirasetApp {
             }
             _ => ValidateBlockResponse::Invalid,
         }
-    }
-
-    fn validate_block_for_sync(
-        &mut self,
-        request: ValidateBlockRequest<'_, '_, K>,
-    ) -> ValidateBlockResponse {
-        self.validate_block(request)
     }
 }
 
@@ -576,5 +660,17 @@ mod tests {
             .unwrap();
         let d2 = cfg.try_distribute(10_000, &[w3, w1, w2]).unwrap();
         assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn test_live_proposals_must_be_stamped_near_the_validators_clock() {
+        let now = 1_800_000_000_000;
+        assert!(timestamp_near_clock(now, now));
+        assert!(timestamp_near_clock(now + MAX_FUTURE_DRIFT_MS, now));
+        assert!(!timestamp_near_clock(now + MAX_FUTURE_DRIFT_MS + 1, now));
+        assert!(timestamp_near_clock(now - MAX_PAST_DRIFT_MS, now));
+        assert!(!timestamp_near_clock(now - MAX_PAST_DRIFT_MS - 1, now));
+        // A first block stamped near zero (to start epoch 0 in 1970) is refused.
+        assert!(!timestamp_near_clock(1, now));
     }
 }

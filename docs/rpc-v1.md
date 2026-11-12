@@ -34,7 +34,8 @@ document records the engineering contract chosen for the devnet, not a productio
 | `GET /v1/blocks/latest` | `{highest_committed_block, height}` from one snapshot | `200` |
 | `GET /v1/blocks/{height}` | `{height, hash}` of a committed block | `200`, `404` above the tip |
 | `GET /v1/mempool` | `{pending_txs, pending_receipts}` on this node | `200` |
-| `GET /v1/params` | genesis protocol parameters: `coordinators`, `governance` (hex keys), `price_per_token`, `epoch_reward_budget` | `200` |
+| `GET /v1/params` | genesis protocol parameters: `coordinators`, `governance` (hex keys), `price_per_token`, `epoch_reward_budget`, `epoch_seconds` | `200` |
+| `GET /v1/allowances/{client}/{coordinator}` | `{client, coordinator, remaining}`: what the coordinator may still charge the client through receipts | `200` |
 | `GET /v1/events/blocks` | Server-Sent Events, see below | `200 text/event-stream` |
 | `GET /v1/health` | `{status: ok|halted, chain_id, reason?}` (not enveloped) | `200`, `503` when halted |
 
@@ -81,7 +82,7 @@ ready (`/readyz`) or `stale: false` on reads.
 
 | Status | When |
 |---|---|
-| `400` | invalid transaction: missing sender or recipient, uppercase sender, fee below the floor (1), nonce gap (it must equal the committed nonce or follow the sender's last pending nonce), amount + fee overflowing or above the committed balance, unsigned or forged; invalid receipt: missing task or worker id, coordinator key not listed in genesis or bad coordinator signature, worker not registered with the minimum bond or worker signature not by its registered key, no client or delivery not confirmed, client is the worker's owner, `client_cost` or `worker_reward` not equal to `tokens_computed × price_per_token`, client's committed balance below the cost |
+| `400` | invalid transaction: missing sender or recipient, uppercase sender, fee below the floor (1), nonce gap (it must equal the committed nonce or follow the sender's last pending nonce), amount + fee overflowing or above the committed balance, unsigned or forged; invalid receipt: missing task or worker id, coordinator key not listed in genesis or bad coordinator signature, worker not registered with the minimum bond or worker signature not by its registered key, no client or delivery not confirmed, client is the worker's owner, no output tokens, `client_cost` or `worker_reward` not equal to `tokens_computed × price_per_token`, cost above the client's allowance for the coordinator or its committed balance; system transactions: `system:allowance` with an amount or for a key that is not a genesis coordinator, a slash or epoch close by a non-governance key or with an amount, an epoch close before `epoch_seconds` of block time |
 | `409` | already pending (duplicate), nonce already committed, task already settled |
 | `429` | the sender has 256 pending transactions, or the client account 256 pending receipts; or the client's rate limit (below), with `Retry-After` in whole seconds (at least 1) |
 | `503` | mempool full (20 000 transactions, 5 000 receipts; a better-paying transaction evicts the cheapest chain tail) or the node is draining |
@@ -99,10 +100,13 @@ Receipt rules are the chain's settlement rules (`ComputeReceipt` in `src/core/ty
 8.5.1); block execution enforces them again. A settled receipt proves that a genesis
 coordinator and a bonded worker signed it and that the client paid `tokens × price` on chain;
 it does not prove that the inference was correct or that anyone paid off chain (`proof_hash` is
-an opaque anchor). Known limits: the client does not sign; one coordinator key (with any bonded
-worker) can charge any funded account up to its balance, so coordinator keys are as sensitive
-as the funds they can move; and a receipt admitted for a worker that unbonds before settlement
-is evicted silently (the `202` was only admission).
+an opaque anchor). A client authorizes charges in advance: a transaction to `system:allowance` with payload
+`{"coordinator": "<hex key>", "amount": n}` sets how much that genesis coordinator may still
+charge it, and each settled receipt spends from it. Setting replaces the remainder (0 revokes):
+to lower an allowance safely, revoke first, wait for it to commit, then set the new amount;
+otherwise receipts settled before and after the change can together exceed either value. A compromised
+coordinator key can therefore take at most the allowances clients gave it. A receipt admitted
+for a worker that unbonds before settlement is evicted silently (the `202` was only admission).
 
 ## Access control
 

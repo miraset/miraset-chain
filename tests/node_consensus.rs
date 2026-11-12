@@ -11,7 +11,11 @@ use miraset_chain::node::{
 };
 
 mod common;
-use common::pocc::{EPOCH_REWARD_BUDGET, Pocc};
+use common::pocc::{EPOCH_REWARD_BUDGET, Pocc, address, wait_epoch_over};
+
+fn pocc_coordinator(pocc: &Pocc) -> String {
+    address(&pocc.coordinator)
+}
 use miraset_chain::storage::MemKVStore;
 
 /// Upper bound for a consensus-dependent condition; tests return as soon as it holds.
@@ -88,10 +92,18 @@ fn test_single_node_genesis_and_query() {
     let owner_before = node.get_account(&pocc.owner_address()).unwrap().balance;
     let mut commit_rx = node.subscribe_commits();
 
-    // A signed transfer and a receipt for 150 tokens (cost 150 x 2 = 300) paid by alice.
-    let mut tx = Transaction::new(&alice_addr, 0, "bob", 1000, 50);
+    // Alice allows the coordinator to charge her (nonce 0), sends a transfer (nonce 1), and
+    // pays a receipt for 150 tokens (cost 150 x 2 = 300).
+    assert!(
+        node.submit_transaction(pocc.allow(&alice_key, 0, 1_000))
+            .is_ok()
+    );
+    let mut tx = Transaction::new(&alice_addr, 1, "bob", 1000, 50);
     tx.sign_with(&alice_key);
     assert!(node.submit_transaction(tx).is_ok());
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.allowance(&alice_addr, &pocc_coordinator(&pocc)) == 1_000
+    });
     assert!(
         node.submit_receipt(pocc.receipt("compute_task_001", &alice_addr, 150))
             .is_ok()
@@ -110,17 +122,19 @@ fn test_single_node_genesis_and_query() {
             committed_txs += evt.tx_count;
             committed_receipts += evt.receipt_count;
         }
-        committed_txs == 1 && committed_receipts == 1
+        committed_txs == 2 && committed_receipts == 1
     });
-    assert_eq!((committed_txs, committed_receipts), (1, 1));
+    assert_eq!((committed_txs, committed_receipts), (2, 1));
     assert_eq!(node.mempool().tx_count(), 0);
 
     // REWARDS §6: the client pays tokens x price and the worker's owner receives exactly that.
     assert!(node.is_task_settled("compute_task_001"));
     let worker = node.get_worker(&pocc.worker_id).expect("worker");
     assert_eq!((worker.completed_tasks, worker.epoch_tokens), (1, 150));
-    // 10_000 - transfer(1000 + 50) - job cost(300) = 8_650
-    assert_eq!(node.get_account(&alice_addr).unwrap().balance, 8_650);
+    // 10_000 - allowance fee(1) - transfer(1000 + 50) - job cost(300) = 8_649; the allowance
+    // shrinks by the cost.
+    assert_eq!(node.get_account(&alice_addr).unwrap().balance, 8_649);
+    assert_eq!(node.allowance(&alice_addr, &pocc_coordinator(&pocc)), 700);
     assert_eq!(
         node.get_account(&pocc.owner_address()).unwrap().balance,
         owner_before + 300
@@ -157,7 +171,15 @@ fn test_three_validator_cluster_consensus() {
         .collect();
 
     register_worker(&nodes[0], &pocc);
-    let mut tx = Transaction::new(&alice_addr, 0, "bob", 5_000, 100);
+    assert!(
+        nodes[0]
+            .submit_transaction(pocc.allow(&alice_key, 0, 1_000))
+            .is_ok()
+    );
+    wait_until(CONSENSUS_TIMEOUT, || {
+        nodes[0].allowance(&alice_addr, &pocc_coordinator(&pocc)) == 1_000
+    });
+    let mut tx = Transaction::new(&alice_addr, 1, "bob", 5_000, 100);
     tx.sign_with(&alice_key);
     assert!(nodes[0].submit_transaction(tx).is_ok());
     assert!(
@@ -166,16 +188,16 @@ fn test_three_validator_cluster_consensus() {
             .is_ok()
     );
 
-    // 50_000 - transfer(5_000 + 100) - job cost(25 x 2) = 44_850
+    // 50_000 - allowance fee(1) - transfer(5_000 + 100) - job cost(25 x 2) = 44_849
     wait_until(CONSENSUS_TIMEOUT, || {
         nodes.iter().all(|n| {
             n.is_task_settled("task_cluster_01")
-                && n.get_account(&alice_addr).map(|a| a.balance) == Some(44_850)
+                && n.get_account(&alice_addr).map(|a| a.balance) == Some(44_849)
         })
     });
     for node in &nodes {
         assert!(node.is_task_settled("task_cluster_01"));
-        assert_eq!(node.get_account(&alice_addr).unwrap().balance, 44_850);
+        assert_eq!(node.get_account(&alice_addr).unwrap().balance, 44_849);
         assert_eq!(
             node.get_worker("cluster_worker").unwrap().completed_tasks,
             1
@@ -276,6 +298,7 @@ fn test_worker_bond_registration_unbonding_and_slashing() {
     );
 
     // 6. Closing the epoch pays the remaining 80 to the owner.
+    wait_epoch_over(&node);
     let before = node.get_account(&owner).unwrap().balance;
     assert!(node.submit_transaction(pocc.close_epoch(2, 0)).is_ok());
     wait_until(CONSENSUS_TIMEOUT, || {
@@ -292,6 +315,13 @@ fn test_epoch_token_accumulation_and_system_rollover() {
     let client = hex::encode(client_key.verifying_key().to_bytes());
     let node = start_single(10, &pocc, &[(client.as_str(), 5_000)]);
     register_worker(&node, &pocc);
+    assert!(
+        node.submit_transaction(pocc.allow(&client_key, 0, 5_000))
+            .is_ok()
+    );
+    wait_until(CONSENSUS_TIMEOUT, || {
+        node.allowance(&client, &pocc_coordinator(&pocc)) == 5_000
+    });
 
     // 1. A receipt for 1000 tokens.
     assert!(
@@ -326,7 +356,8 @@ fn test_epoch_token_accumulation_and_system_rollover() {
     });
     assert_eq!(node.get_current_epoch().unwrap().epoch_id, 0);
 
-    // 3. Governance closes epoch 0.
+    // 3. Governance closes epoch 0 once it has lasted EPOCH_SECONDS of block time.
+    wait_epoch_over(&node);
     let owner_before = node.get_account(&pocc.owner_address()).unwrap().balance;
     assert!(node.submit_transaction(pocc.close_epoch(0, 0)).is_ok());
     wait_until(CONSENSUS_TIMEOUT, || {

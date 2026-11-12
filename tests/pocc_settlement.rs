@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod common;
-use common::pocc::{PRICE_PER_TOKEN, Pocc, address, key};
+use common::pocc::{PRICE_PER_TOKEN, Pocc, address, key, wait_epoch_over};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 const CLIENT_BALANCE: u64 = 10_000;
@@ -35,6 +35,15 @@ fn start_with(
     client: &str,
     extra: &[(&str, u64)],
 ) -> MirasetNode<MemKVStore, ChannelNetwork> {
+    start_params(pocc, client, extra, &pocc.params())
+}
+
+fn start_params(
+    pocc: &Pocc,
+    client: &str,
+    extra: &[(&str, u64)],
+    params: &miraset_chain::core::types::ProtocolParams,
+) -> MirasetNode<MemKVStore, ChannelNetwork> {
     let validator = key(150);
     let vk = validator.verifying_key();
     let kv = MemKVStore::new();
@@ -42,9 +51,26 @@ fn start_with(
     let mut accounts: Vec<(&str, u64)> = parties.iter().map(|(a, b)| (a.as_str(), *b)).collect();
     accounts.push((client, CLIENT_BALANCE));
     accounts.extend_from_slice(extra);
-    init_genesis_with_params(kv.clone(), 1337, &[(vk, 1)], &accounts, &pocc.params());
+    init_genesis_with_params(kv.clone(), 1337, &[(vk, 1)], &accounts, params);
     let network = ChannelNetwork::new(vk, ChannelNetworkHub::new());
     MirasetNode::start(NodeConfig::devnet(validator), kv, network, Mempool::new())
+}
+
+/// The client allows the fixture coordinator to charge it `amount` (its nonce 0).
+fn allow(
+    node: &MirasetNode<MemKVStore, ChannelNetwork>,
+    pocc: &Pocc,
+    client: &SigningKey,
+    amount: u64,
+) {
+    assert!(
+        node.submit_transaction(pocc.allow(client, 0, amount))
+            .is_ok()
+    );
+    let coordinator = address(&pocc.coordinator);
+    wait("allowance", || {
+        node.allowance(&address(client), &coordinator) == amount
+    });
 }
 
 #[test]
@@ -56,6 +82,7 @@ fn test_only_authorized_paid_worker_signed_receipts_settle() {
     wait("worker registered", || {
         node.get_worker(&pocc.worker_id).is_some()
     });
+    allow(&node, &pocc, &key(151), 2 * TOKENS * PRICE_PER_TOKEN);
     let owner_before = node.get_account(&pocc.owner_address()).unwrap().balance;
 
     let mempool = node.mempool();
@@ -95,6 +122,8 @@ fn test_only_authorized_paid_worker_signed_receipts_settle() {
     pocc.sign(&mut unconfirmed);
     insert(unconfirmed);
     insert(pocc.receipt("wash-trade", &pocc.owner_address(), TOKENS));
+    // Beyond what the client allowed (the allowance covers two valid receipts' cost).
+    insert(pocc.receipt("over-allowance", &client, 3 * TOKENS));
     // The valid one.
     insert(pocc.receipt("valid", &client, TOKENS));
 
@@ -115,6 +144,7 @@ fn test_only_authorized_paid_worker_signed_receipts_settle() {
         "no-client",
         "unconfirmed",
         "wash-trade",
+        "over-allowance",
     ] {
         assert!(!node.is_task_settled(task), "{task} settled");
     }
@@ -123,12 +153,14 @@ fn test_only_authorized_paid_worker_signed_receipts_settle() {
         "no worker is created by a receipt"
     );
 
-    // Exactly one job paid: tokens × price from the client to the worker's owner.
+    // Exactly one job paid: tokens × price from the client (minus its allowance fee) to the
+    // worker's owner, out of the client's allowance.
     let cost = TOKENS * PRICE_PER_TOKEN;
     assert_eq!(
         node.get_account(&client).unwrap().balance,
-        CLIENT_BALANCE - cost
+        CLIENT_BALANCE - 1 - cost
     );
+    assert_eq!(node.allowance(&client, &address(&pocc.coordinator)), cost);
     assert_eq!(
         node.get_account(&pocc.owner_address()).unwrap().balance,
         owner_before + cost
@@ -148,6 +180,7 @@ fn test_a_settled_task_is_never_paid_twice() {
     wait("worker registered", || {
         node.get_worker(&pocc.worker_id).is_some()
     });
+    allow(&node, &pocc, &key(152), 1_000);
 
     // Two differently priced receipts for one task in the same mempool, and a third after the
     // first settles: one payment only.
@@ -170,7 +203,7 @@ fn test_a_settled_task_is_never_paid_twice() {
 
     assert_eq!(
         node.get_account(&client).unwrap().balance,
-        CLIENT_BALANCE - TOKENS * PRICE_PER_TOKEN
+        CLIENT_BALANCE - 1 - TOKENS * PRICE_PER_TOKEN
     );
     assert_eq!(node.get_worker(&pocc.worker_id).unwrap().completed_tasks, 1);
     assert_eq!(mempool.receipt_count(), 0, "the replay was evicted");
@@ -206,7 +239,8 @@ fn test_rewards_are_minted_only_by_governance_once_per_epoch() {
     assert_eq!(epoch.epoch_id, 0);
 
     // Governance closes epoch 0 with no tokens (its nonce 0 is unused: the wrong-epoch close
-    // failed): nothing is paid, the whole budget rolls over.
+    // failed) once it has lasted EPOCH_SECONDS: nothing is paid, the whole budget rolls over.
+    wait_epoch_over(&node);
     assert!(node.submit_transaction(pocc.close_epoch(0, 0)).is_ok());
     wait("epoch 1", || {
         node.get_current_epoch().map(|e| e.epoch_id) == Some(1)
@@ -217,6 +251,91 @@ fn test_rewards_are_minted_only_by_governance_once_per_epoch() {
     assert_eq!(
         node.get_current_epoch().unwrap().reward_budget,
         2 * common::pocc::EPOCH_REWARD_BUDGET
+    );
+}
+
+/// Review H3: an epoch cannot close before `epoch_seconds` of block time — at admission, and in
+/// execution for a close inserted straight into the mempool.
+#[test]
+fn test_an_epoch_cannot_close_early() {
+    let pocc = Pocc::new("worker-early", 166);
+    let client = address(&key(156));
+    let params = miraset_chain::core::types::ProtocolParams {
+        epoch_seconds: 3_600,
+        ..pocc.params()
+    };
+    let node = start_params(&pocc, &client, &[], &params);
+    let early = pocc.close_epoch(0, 0);
+    assert!(node.submit_transaction(early.clone()).is_err());
+    assert!(node.mempool().insert_tx(early).is_ok());
+    let height = node.highest_committed_height().unwrap_or(0);
+    wait("blocks", || {
+        node.highest_committed_height().unwrap_or(0) >= height + 5
+    });
+    assert_eq!(node.get_current_epoch().unwrap().epoch_id, 0);
+    assert_eq!(node.mempool().tx_count(), 0, "the early close was evicted");
+    // Epoch 0 began at the first block's (real) time, not in 1970.
+    let started = node.get_current_epoch().unwrap().start_timestamp;
+    assert!(started > 1_700_000_000, "epoch 0 start {started}");
+}
+
+/// Review H2 (TODO 8.5.1): a coordinator can charge a client only what the client allowed.
+#[test]
+fn test_receipts_need_the_clients_allowance() {
+    let pocc = Pocc::new("worker-allowance", 167);
+    let client_key = key(157);
+    let client = address(&client_key);
+    let node = start(&pocc, &client);
+    assert!(node.submit_transaction(pocc.register(0)).is_ok());
+    wait("worker registered", || {
+        node.get_worker(&pocc.worker_id).is_some()
+    });
+
+    // No allowance: refused at admission and by execution.
+    let unallowed = pocc.receipt("no-allowance", &client, TOKENS);
+    assert!(node.submit_receipt(unallowed.clone()).is_err());
+    assert!(node.mempool().insert_receipt(unallowed).is_ok());
+    // An allowance for a key that is not a genesis coordinator is refused at admission.
+    let mut stray = pocc.allow(&client_key, 0, 1_000);
+    let mut action: miraset_chain::core::types::AllowanceAction =
+        serde_json::from_slice(&stray.payload).unwrap();
+    action.coordinator = address(&key(168));
+    stray.payload = action.to_bytes().unwrap();
+    stray.sign_with(&client_key);
+    assert!(node.submit_transaction(stray).is_err());
+
+    let height = node.highest_committed_height().unwrap();
+    wait("blocks", || {
+        node.highest_committed_height().unwrap() >= height + 5
+    });
+    assert!(!node.is_task_settled("no-allowance"));
+    assert_eq!(node.get_account(&client).unwrap().balance, CLIENT_BALANCE);
+
+    // Allowed, then revoked (0) before the receipt arrives: nothing is charged.
+    allow(&node, &pocc, &client_key, 1_000);
+    assert!(
+        node.submit_transaction(pocc.allow(&client_key, 1, 0))
+            .is_ok()
+    );
+    let coordinator = address(&pocc.coordinator);
+    wait("revoked", || node.allowance(&client, &coordinator) == 0);
+    assert!(
+        node.submit_receipt(pocc.receipt("after-revoke", &client, TOKENS))
+            .is_err()
+    );
+    assert!(
+        node.mempool()
+            .insert_receipt(pocc.receipt("after-revoke", &client, TOKENS))
+            .is_ok()
+    );
+    let height = node.highest_committed_height().unwrap();
+    wait("blocks", || {
+        node.highest_committed_height().unwrap() >= height + 5
+    });
+    assert!(!node.is_task_settled("after-revoke"));
+    assert_eq!(
+        node.get_account(&client).unwrap().balance,
+        CLIENT_BALANCE - 2
     );
 }
 
@@ -231,6 +350,7 @@ fn test_unbonded_workers_settle_nothing_and_earn_no_compute_reward() {
     wait("worker registered", || {
         node.get_worker(&pocc.worker_id).is_some()
     });
+    allow(&node, &pocc, &key(155), 1_000);
     assert!(
         node.submit_receipt(pocc.receipt("before-unbond", &client, TOKENS))
             .is_ok()
@@ -266,6 +386,7 @@ fn test_unbonded_workers_settle_nothing_and_earn_no_compute_reward() {
     });
     assert!(!node.is_task_settled("after-unbond"));
 
+    wait_epoch_over(&node);
     let owner_before = node.get_account(&pocc.owner_address()).unwrap().balance;
     assert!(node.submit_transaction(pocc.close_epoch(0, 0)).is_ok());
     wait("epoch 1", || {

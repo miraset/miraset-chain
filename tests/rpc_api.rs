@@ -22,6 +22,15 @@ fn payer() -> SigningKey {
     SigningKey::from_bytes(&[21u8; 32])
 }
 
+/// Funded client that has allowed the fixture coordinator to charge it.
+fn client() -> SigningKey {
+    SigningKey::from_bytes(&[24u8; 32])
+}
+
+fn client_address() -> String {
+    address(&client())
+}
+
 fn coordinator() -> SigningKey {
     SigningKey::from_bytes(&[22u8; 32])
 }
@@ -68,7 +77,9 @@ fn setup_test_node() -> (Arc<MirasetNode<MemKVStore, ChannelNetwork>>, u64) {
 
     let pocc = Pocc::default();
     let parties = pocc.genesis_accounts();
+    let client_addr = client_address();
     let mut initial_accounts = initial_accounts;
+    initial_accounts.push((client_addr.as_str(), 5_000));
     initial_accounts.extend(parties.iter().map(|(a, b)| (a.as_str(), *b)));
     init_genesis_with_params(
         kv_store.clone(),
@@ -86,10 +97,18 @@ fn setup_test_node() -> (Arc<MirasetNode<MemKVStore, ChannelNetwork>>, u64) {
     // Receipts need a registered, bonded worker (TODO 8.5.1).
     assert!(node.submit_transaction(pocc.register(0)).is_ok());
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while node.get_worker(&pocc.worker_id).is_none() {
+    // And a client that allowed the coordinator to charge it.
+    assert!(
+        node.submit_transaction(pocc.allow(&client(), 0, 5_000))
+            .is_ok()
+    );
+    let coordinator = common::pocc::address(&pocc.coordinator);
+    while node.get_worker(&pocc.worker_id).is_none()
+        || node.allowance(&client_address(), &coordinator) == 0
+    {
         assert!(
             std::time::Instant::now() < deadline,
-            "worker not registered"
+            "worker or allowance not committed"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
@@ -224,7 +243,7 @@ async fn test_rpc_tx_and_receipt_submission() {
     );
 
     // Coordinator-signed receipt with a funded client is admitted; again conflicts.
-    let receipt = signed_receipt("task_rpc_101", "alice");
+    let receipt = signed_receipt("task_rpc_101", &client_address());
     assert_eq!(
         post(&app, "/v1/receipts", &receipt).await,
         StatusCode::ACCEPTED
@@ -380,7 +399,7 @@ async fn test_rpc_rejects_replayed_nonce_and_settled_task() {
         post(
             &app,
             "/v1/receipts",
-            &signed_receipt("task-replay", "alice")
+            &signed_receipt("task-replay", &client_address())
         )
         .await,
         StatusCode::ACCEPTED
@@ -399,7 +418,7 @@ async fn test_rpc_rejects_replayed_nonce_and_settled_task() {
         StatusCode::CONFLICT
     );
     // A new receipt for a settled task (different worker reward) is a replay.
-    let replay = Pocc::default().receipt("task-replay", "alice", 60);
+    let replay = Pocc::default().receipt("task-replay", &client_address(), 60);
     assert_eq!(
         post(&app, "/v1/receipts", &replay).await,
         StatusCode::CONFLICT
@@ -784,4 +803,18 @@ async fn test_protocol_params_are_readable() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resp.data.unwrap(), Pocc::default().params());
     assert!(resp.meta.is_some());
+}
+
+#[tokio::test]
+async fn test_allowances_are_readable() {
+    let (node, chain_id) = setup_test_node();
+    let app = create_router(RpcState { node, chain_id });
+    let coordinator = common::pocc::address(&Pocc::default().coordinator);
+    let (status, resp) = get_json::<miraset_chain::rpc::AllowanceResponse>(
+        &app,
+        &format!("/v1/allowances/{}/{coordinator}", client_address()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp.data.unwrap().remaining, 5_000);
 }

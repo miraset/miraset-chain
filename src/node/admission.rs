@@ -8,8 +8,8 @@
 //! block production re-checks everything on top of its parent and evicts what fails.
 
 use crate::core::types::{
-    AccountState, ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
-    WorkerInfo,
+    AccountState, AllowanceAction, ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction,
+    WorkerBondAction, WorkerInfo,
 };
 use crate::mempool::InsertError;
 
@@ -93,12 +93,39 @@ pub fn check_transaction(
 pub fn check_system_transaction(
     tx: &Transaction,
     params: &ProtocolParams,
+    epoch_may_close: bool,
 ) -> Result<(), AdmissionError> {
     match tx.recipient.as_str() {
+        "system:allowance" => {
+            if tx.amount != 0 {
+                return Err(AdmissionError::Invalid("allowance carries no amount"));
+            }
+            let action: AllowanceAction = serde_json::from_slice(&tx.payload)
+                .map_err(|_| AdmissionError::Invalid("malformed allowance"))?;
+            if !params.is_coordinator(&action.coordinator) {
+                return Err(AdmissionError::Invalid(
+                    "allowance is only for genesis coordinators",
+                ));
+            }
+            let key: Option<[u8; 32]> = hex::decode(&action.coordinator)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok());
+            match key.map(|k| ed25519_dalek::VerifyingKey::from_bytes(&k)) {
+                Some(Ok(_)) => Ok(()),
+                _ => Err(AdmissionError::Invalid(
+                    "allowance coordinator is not a public key",
+                )),
+            }
+        }
         "system:epoch_manager" => {
             if !params.is_governance(&tx.sender) {
                 return Err(AdmissionError::Invalid(
                     "only governance may close an epoch",
+                ));
+            }
+            if !epoch_may_close {
+                return Err(AdmissionError::Invalid(
+                    "the epoch has not lasted epoch_seconds of block time",
                 ));
             }
             if tx.amount != 0 || tx.payload.len() != 8 {
@@ -141,6 +168,8 @@ pub struct ReceiptContext<'a> {
     pub worker: Option<&'a WorkerInfo>,
     /// The committed client account the receipt names, if it exists.
     pub client: Option<&'a AccountState>,
+    /// What the client has allowed the receipt's coordinator to charge it (committed).
+    pub allowance: u64,
 }
 
 /// Check a compute receipt against the settlement rules (TODO 8.5.1, see `ComputeReceipt`):
@@ -195,6 +224,11 @@ pub fn check_receipt(
     if receipt.client_cost != cost || receipt.worker_reward != cost {
         return Err(AdmissionError::Invalid(
             "client_cost and worker_reward must equal tokens x price_per_token",
+        ));
+    }
+    if cost > ctx.allowance {
+        return Err(AdmissionError::Invalid(
+            "client has not allowed this coordinator to charge the cost",
         ));
     }
     if cost > ctx.client.map_or(0, |account| account.balance) {
@@ -293,6 +327,7 @@ mod tests {
                 task_settled: settled,
                 worker,
                 client,
+                allowance: client.map_or(0, |c| c.balance),
             },
         )
     }
@@ -475,7 +510,7 @@ mod tests {
             .map(|p| (amount, p))
             .unwrap()
         };
-        let ok = |t: &Transaction| check_system_transaction(t, &params).is_ok();
+        let ok = |t: &Transaction| check_system_transaction(t, &params, true).is_ok();
 
         assert!(ok(&tx(
             &governance,
@@ -543,5 +578,59 @@ mod tests {
             check(&resign(upper), false, Some(&w), Some(&funded)),
             Err(AdmissionError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn test_epoch_close_and_allowances_are_checked_at_admission() {
+        let governance = key(32);
+        let params = ProtocolParams {
+            governance: vec![address(&governance)],
+            coordinators: vec![address(&key(34))],
+            ..ProtocolParams::default()
+        };
+        let mut close = Transaction::new(address(&governance), 0, "system:epoch_manager", 0, 1);
+        close.payload = 0u64.to_be_bytes().to_vec();
+        assert!(
+            check_system_transaction(&close, &params, false).is_err(),
+            "epoch not over"
+        );
+        assert!(check_system_transaction(&close, &params, true).is_ok());
+
+        let allow = |coordinator: String, amount: u64| {
+            let mut tx = Transaction::new(address(&key(33)), 0, "system:allowance", amount, 1);
+            tx.payload = AllowanceAction {
+                coordinator,
+                amount: 50,
+            }
+            .to_bytes()
+            .unwrap();
+            check_system_transaction(&tx, &params, false)
+        };
+        assert!(allow(address(&key(34)), 0).is_ok());
+        assert!(
+            allow(address(&key(35)), 0).is_err(),
+            "not a genesis coordinator"
+        );
+        assert!(allow(address(&key(34)), 5).is_err(), "no amount attached");
+        assert!(allow("not-a-key".into(), 0).is_err());
+    }
+
+    #[test]
+    fn test_receipt_above_the_clients_allowance_is_invalid() {
+        let (w, funded) = (worker(), account(100, 0));
+        let params = params();
+        let ctx = |allowance| ReceiptContext {
+            params: &params,
+            task_settled: false,
+            worker: Some(&w),
+            client: Some(&funded),
+            allowance,
+        };
+        // Cost 10: an allowance of 9 is not enough, 10 is.
+        assert!(matches!(
+            check_receipt(&signed_receipt(), &ctx(9)),
+            Err(AdmissionError::Invalid(_))
+        ));
+        assert_eq!(check_receipt(&signed_receipt(), &ctx(10)), Ok(()));
     }
 }

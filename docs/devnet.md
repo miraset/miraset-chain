@@ -100,6 +100,12 @@ in [`docs/performance-baseline.md`](performance-baseline.md). No target is appro
   which mints the epoch reward), plus `price_per_token` and `epoch_reward_budget` (TODO 8.5.1,
   `GET /v1/params`). No validator mounts them; `loadgen` mounts the coordinator key read-only.
   A genesis without them settles no receipt and closes no epoch.
+- Blocks carry the proposer's clock (Unix ms). A validator refuses a live proposal stamped more
+  than 10 s ahead of or 60 s behind its own clock (logged as "refusing proposal: block timestamp
+  too far"), and any block not later than its parent, so validator clocks must be synchronised
+  (NTP) well within that; a validator with a skewed clock only follows through block sync. An epoch can be closed only `epoch_seconds` (3600) of
+  block time after it began. Receipt clients first allow the coordinator to charge them
+  (`system:allowance`, see `docs/rpc-v1.md`); `loadgen` does this for its run-scoped clients.
 - Key files must be regular files (symlinks are refused), owned by the process user, with no
   group or other access. Nodes also refuse keys that are not genesis validators, and a database
   created from a different genesis (accounts, protocol parameters or validator set).

@@ -314,6 +314,8 @@ async fn log_progress(tracker: Arc<Mutex<Tracker>>) {
 /// bond and registered before load starts (TODO 8.5.1).
 struct ReceiptWorkers {
     owners: Vec<SigningKey>,
+    /// One client account per stream (receipts are paid by it, out of its allowance).
+    clients: Vec<String>,
     price_per_token: u64,
 }
 
@@ -349,8 +351,36 @@ async fn prepare_receipt_workers(
         .map(|(i, owner)| (owner.clone(), workload::worker_id(config.run_id, i)))
         .collect();
     driver::register_workers(client, observer_url, &registrations, FUNDING_TIMEOUT).await?;
+
+    // Receipt clients: funded like senders, each allowing the coordinator its whole balance.
+    let Some(coordinator) = &config.coordinator else {
+        return Err(LoadError::Config("receipts need a genesis coordinator key"));
+    };
+    let client_keys: Vec<SigningKey> = (0..config.rpc_urls.len())
+        .map(|i| workload::derive_key(config.run_id, "client", i))
+        .collect();
+    let clients: Vec<String> = client_keys.iter().map(workload::address).collect();
+    driver::fund(
+        client,
+        observer_url,
+        &config.faucet,
+        &clients,
+        config.fund_amount,
+        FUNDING_TIMEOUT,
+    )
+    .await?;
+    driver::set_allowances(
+        client,
+        observer_url,
+        &client_keys,
+        &workload::address(coordinator),
+        config.fund_amount,
+        FUNDING_TIMEOUT,
+    )
+    .await?;
     Ok(Some(ReceiptWorkers {
         owners,
+        clients,
         price_per_token: params.price_per_token,
     }))
 }
@@ -406,7 +436,7 @@ fn spawn_generators(
                 coordinator: coordinator.clone(),
                 worker_owner: workers.owners[index].clone(),
                 price_per_token: workers.price_per_token,
-                clients: senders.to_vec(),
+                clients: vec![workers.clients[index].clone()],
                 worker_id: workload::worker_id(config.run_id, index),
             };
             set.spawn(driver::run_receipts(

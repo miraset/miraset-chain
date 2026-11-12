@@ -9,9 +9,10 @@ use super::http::{HttpError, RpcClient};
 use super::tracker::{Kind, Tracker, lock};
 use super::workload::{self, TRANSFER_AMOUNT, TRANSFER_FEE};
 use crate::core::types::{
-    AccountState, ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
+    AccountState, AllowanceAction, ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction,
+    WorkerBondAction,
 };
-use crate::rpc::{ApiResponse, TaskSettlementResponse};
+use crate::rpc::{AllowanceResponse, ApiResponse, TaskSettlementResponse};
 use ed25519_dalek::SigningKey;
 use hyper::StatusCode;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -152,7 +153,7 @@ pub struct ReceiptStream {
     /// Owner key of this stream's registered worker; signs every receipt as the worker.
     pub worker_owner: SigningKey,
     pub price_per_token: u64,
-    /// Funded client accounts, used in turn.
+    /// Funded client accounts that allowed the coordinator to charge them, used in turn.
     pub clients: Vec<String>,
     pub worker_id: String,
 }
@@ -244,6 +245,64 @@ pub async fn protocol_params(
     response
         .data
         .ok_or_else(|| FundingError::Setup(format!("{url}: no data")))
+}
+
+/// Each client allows `coordinator` (hex) to charge it `amount` (each client's first
+/// transaction) and waits until all allowances are committed (TODO 8.5.1).
+pub async fn set_allowances(
+    client: &RpcClient,
+    node_url: &str,
+    clients: &[SigningKey],
+    coordinator: &str,
+    amount: u64,
+    timeout: Duration,
+) -> Result<(), FundingError> {
+    let submit = format!("{node_url}/v1/transactions");
+    for key in clients {
+        let action = AllowanceAction {
+            coordinator: coordinator.to_string(),
+            amount,
+        };
+        let mut tx = Transaction::new(
+            workload::address(key),
+            0,
+            "system:allowance",
+            0,
+            TRANSFER_FEE,
+        );
+        tx.payload = action
+            .to_bytes()
+            .map_err(|e| FundingError::Setup(e.to_string()))?;
+        tx.sign_with(key);
+        match client.post_json(&submit, &tx).await {
+            Ok(status) if status.is_success() => {}
+            Ok(status) => {
+                return Err(FundingError::Setup(format!("allowance: status {status}")));
+            }
+            Err(e) => return Err(FundingError::Setup(format!("allowance: {e}"))),
+        }
+    }
+    let deadline = Instant::now() + timeout;
+    for key in clients {
+        let url = format!(
+            "{node_url}/v1/allowances/{}/{coordinator}",
+            workload::address(key)
+        );
+        loop {
+            let response: Option<ApiResponse<AllowanceResponse>> = client.get_json(&url).await.ok();
+            if response
+                .and_then(|r| r.data)
+                .is_some_and(|a| a.remaining == amount)
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(FundingError::Timeout(timeout));
+            }
+            tokio::time::sleep(FUNDING_POLL).await;
+        }
+    }
+    Ok(())
 }
 
 /// Register one worker per `(owner key, worker id)` with the minimum bond (each owner's first

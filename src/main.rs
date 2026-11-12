@@ -5,7 +5,7 @@ use miraset_chain::consensus::{
     GuardIdentity, GuardedNetwork, GuardedSigner, OpenMode, SafetyHalt, SigningGuard,
 };
 use miraset_chain::core::types::{
-    ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
+    AllowanceAction, ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
 };
 use miraset_chain::devnet::{self, DevnetSpec};
 use miraset_chain::mempool::Mempool;
@@ -891,8 +891,23 @@ async fn run_devnet_demo() {
     bond_tx.sign_with(&worker_owner_key);
     node.submit_transaction(bond_tx)
         .expect("Worker registration failed");
+    // Alice allows the coordinator to charge her up to 1 000 (her nonce 1; nonce 0 was the
+    // transfer above).
+    let mut allow = Transaction::new(&alice_addr, 1, "system:allowance", 0, 10);
+    allow.payload = AllowanceAction {
+        coordinator: hex::encode(coordinator_key.verifying_key().to_bytes()),
+        amount: 1_000,
+    }
+    .to_bytes()
+    .expect("allowance payload");
+    allow.sign_with(&alice_key);
+    node.submit_transaction(allow)
+        .expect("Allowance submission failed");
+    let coordinator_hex = hex::encode(coordinator_key.verifying_key().to_bytes());
     for _ in 0..100 {
-        if node.get_worker("worker_4090").is_some() {
+        if node.get_worker("worker_4090").is_some()
+            && node.allowance(&alice_addr, &coordinator_hex) > 0
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

@@ -121,6 +121,8 @@ fn test_greedy_selection_keeps_valid_candidates_and_skips_invalid_ones() {
     // whose client did not confirm delivery.
     let pocc = Pocc::default();
     assert!(mempool.insert_tx(pocc.register(0)).is_ok());
+    // Alice's nonce 5 allows the coordinator to charge her (applied before receipts).
+    assert!(mempool.insert_tx(pocc.allow(&alice, 5, 1_000)).is_ok());
     let settled = pocc.receipt("task-ok", &alice_addr, 5);
     let mut unconfirmed = pocc.receipt("task-unconfirmed", &alice_addr, 5);
     unconfirmed.client_confirmed = false;
@@ -136,7 +138,7 @@ fn test_greedy_selection_keeps_valid_candidates_and_skips_invalid_ones() {
     let node = start(&accounts, mempool);
     wait(FULL_MEMPOOL_DEADLINE, "valid candidates committed", || {
         node.is_task_settled("task-ok")
-            && node.get_account(&alice_addr).map(|a| a.nonce) == Some(5)
+            && node.get_account(&alice_addr).map(|a| a.nonce) == Some(6)
             && node.get_account(&dave_addr).map(|a| a.nonce) == Some(1)
     });
     // A few more blocks: the invalid candidates must still not apply.
@@ -147,7 +149,7 @@ fn test_greedy_selection_keeps_valid_candidates_and_skips_invalid_ones() {
 
     assert_eq!(
         node.get_account(&alice_addr).unwrap().nonce,
-        5,
+        6,
         "gap kept out"
     );
     assert_eq!(

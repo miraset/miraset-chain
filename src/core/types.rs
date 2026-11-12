@@ -633,6 +633,22 @@ fn verify_ed25519(pubkey_hex: &str, signature_hex: &str, message: &[u8]) -> Resu
         .map_err(|_| ())
 }
 
+/// Payload of a transaction to `system:allowance` (TODO 8.5.1): the sender (a client account)
+/// sets how much `coordinator` may still charge it through receipts. Receipts spend the
+/// allowance; setting it again replaces the remainder (0 revokes).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AllowanceAction {
+    /// Coordinator public key (hex).
+    pub coordinator: String,
+    pub amount: u64,
+}
+
+impl AllowanceAction {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
+    }
+}
+
 /// Largest per-epoch reward budget a genesis may set (10^15 base units).
 pub const MAX_EPOCH_REWARD_BUDGET: u64 = 1_000_000_000_000_000;
 
@@ -653,6 +669,10 @@ pub struct ProtocolParams {
     /// epoch); undistributed amounts roll over to the next epoch.
     #[serde(default = "default_epoch_reward_budget")]
     pub epoch_reward_budget: u64,
+    /// Minimum epoch length in seconds of block time (REWARDS §2.1: 3600). An epoch can close
+    /// only this long after it began, so at most one reward budget is minted per period.
+    #[serde(default = "default_epoch_seconds")]
+    pub epoch_seconds: u64,
 }
 
 fn default_price_per_token() -> u64 {
@@ -663,6 +683,10 @@ fn default_epoch_reward_budget() -> u64 {
     6_944
 }
 
+fn default_epoch_seconds() -> u64 {
+    3_600
+}
+
 impl Default for ProtocolParams {
     fn default() -> Self {
         Self {
@@ -670,6 +694,7 @@ impl Default for ProtocolParams {
             governance: Vec::new(),
             price_per_token: default_price_per_token(),
             epoch_reward_budget: default_epoch_reward_budget(),
+            epoch_seconds: default_epoch_seconds(),
         }
     }
 }
@@ -695,6 +720,9 @@ impl ProtocolParams {
     pub fn validate(&self) -> Result<(), String> {
         if self.price_per_token == 0 {
             return Err("price_per_token must be positive".into());
+        }
+        if self.epoch_seconds == 0 {
+            return Err("epoch_seconds must be positive".into());
         }
         if self.epoch_reward_budget == 0 || self.epoch_reward_budget > MAX_EPOCH_REWARD_BUDGET {
             return Err(format!(
@@ -760,6 +788,10 @@ pub struct BlockPayload {
     /// Deterministic state commitment root over the candidate state updates produced by this block (PRD R04).
     #[serde(default)]
     pub state_root: [u8; 32],
+    /// Proposer's wall-clock time in Unix milliseconds (TODO 8.5.1). Strictly after the
+    /// parent's; validators also bound how far it may run ahead of their clock.
+    #[serde(default)]
+    pub timestamp_ms: u64,
 }
 
 impl Default for BlockPayload {
@@ -769,6 +801,7 @@ impl Default for BlockPayload {
             transactions: Vec::new(),
             compute_receipts: Vec::new(),
             state_root: [0u8; 32],
+            timestamp_ms: 0,
         }
     }
 }
@@ -780,7 +813,13 @@ impl BlockPayload {
             transactions,
             compute_receipts,
             state_root: [0u8; 32],
+            timestamp_ms: 0,
         }
+    }
+
+    pub fn with_timestamp_ms(mut self, timestamp_ms: u64) -> Self {
+        self.timestamp_ms = timestamp_ms;
+        self
     }
 
     pub fn with_state_root(mut self, state_root: [u8; 32]) -> Self {
@@ -797,6 +836,7 @@ impl BlockPayload {
         buf.extend_from_slice(BLOCK_MAGIC);
         buf.push(self.version);
         buf.extend_from_slice(&self.state_root);
+        buf.extend_from_slice(&self.timestamp_ms.to_be_bytes());
         buf.extend_from_slice(&(self.transactions.len() as u32).to_be_bytes());
         for tx in &self.transactions {
             let tx_bytes = tx.to_canonical_bytes()?;
@@ -827,6 +867,7 @@ impl BlockPayload {
         let mut state_root = [0u8; 32];
         state_root.copy_from_slice(&input[..32]);
         input = &input[32..];
+        let timestamp_ms = read_u64(&mut input)?;
         let tx_count = read_u32(&mut input)? as usize;
         if tx_count > 10_000 {
             return Err("block transaction count exceeds safety limit");
@@ -853,6 +894,7 @@ impl BlockPayload {
             transactions,
             compute_receipts,
             state_root,
+            timestamp_ms,
         })
     }
 

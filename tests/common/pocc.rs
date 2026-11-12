@@ -4,11 +4,13 @@
 
 use ed25519_dalek::SigningKey;
 use miraset_chain::core::types::{
-    ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
+    AllowanceAction, ComputeReceipt, MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction,
 };
 
 pub const PRICE_PER_TOKEN: u64 = 2;
 pub const EPOCH_REWARD_BUDGET: u64 = 6_944;
+/// Short epochs so tests can close one; production default is 3600.
+pub const EPOCH_SECONDS: u64 = 1;
 /// Fee on fixture transactions.
 pub const FEE: u64 = 1;
 
@@ -50,6 +52,7 @@ impl Pocc {
             governance: vec![address(&self.governance)],
             price_per_token: PRICE_PER_TOKEN,
             epoch_reward_budget: EPOCH_REWARD_BUDGET,
+            epoch_seconds: EPOCH_SECONDS,
         }
     }
 
@@ -116,6 +119,18 @@ impl Pocc {
         tx
     }
 
+    /// `client` allows the fixture coordinator to charge it up to `amount` (TODO 8.5.1).
+    pub fn allow(&self, client: &SigningKey, nonce: u64, amount: u64) -> Transaction {
+        let action = AllowanceAction {
+            coordinator: address(&self.coordinator),
+            amount,
+        };
+        let mut tx = Transaction::new(address(client), nonce, "system:allowance", 0, FEE);
+        tx.payload = action.to_bytes().unwrap();
+        tx.sign_with(client);
+        tx
+    }
+
     /// Governance closes `epoch_id`.
     pub fn close_epoch(&self, nonce: u64, epoch_id: u64) -> Transaction {
         self.governance_tx(
@@ -123,5 +138,21 @@ impl Pocc {
             "system:epoch_manager",
             epoch_id.to_be_bytes().to_vec(),
         )
+    }
+}
+
+/// Wait until the current epoch has lasted `EPOCH_SECONDS` of committed block time.
+pub fn wait_epoch_over<K, N>(node: &miraset_chain::node::MirasetNode<K, N>)
+where
+    K: hotstuff_rs::block_tree::pluggables::KVStore,
+    N: hotstuff_rs::networking::network::Network + 'static,
+{
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !node.epoch_may_close() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "epoch never became closable"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
