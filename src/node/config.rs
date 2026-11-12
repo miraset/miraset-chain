@@ -10,6 +10,8 @@ use crate::observability::DEFAULT_READY_MAX_COMMIT_AGE;
 
 /// Lower bound that leaves room for propose/vote round trips even on a local devnet.
 const MIN_MAX_VIEW_TIME: Duration = Duration::from_millis(100);
+/// Pacemaker epoch length (views); see [`NodeConfig::epoch_length`].
+pub const DEFAULT_EPOCH_LENGTH: u32 = 1;
 
 /// Configuration options for a MIRASET L1 node.
 ///
@@ -30,6 +32,13 @@ pub struct NodeConfig {
     pub block_sync_trigger_min_view_difference: u64,
     pub block_sync_trigger_timeout: Duration,
     pub progress_msg_buffer_capacity: u64,
+    /// Pacemaker epoch length in views. A consensus parameter: every validator must use the
+    /// same value. Views inside an epoch get absolute deadlines (epoch start + k ×
+    /// `max_view_time`), so a failed view waits out the slack earlier fast views saved, up to
+    /// `epoch_length × max_view_time`. 1 bounds that wait to about one view plus a timeout
+    /// certificate (owner decision 2026-11-12, TODO 8.5.2 F2; `tests/view_timing.rs`).
+    /// Nothing binds it to genesis yet: changing it is a flag-day upgrade of every validator,
+    /// since mixed values disagree on which views accept timeout certificates.
     pub epoch_length: u32,
     pub max_view_time: Duration,
     pub log_events: bool,
@@ -75,7 +84,7 @@ impl NodeConfig {
             block_sync_trigger_min_view_difference: 5,
             block_sync_trigger_timeout: Duration::from_secs(3),
             progress_msg_buffer_capacity: 1024 * 1024, // 1MB buffer
-            epoch_length: 10,
+            epoch_length: DEFAULT_EPOCH_LENGTH,
             max_view_time: Duration::from_millis(1000),
             log_events: false,
             expected_genesis_hash: None,

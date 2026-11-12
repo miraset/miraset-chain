@@ -4,7 +4,7 @@ pub mod genesis;
 pub mod runner;
 
 pub use admission::AdmissionError;
-pub use config::NodeConfig;
+pub use config::{DEFAULT_EPOCH_LENGTH, NodeConfig};
 pub use genesis::{GenesisAccount, GenesisConfig, GenesisValidator};
 pub use runner::{
     MirasetNode, genesis_state_commitment, genesis_state_commitment_with_params, init_genesis,

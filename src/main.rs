@@ -577,6 +577,8 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
         data_dir = %cli.data_dir.display(),
         p2p_addr = %cli.p2p_addr,
         rpc_addr = %cli.rpc_addr,
+        // Consensus parameters every validator must share (TODO 8.5.2 F2).
+        epoch_length = miraset_chain::node::DEFAULT_EPOCH_LENGTH,
         "starting MIRASET experimental/devnet validator (ADR-0016 Proposed)"
     );
 

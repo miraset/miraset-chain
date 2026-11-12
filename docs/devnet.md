@@ -187,6 +187,12 @@ taken before the restore), then restart. Restoring a backup taken at the current
 
 ## Known limitations
 
+- **Pacemaker epoch length is 1 (TODO 8.5.2 F2), compiled in and logged at startup
+  (`epoch_length=`).** It is a consensus parameter that nothing binds to genesis yet: validators
+  with different values disagree on which views accept timeout certificates, so upgrade all
+  validators at once (flag day), never as a rolling mix. Each timed-out view now needs a timeout
+  certificate and there is no timeout backoff, so views close to `max_view_time` (slow links,
+  large blocks) can time out repeatedly; the WAN re-measurement in 8.5.3 must include that case.
 - Each node uses roughly 0.2 CPU cores, mostly the consensus thread producing blocks. Upstream
   `hotstuff_rs` busy loops (event bus, block-sync server) are patched in `lib/hotstuff_rs`.
 - The validator set is static; reconfiguration is disabled (TODO 8.3.3).

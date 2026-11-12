@@ -143,6 +143,13 @@ Observed while building and running the measurement; none is fixed here.
     on LAN up to 400/s). The cause was not investigated here; candidates are view timeouts with
     backoff after a lost or late proposal, and block sync stalls. Needs a reproduction with
     consensus logs before any WAN finality target is discussed (8.5.2 review, 8.4.1 transport).
+    **Mechanism reproduced (2026-11-12, 8.5.2 F2; WAN confirmation pending in 8.5.3):** the pacemaker gives each view in an epoch an
+    absolute deadline (epoch start plus k × `max_view_time`), so a view that fails after fast
+    views waits out their saved slack, up to `epoch_length × max_view_time` = 10 s with the old
+    defaults (10 × 1 s), consistent with the measured 10.0–10.1 s maximum. `tests/view_timing.rs`
+    reproduces it in process (one of five validators crashed: longest gap 5.0 s with
+    `epoch_length` 10, 2.05 s with 1). Owner decision: `epoch_length` default is now 1. The WAN
+    rows above were measured with 10 and must be re-measured (8.5.3).
 
 ## What remains open for 8.5.3
 

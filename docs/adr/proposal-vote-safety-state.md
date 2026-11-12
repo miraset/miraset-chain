@@ -252,8 +252,10 @@ lock. Fixed as follows.
   (HIGH) the remote-signer fields are proto3 `optional` and required, so an older node without
   them gets an invalid-argument error instead of silently skipping the check; (MEDIUM) the
   guard's doc now says it enforces a necessary condition of `safe_pc`, not the full rule;
-  T3 now asserts zero below-lock refusals on its honest restart/wipe run (liveness evidence on
-  real vote sequences). Accepted: one `error!` log per refused view during a fail-closed stall
+  T3 now asserts zero below-lock refusals for the four validators that keep their chain data,
+  including the one restarted 20 times (liveness evidence on real vote sequences); the wiped
+  validator may refuse votes on proposals built on its stale highest certificate before it
+  catches up, which is the intended refusal. Accepted: one `error!` log per refused view during a fail-closed stall
   (about one per second with 1s views); no reset path by design (owner decision).
 - **Single validator (n = 1).** A lone validator whose chain data is wiped is the same case with
   f = 0: it refuses to rebuild from genesis and stays without commits until the chain data is

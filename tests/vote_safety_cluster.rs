@@ -417,9 +417,11 @@ fn test_restarts_and_single_wipe_never_equivocate() {
         .keys()
         .any(|(signer, _)| *signer == RESTARTED);
     assert!(restarted_voted, "restarted validator never voted");
-    // Liveness of the lock floor (TODO 8.5.2): honest replicas that keep their chain data, and
-    // one wiped replica pulled forward by its peers, never build on a certificate below it.
-    for i in 0..VALIDATORS {
+    // Liveness of the lock floor (TODO 8.5.2): replicas that keep their chain data (restarted
+    // or not) never get an honest vote refused below their floor. The wiped replica may: until
+    // it catches up it can see (or, as leader, make) proposals built on its stale highest
+    // certificate, which is exactly what the floor exists to refuse.
+    for i in (0..VALIDATORS).filter(|&i| i != WIPED) {
         let running = cluster.nodes[i].as_ref().expect("node running");
         assert_eq!(
             running.signer.below_lock_refused(),
