@@ -82,17 +82,26 @@ impl<N: Network> HotStuff<N> {
     /// MIRASET PATCH #9: sign a phase vote for the current view through the validator signer.
     /// `Ok(None)` when the signer refuses on purpose (e.g. slashing protection); a signer
     /// failure is an error.
-    fn sign_phase_vote(
+    ///
+    /// MIRASET PATCH #11: `justify` is the certificate the vote builds on. Its view and the
+    /// replica's lock (after `block_tree.update(justify)`) go to the signer so it can keep a
+    /// durable lock floor outside the chain database (TODO 8.5.2).
+    fn sign_phase_vote<K: KVStore>(
         &self,
         block: CryptoHash,
         phase: Phase,
+        justify: &super::types::PhaseCertificate,
+        block_tree: &BlockTreeSingleton<K>,
     ) -> Result<Option<PhaseVote>, HotStuffError> {
+        let locked_view = block_tree.locked_pc()?.view;
         match PhaseVote::new(
             &self.config.keypair,
             self.config.chain_id,
             self.view_info.view,
             block,
             phase,
+            justify.view,
+            locked_view,
         ) {
             Ok(vote) => Ok(Some(vote)),
             Err(SignError::Refused(_)) => Ok(None),
@@ -449,7 +458,12 @@ impl<N: Network> HotStuff<N> {
 
                 // MIRASET PATCH #9: sign through the validator signer; a refusal (e.g. slashing
                 // protection) means this replica does not vote in this view.
-                if let Some(phase_vote) = self.sign_phase_vote(proposal.block.hash, vote_phase)? {
+                if let Some(phase_vote) = self.sign_phase_vote(
+                    proposal.block.hash,
+                    vote_phase,
+                    &proposal.block.justify,
+                    block_tree,
+                )? {
                     let vote_recipient = phase_vote_recipient(&phase_vote, &validator_set_state);
                     // MIRASET PATCH #7: durably record the vote before it can leave the replica
                     // (vote safety, TODO 8.3.2). Upstream sent first and recorded afterwards.
@@ -556,7 +570,9 @@ impl<N: Network> HotStuff<N> {
             };
 
             // MIRASET PATCH #9: sign through the validator signer; a refusal means no vote.
-            if let Some(vote) = self.sign_phase_vote(nudge.justify.block, vote_phase)? {
+            if let Some(vote) =
+                self.sign_phase_vote(nudge.justify.block, vote_phase, &nudge.justify, block_tree)?
+            {
                 let vote_recipient = phase_vote_recipient(&vote, &validator_set_state);
                 // MIRASET PATCH #7: durably record the vote before it can leave the replica
                 // (vote safety, TODO 8.3.2). Upstream sent first and recorded afterwards.

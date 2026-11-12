@@ -9,5 +9,6 @@ pub use guarded_network::GuardedNetwork;
 pub use safety_halt::SafetyHalt;
 pub use signer::GuardedSigner;
 pub use signing_guard::{
-    Authorization, GuardIdentity, OpenMode, SigningGuard, SigningGuardError, VoteRecord,
+    Authorization, GuardIdentity, LockContext, OpenMode, SigningGuard, SigningGuardError,
+    VoteRecord,
 };

@@ -93,38 +93,53 @@ fn test_e2e_validator_process_is_hardened() {
     }
 }
 
+/// A lone validator (n = 1, so f = 0) whose chain data is wiped while its guard is kept: a fresh
+/// chain from genesis would finalize different blocks at heights it already finalized. Its guard
+/// refuses those votes, first as stale views and then below its lock floor (TODO 8.5.2; owner
+/// decision 2026-11-12: fail closed), without halting. Bringing the chain data back recovers it.
 #[test]
-fn test_e2e_wiped_chain_data_with_guard_kept_recovers_without_resigning() {
+fn test_e2e_wiped_chain_data_with_guard_kept_refuses_fork_until_data_is_back() {
     let mut v = Validator::init();
     let first = v.start(&[]);
     wait_healthy_with_height(&v, &first, MIN_HEIGHT_BEFORE_CRASH, STARTUP_TIMEOUT);
     first.kill();
+    let backup = v.data_dir().with_extension("chain-backup");
+    fs::copy(v.chain_file(), &backup).expect("copy chain data");
     fs::remove_file(v.chain_file()).expect("wipe chain data");
 
-    let second = v.start(&[]);
-    let guard_view = last_signed_view(&{
-        let mut text = String::new();
-        wait_for("startup banner", STARTUP_TIMEOUT, &second, || {
-            text = second.log_text();
-            text.contains("last signed view")
-        });
-        text
-    })
-    .expect("guard record kept across the wipe");
+    let wiped = v.start(&[]);
+    let mut banner = String::new();
+    wait_for("startup banner", STARTUP_TIMEOUT, &wiped, || {
+        banner = wiped.log_text();
+        banner.contains("last signed view")
+    });
+    let guard_view = last_signed_view(&banner).expect("guard record kept across the wipe");
     assert!(guard_view > 0);
 
-    // The fresh chain restarts from genesis: old views are refused until views pass the guard
-    // record, then the validator votes and finalizes again.
-    wait_healthy_with_height(&v, &second, 1, RECOVERY_TIMEOUT);
-    let log = second.log_text();
-    assert!(
-        log.contains("stale phase vote"),
-        "guard should refuse votes for old views; log:\n{log}"
+    wait_for(
+        "vote refused below the lock floor",
+        RECOVERY_TIMEOUT,
+        &wiped,
+        || wiped.log_text().contains("below lock floor"),
     );
+    let log = wiped.log_text();
     assert!(!log.contains("SAFETY HALT"), "{log}");
     assert_eq!(
         health(v.rpc).map(|(code, _)| code),
         Some(200),
-        "stale refusals must not halt"
+        "guard refusals must not halt"
     );
+    assert_eq!(
+        latest_height(v.rpc).unwrap_or(0),
+        0,
+        "the wiped validator finalized a fork of its own history"
+    );
+    wiped.kill();
+
+    // Recovery: put the chain data back; the validator continues its own history.
+    fs::copy(&backup, v.chain_file()).expect("restore chain data");
+    let restored = v.start(&[]);
+    wait_healthy_with_height(&v, &restored, MIN_HEIGHT_BEFORE_CRASH + 1, RECOVERY_TIMEOUT);
+    let log = restored.log_text();
+    assert!(!log.contains("SAFETY HALT"), "{log}");
 }

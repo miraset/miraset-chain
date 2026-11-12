@@ -25,11 +25,20 @@ use crate::types::data_types::{BlockHeight, ChainID, CryptoHash, SignatureBytes,
 #[derive(Clone, PartialEq, Eq)]
 pub enum SignRequest {
     /// A HotStuff phase vote: the safety-critical signature (at most one per view).
+    ///
+    /// `justify_view` and `locked_view` are **context, not signed content** (MIRASET TODO 8.5.2):
+    /// the view of the certificate the vote builds on (the proposed block's `justify`, or the
+    /// nudge's `justify`) and the replica's locked certificate view after processing it. A signer
+    /// can keep its own durable lock floor from them and refuse a vote whose `justify_view` is
+    /// below a lock it held before, even if the chain database (and with it the replica's lock)
+    /// was wiped or restored.
     PhaseVote {
         chain_id: ChainID,
         view: ViewNumber,
         block: CryptoHash,
         phase: Phase,
+        justify_view: ViewNumber,
+        locked_view: ViewNumber,
     },
     /// A pacemaker timeout vote. Deterministic Ed25519 makes re-signing byte-identical.
     TimeoutVote { chain_id: ChainID, view: ViewNumber },
@@ -49,6 +58,7 @@ impl SignRequest {
                 view,
                 block,
                 phase,
+                ..
             } => (*chain_id, *view, *block, *phase).try_to_vec(),
             SignRequest::TimeoutVote { chain_id, view } => (*chain_id, *view).try_to_vec(),
             SignRequest::AdvertiseBlock {

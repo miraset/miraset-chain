@@ -24,6 +24,8 @@ fn requests() -> Vec<(SignRequest, Vec<u8>)> {
                 view,
                 block,
                 phase: Phase::Precommit,
+                justify_view: ViewNumber::new(41),
+                locked_view: ViewNumber::new(40),
             },
             (CHAIN, view, block, Phase::Precommit).try_to_vec().unwrap(),
         ),
@@ -83,6 +85,8 @@ fn test_message_constructors_propagate_signer_errors() {
         ViewNumber::new(1),
         CryptoHash::new([0u8; 32]),
         Phase::Generic,
+        ViewNumber::new(0),
+        ViewNumber::new(0),
     );
     assert!(matches!(vote, Err(SignError::Refused(_))));
     let timeout = PacemakerMessage::timeout_vote(&keypair, CHAIN, ViewNumber::new(1), None);
@@ -98,6 +102,8 @@ fn test_phase_vote_built_through_signer_verifies() {
         ViewNumber::new(5),
         CryptoHash::new([1u8; 32]),
         Phase::Generic,
+        ViewNumber::new(4),
+        ViewNumber::new(3),
     )
     .unwrap();
     let signature = ed25519_dalek::Signature::from_bytes(&vote.signature.bytes());
@@ -110,4 +116,23 @@ fn test_phase_vote_built_through_signer_verifies() {
         .try_to_vec()
         .unwrap();
     assert!(key().verifying_key().verify(&bytes, &signature).is_ok());
+}
+
+/// MIRASET PATCH #11: the lock context is not signed, so votes stay byte-identical to upstream.
+#[test]
+fn test_phase_vote_lock_context_is_not_signed() {
+    let request = |justify_view, locked_view| SignRequest::PhaseVote {
+        chain_id: CHAIN,
+        view: ViewNumber::new(9),
+        block: CryptoHash::new([2u8; 32]),
+        phase: Phase::Generic,
+        justify_view: ViewNumber::new(justify_view),
+        locked_view: ViewNumber::new(locked_view),
+    };
+    assert_eq!(request(8, 7).signing_bytes(), request(0, 0).signing_bytes());
+    let signer = LocalKeySigner::new(key());
+    assert_eq!(
+        signer.sign(&request(8, 7)).unwrap().bytes(),
+        signer.sign(&request(1, 0)).unwrap().bytes()
+    );
 }

@@ -36,6 +36,7 @@ impl VoteGuardLayer {
 pub struct VoteRefusals {
     stale: AtomicU64,
     conflicting: AtomicU64,
+    below_lock: AtomicU64,
 }
 
 impl VoteRefusals {
@@ -49,12 +50,21 @@ impl VoteRefusals {
         self.conflicting.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A vote building on a certificate below the guard's lock floor (TODO 8.5.2).
+    pub fn record_below_lock(&self) {
+        self.below_lock.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn stale(&self) -> u64 {
         self.stale.load(Ordering::Relaxed)
     }
 
     pub fn conflicting(&self) -> u64 {
         self.conflicting.load(Ordering::Relaxed)
+    }
+
+    pub fn below_lock(&self) -> u64 {
+        self.below_lock.load(Ordering::Relaxed)
     }
 }
 
@@ -68,7 +78,15 @@ mod tests {
         refusals.record_stale();
         refusals.record_stale();
         refusals.record_conflicting();
-        assert_eq!((refusals.stale(), refusals.conflicting()), (2, 1));
+        refusals.record_below_lock();
+        assert_eq!(
+            (
+                refusals.stale(),
+                refusals.conflicting(),
+                refusals.below_lock()
+            ),
+            (2, 1, 1)
+        );
     }
 
     #[test]

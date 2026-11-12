@@ -90,6 +90,26 @@ impl<N: Network> GuardedNetwork<N> {
                 );
                 false
             }
+            Ok(Authorization::BelowLock {
+                justify_view,
+                lock_floor,
+            }) => {
+                // Not produced without lock context; handled for exhaustiveness.
+                self.refusals.record_below_lock();
+                tracing::error!(
+                    target: crate::observability::logging::SAFETY_LOG_TARGET,
+                    "signing guard: dropped phase vote building on view {justify_view} below lock floor {lock_floor}"
+                );
+                false
+            }
+            Ok(Authorization::InvalidLockContext { view }) => {
+                // Not produced without lock context; handled for exhaustiveness.
+                tracing::error!(
+                    target: crate::observability::logging::SAFETY_LOG_TARGET,
+                    "signing guard: dropped phase vote for view {view}: invalid lock context"
+                );
+                false
+            }
             Err(err) => {
                 self.halt.trigger(format!("signing guard: {err}"));
                 false

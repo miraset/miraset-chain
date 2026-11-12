@@ -54,6 +54,9 @@ const FEE: u64 = 10;
 const MIN_RUN_MS: u64 = 150;
 const RUN_SPREAD_MS: u64 = 1_000;
 const SEED: u64 = 0x5eed_8332;
+/// How long the restored cluster is watched for a fork once every validator is held back by
+/// its lock floor (20 views).
+const RESTORE_STALL_WINDOW: Duration = Duration::from_secs(10);
 
 /// Every phase vote that left any validator: (signer, view) -> distinct (block, phase).
 type VoteLog = Arc<Mutex<HashMap<(usize, u64), HashSet<([u8; 32], Phase)>>>>;
@@ -140,7 +143,7 @@ fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> bool {
     true
 }
 
-/// Retry while a just-stopped replica still releases its file lock.
+/// Retry while a just-stopped replica still releases its file lock or listener.
 fn retry_open<T, E: std::fmt::Display>(what: &Path, mut open: impl FnMut() -> Result<T, E>) -> T {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -217,8 +220,11 @@ impl Cluster {
             .zip(&self.addrs)
             .map(|(k, a)| (k.verifying_key(), a.to_string()))
             .collect();
-        let (tcp, runtime) =
-            TcpNetwork::bind_with_hosts(vk, self.addrs[i], peers).expect("bind transport");
+        // A just-stopped replica may still be releasing its listener.
+        let addr = self.addrs[i];
+        let (tcp, runtime) = retry_open(Path::new(&addr.to_string()), || {
+            TcpNetwork::bind_with_hosts(vk, addr, peers.clone())
+        });
         let tap = VoteTap {
             inner: tcp,
             signer: i,
@@ -250,8 +256,14 @@ impl Cluster {
         let running = self.nodes[i].as_ref().expect("node running");
         running.signer.stale_refused()
             + running.signer.conflicting_refused()
+            + running.signer.below_lock_refused()
             + running.network.stale_votes_dropped()
             + running.network.conflicting_votes_refused()
+    }
+
+    fn lock_floor(&self, i: usize) -> u64 {
+        let running = self.nodes[i].as_ref().expect("node running");
+        running.signer.lock_floor().expect("guard readable")
     }
 
     fn node(&self, i: usize) -> &GuardedNode {
@@ -282,6 +294,19 @@ impl Cluster {
                 chains.iter().all(|c| c[height] == chains[0][height]),
                 "conflicting committed blocks at height {height}"
             );
+        }
+    }
+
+    /// Every running node's committed chain agrees with `history` wherever both have a block.
+    fn assert_extends(&self, history: &[CryptoHash]) {
+        for i in 0..VALIDATORS {
+            let chain = committed_chain(self.node(i));
+            for (height, (ours, finalized)) in chain.iter().zip(history).enumerate() {
+                assert_eq!(
+                    ours, finalized,
+                    "validator {i} finalized a fork at height {height}"
+                );
+            }
         }
     }
 
@@ -361,10 +386,18 @@ fn test_restarts_and_single_wipe_never_equivocate() {
         cluster.start(RESTARTED);
     }
 
+    // TODO 8.5.2: the replica passes its HotStuff lock to the signer, so the guard holds a
+    // lock floor that the chain wipe below cannot roll back.
+    let floor_before_wipe = cluster.lock_floor(WIPED);
+    assert!(floor_before_wipe > 0, "guard never recorded a lock");
     drop(cluster.stop(WIPED));
     std::fs::remove_file(&cluster.db_paths[WIPED]).expect("wipe chain db");
     cluster.init_chain_db(WIPED);
     cluster.start(WIPED);
+    assert!(
+        cluster.lock_floor(WIPED) >= floor_before_wipe,
+        "lock floor survived the chain wipe"
+    );
 
     cluster.transfer(0, 1, &alice_key);
     assert!(
@@ -384,26 +417,53 @@ fn test_restarts_and_single_wipe_never_equivocate() {
         .keys()
         .any(|(signer, _)| *signer == RESTARTED);
     assert!(restarted_voted, "restarted validator never voted");
+    // Liveness of the lock floor (TODO 8.5.2): honest replicas that keep their chain data, and
+    // one wiped replica pulled forward by its peers, never build on a certificate below it.
+    for i in 0..VALIDATORS {
+        let running = cluster.nodes[i].as_ref().expect("node running");
+        assert_eq!(
+            running.signer.below_lock_refused(),
+            0,
+            "validator {i} refused an honest vote below its lock floor"
+        );
+    }
 }
 
-/// T4: restoring every validator to older chain data, with guards kept, is refused by the
-/// guards instead of producing conflicting votes, and the cluster recovers.
+/// T4: restoring every validator to older chain data, with guards kept. Same-view votes are
+/// refused as stale or conflicting, and (TODO 8.5.2) votes building on certificates below the
+/// lock each validator held are refused too: the restored cluster must not finalize a fork of
+/// the history it already finalized. It stays stopped until newer chain data is back
+/// (owner decision 2026-11-12: fail closed, no automatic override), then resumes on that history.
 #[test]
 fn test_cluster_restore_to_older_chain_data_is_refused_by_guards() {
     let (mut cluster, alice_key) = new_cluster(91);
     let snapshot_dir = tempfile::tempdir().expect("snapshot dir");
+    let copy_all = |cluster: &Cluster, tag: &str| -> Vec<PathBuf> {
+        (0..VALIDATORS)
+            .map(|i| {
+                let copy = snapshot_dir.path().join(format!("node{i}-{tag}.redb"));
+                std::fs::copy(&cluster.db_paths[i], &copy).expect("copy chain db");
+                copy
+            })
+            .collect()
+    };
+    let stop_all = |cluster: &mut Cluster| {
+        for i in 0..VALIDATORS {
+            drop(cluster.stop(i));
+        }
+    };
+    let restore_all = |cluster: &mut Cluster, copies: &[PathBuf]| {
+        for (i, copy) in copies.iter().enumerate() {
+            std::fs::copy(copy, &cluster.db_paths[i]).expect("restore chain db");
+        }
+        for i in 0..VALIDATORS {
+            cluster.start(i);
+        }
+    };
 
-    // Snapshot every chain database (validators stopped), then keep running past it.
-    for i in 0..VALIDATORS {
-        drop(cluster.stop(i));
-    }
-    let snapshots: Vec<PathBuf> = (0..VALIDATORS)
-        .map(|i| {
-            let copy = snapshot_dir.path().join(format!("node{i}.redb"));
-            std::fs::copy(&cluster.db_paths[i], &copy).expect("snapshot chain db");
-            copy
-        })
-        .collect();
+    // Snapshot every chain database (validators stopped), then finalize past it.
+    stop_all(&mut cluster);
+    let older = copy_all(&cluster, "older");
     for i in 0..VALIDATORS {
         cluster.start(i);
     }
@@ -412,31 +472,51 @@ fn test_cluster_restore_to_older_chain_data_is_refused_by_guards() {
         cluster.wait_for_bob_everywhere(2 * TRANSFER),
         "progress past snapshot"
     );
+    // A prefix of the history finalized before the restore.
+    let finalized_history = committed_chain(cluster.node(0));
+    stop_all(&mut cluster);
+    let newer = copy_all(&cluster, "newer");
 
-    // Restore all chain databases to the snapshot; guards stay at their newer records.
-    for i in 0..VALIDATORS {
-        drop(cluster.stop(i));
-    }
-    for (i, snapshot) in snapshots.iter().enumerate() {
-        std::fs::copy(snapshot, &cluster.db_paths[i]).expect("restore chain db");
-    }
-    for i in 0..VALIDATORS {
-        cluster.start(i);
-    }
+    // Restore all chain databases to the older snapshot; guards keep their newer records.
+    restore_all(&mut cluster, &older);
+    assert!(
+        finalized_history.len() > committed_chain(cluster.node(0)).len(),
+        "the restore rolled back finalized blocks"
+    );
 
-    // The restored chain lost transfer 1. Resubmitting it must finalize again once views
-    // pass the guard records.
+    // Resubmitting transfer 1 must not finalize it on a fork of the finalized history. First
+    // wait until every validator has passed its stale views and is held back only by its lock
+    // floor (where the cluster used to resume), then keep watching for a while.
     cluster.transfer(0, 1, &alice_key);
-    assert!(
-        cluster.wait_for_bob_everywhere(2 * TRANSFER),
-        "progress resumes after restore"
-    );
-
+    let all_below_lock = |cluster: &Cluster| {
+        (0..VALIDATORS).all(|i| {
+            let running = cluster.nodes[i].as_ref().expect("node running");
+            running.signer.below_lock_refused() > 0
+        })
+    };
+    let reached = wait_until(CONSENSUS_TIMEOUT, || {
+        cluster.assert_extends(&finalized_history);
+        all_below_lock(&cluster)
+    });
+    assert!(reached, "not every validator reached its lock floor");
+    let stall_deadline = Instant::now() + RESTORE_STALL_WINDOW;
+    while Instant::now() < stall_deadline {
+        cluster.assert_extends(&finalized_history);
+        thread::sleep(POLL);
+    }
     let refused: u64 = (0..VALIDATORS).map(|i| cluster.refused_votes(i)).sum();
+    assert!(refused > 0, "restored validators never tried to re-sign");
+    cluster.assert_no_equivocation();
+
+    // Recovery: put the newer chain data back. The cluster resumes on the finalized history.
+    stop_all(&mut cluster);
+    restore_all(&mut cluster, &newer);
+    cluster.transfer(0, 2, &alice_key);
     assert!(
-        refused > 0,
-        "restored validators never tried to re-sign old views"
+        cluster.wait_for_bob_everywhere(3 * TRANSFER),
+        "progress resumes once newer chain data is back"
     );
+    cluster.assert_extends(&finalized_history);
     cluster.assert_no_conflicting_finality();
     cluster.assert_no_halts();
     cluster.assert_no_equivocation();

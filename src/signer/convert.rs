@@ -41,11 +41,15 @@ pub fn to_wire(request: &SignRequest) -> proto::SignRequest {
             view,
             block,
             phase,
+            justify_view,
+            locked_view,
         } => Request::PhaseVote(proto::PhaseVote {
             chain_id: chain_id.int(),
             view: view.int(),
             block: block.bytes().to_vec(),
             phase: phase_to_wire(*phase) as i32,
+            justify_view: Some(justify_view.int()),
+            locked_view: Some(locked_view.int()),
         }),
         SignRequest::TimeoutVote { chain_id, view } => Request::TimeoutVote(proto::TimeoutVote {
             chain_id: chain_id.int(),
@@ -78,6 +82,14 @@ pub fn from_wire(request: &proto::SignRequest) -> Result<SignRequest, String> {
                 view: ViewNumber::new(vote.view),
                 block: CryptoHash::new(block),
                 phase: phase_from_wire(vote.phase)?,
+                justify_view: ViewNumber::new(
+                    vote.justify_view
+                        .ok_or("phase vote without lock context (justify_view)")?,
+                ),
+                locked_view: ViewNumber::new(
+                    vote.locked_view
+                        .ok_or("phase vote without lock context (locked_view)")?,
+                ),
             })
         }
         Request::TimeoutVote(vote) => Ok(SignRequest::TimeoutVote {
@@ -112,6 +124,8 @@ mod tests {
             view: ViewNumber::new(9),
             block: CryptoHash::new([4u8; 32]),
             phase,
+            justify_view: ViewNumber::new(8),
+            locked_view: ViewNumber::new(6),
         })
         .collect();
         all.push(SignRequest::TimeoutVote {
@@ -139,19 +153,24 @@ mod tests {
         let empty = proto::SignRequest { request: None };
         assert!(from_wire(&empty).is_err());
 
-        let vote = |block: Vec<u8>, phase: i32| proto::SignRequest {
+        let vote_with = |block: Vec<u8>, phase: i32, context: Option<u64>| proto::SignRequest {
             request: Some(Request::PhaseVote(proto::PhaseVote {
                 chain_id: 1,
                 view: 1,
                 block,
                 phase,
+                justify_view: context,
+                locked_view: context,
             })),
         };
+        let vote = |block: Vec<u8>, phase: i32| vote_with(block, phase, Some(0));
         let generic = proto::Phase::Generic as i32;
         assert!(from_wire(&vote(vec![0u8; 31], generic)).is_err());
         assert!(from_wire(&vote(vec![0u8; 33], generic)).is_err());
         assert!(from_wire(&vote(vec![0u8; 32], proto::Phase::Unspecified as i32)).is_err());
         assert!(from_wire(&vote(vec![0u8; 32], 99)).is_err());
         assert!(from_wire(&vote(vec![0u8; 32], generic)).is_ok());
+        // TODO 8.5.2: an older sender without lock context is refused, not silently unchecked.
+        assert!(from_wire(&vote_with(vec![0u8; 32], generic, None)).is_err());
     }
 }

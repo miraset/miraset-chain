@@ -106,11 +106,17 @@ fn expect() -> RemoteSignerExpectation {
 }
 
 fn vote(chain: u64, view: u64, block: u8) -> SignRequest {
+    locked_vote(chain, view, block, view.saturating_sub(1), 0)
+}
+
+fn locked_vote(chain: u64, view: u64, block: u8, justify: u64, locked: u64) -> SignRequest {
     SignRequest::PhaseVote {
         chain_id: ChainID::new(chain),
         view: ViewNumber::new(view),
         block: CryptoHash::new([block; 32]),
         phase: Phase::Generic,
+        justify_view: ViewNumber::new(justify),
+        locked_view: ViewNumber::new(locked),
     }
 }
 
@@ -155,6 +161,20 @@ fn test_refusals_cross_the_wire_as_refusals() {
         remote.sign(&vote(CHAIN, 10, 0xbb)),
         Err(SignError::Refused(_))
     ));
+}
+
+/// TODO 8.5.2: the lock context crosses the wire and the signer's lock floor refuses a vote
+/// building on a certificate below it.
+#[test]
+fn test_lock_floor_is_enforced_by_the_remote_signer() {
+    let server = Server::start();
+    let remote = server.client();
+    remote.sign(&locked_vote(CHAIN, 10, 0xaa, 9, 8)).unwrap();
+    assert!(matches!(
+        remote.sign(&locked_vote(CHAIN, 11, 0xbb, 7, 0)),
+        Err(SignError::Refused(reason)) if reason.contains("lock floor")
+    ));
+    assert!(remote.sign(&locked_vote(CHAIN, 11, 0xbb, 10, 0)).is_ok());
 }
 
 /// K3 at the signer: several nodes (primary, standby, a cloned VM) sharing one signer race to

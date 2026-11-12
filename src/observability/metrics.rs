@@ -433,6 +433,7 @@ impl NodeMetrics {
             for (reason, value) in [
                 ("stale", refusals.stale()),
                 ("conflicting", refusals.conflicting()),
+                ("below_lock", refusals.below_lock()),
             ] {
                 let _ = writeln!(
                     out,

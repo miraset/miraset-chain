@@ -48,7 +48,7 @@ healthcheck uses `/livez`: a node without quorum or catching up is alive, not un
 Besides commits, admission, mempool and transport drops, `/metrics` exports block sync
 (`miraset_syncing`, `miraset_sync_sessions_total`, `miraset_blocks_synced_total`) and phase votes
 refused by the signing guard (`miraset_vote_refused_total{layer, reason}`, `layer` = `signer` for
-an in-process key or `transport` for `GuardedNetwork`, `reason` = `stale` or `conflicting`). A
+an in-process key or `transport` for `GuardedNetwork`, `reason` = `stale`, `conflicting` or `below_lock`). A
 validator with `--remote-signer` has no `signer` series; that process counts its own refusals.
 
 Logs go to stderr: text by default, one JSON object per line with `--log-format json`; `RUST_LOG`
@@ -122,10 +122,9 @@ in [`docs/performance-baseline.md`](performance-baseline.md). No target is appro
 - Each validator keeps a vote **signing guard** (`signing-guard.redb`) on its own `nodeN-guard`
   volume, separate from chain data `nodeN-data` (TODO 8.3.2). Deleting only `nodeN-data`
   resyncs the node, and the guard stops it re-signing any view it already voted in. The guard
-  does **not** keep HotStuff's lock (locked certificate), which lives in the chain data: until
-  the node is past the views it voted in before, it may vote without its old lock, so treat it
-  as one of the f faulty validators for that time and resync at most one validator at once
-  (see [Restoring chain data](#restoring-chain-data)). Never delete
+  also keeps a **lock floor**, the highest HotStuff locked view the validator held when it voted
+  (TODO 8.5.2), and refuses any vote that builds on a certificate below it, so a resync does not
+  lose the lock (see [Restoring chain data](#restoring-chain-data)). Never delete
   `nodeN-guard` for a validator that has signed; a node with chain data but no guard refuses to
   start unless `--init-signing-guard` is passed.
 - **Upgrading an existing devnet:** recreate it with `docker compose down -v`. Older devnets
@@ -173,12 +172,17 @@ Inside Docker, run them on a stopped node's volumes, for example
 **The signing guard is never backed up.** Restoring an older guard would roll back slashing
 protection and allow double signing; always keep the current guard.
 
-Restoring an **older** chain database also rolls back state the guard does not cover: HotStuff's
-lock (locked certificate) and highest views live in the chain data. The guard still refuses every
-vote in a view the validator already signed, but in later views the restored validator may vote
-without its old lock. Until it is past the views it voted in before the restore, count it as one
-of the f faulty validators: restore (or resync) at most one validator at a time, and only while
-the rest of the set is healthy. Restoring a backup taken at the current tip (as after
+Restoring an **older** chain database rolls back HotStuff's lock and highest views, which live in
+the chain data. The guard still refuses every vote in a view the validator already signed, and
+every later vote that builds on a certificate below its lock floor (TODO 8.5.2). A single
+restored or resynced validator is pulled forward by its peers and votes again once it sees
+current certificates.
+
+**If more than f validators are restored below their locks, finality stops** (owner decision
+2026-11-12: fail closed). Their guards refuse to vote on the rolled-back fork, which is what
+keeps the chain from finalizing different blocks at heights it already finalized. There is no
+override: recover by bringing back newer chain data (a healthy peer's `db backup`, or the copy
+taken before the restore), then restart. Restoring a backup taken at the current tip (as after
 `db backup` of a stopped node) does not roll anything back.
 
 ## Known limitations

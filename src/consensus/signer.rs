@@ -11,7 +11,7 @@ use hotstuff_rs::types::data_types::SignatureBytes;
 use hotstuff_rs::types::signer::{LocalKeySigner, SignError, SignRequest, ValidatorSigner};
 use std::sync::Arc;
 
-use super::signing_guard::{Authorization, SigningGuard, VoteRecord};
+use super::signing_guard::{Authorization, LockContext, SigningGuard, VoteRecord};
 use crate::observability::VoteRefusals;
 
 /// `LocalKeySigner` plus the durable signing guard.
@@ -40,6 +40,11 @@ impl GuardedSigner {
         self.refusals.stale()
     }
 
+    /// Phase votes refused because they build on a certificate below the lock floor.
+    pub fn below_lock_refused(&self) -> u64 {
+        self.refusals.below_lock()
+    }
+
     /// Phase votes refused because a different vote was already signed in that view.
     pub fn conflicting_refused(&self) -> u64 {
         self.refusals.conflicting()
@@ -55,6 +60,11 @@ impl GuardedSigner {
         Ok(self.guard.last_vote()?.map(|record| record.view))
     }
 
+    /// Highest HotStuff locked view the guard recorded at vote time (TODO 8.5.2).
+    pub fn lock_floor(&self) -> Result<u64, super::SigningGuardError> {
+        self.guard.lock_floor()
+    }
+
     /// The chain this signer (and its guard) is bound to.
     pub fn chain_id(&self) -> u64 {
         self.guard.identity().chain_id
@@ -66,12 +76,21 @@ impl GuardedSigner {
             view,
             block,
             phase,
+            justify_view,
+            locked_view,
         } = request
         else {
             return Ok(());
         };
         let record = VoteRecord::from_parts(view.int(), block.bytes(), *phase);
-        match self.guard.authorize_record(chain_id.int(), record) {
+        let lock = LockContext {
+            justify_view: justify_view.int(),
+            locked_view: locked_view.int(),
+        };
+        match self
+            .guard
+            .authorize_record(chain_id.int(), record, Some(lock))
+        {
             Ok(Authorization::Fresh | Authorization::IdenticalResend) => Ok(()),
             Ok(Authorization::Stale { last_view }) => {
                 self.refusals.record_stale();
@@ -93,6 +112,30 @@ impl GuardedSigner {
                 );
                 Err(SignError::Refused(format!(
                     "conflicting phase vote for view {view}"
+                )))
+            }
+            Ok(Authorization::BelowLock {
+                justify_view,
+                lock_floor,
+            }) => {
+                self.refusals.record_below_lock();
+                tracing::error!(
+                    target: crate::observability::logging::SAFETY_LOG_TARGET,
+                    "signing guard: REFUSED phase vote for view {} building on view {justify_view} below lock floor {lock_floor}",
+                    view.int()
+                );
+                Err(SignError::Refused(format!(
+                    "phase vote for view {} below lock floor {lock_floor}",
+                    view.int()
+                )))
+            }
+            Ok(Authorization::InvalidLockContext { view }) => {
+                tracing::error!(
+                    target: crate::observability::logging::SAFETY_LOG_TARGET,
+                    "signing guard: REFUSED phase vote for view {view}: lock context above the vote's view"
+                );
+                Err(SignError::Refused(format!(
+                    "invalid lock context for view {view}"
                 )))
             }
             Err(err) => Err(SignError::Failed(format!("signing guard: {err}"))),

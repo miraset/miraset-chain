@@ -192,12 +192,17 @@ pub struct PhaseVote {
 impl PhaseVote {
     /// Create a `PhaseVote` for the given `chain_id`, `view`, `block`, and `phase` by signing over the values
     /// with the provided `keypair`.
+    ///
+    /// MIRASET PATCH #11: `justify_view` and `locked_view` go to the signer as unsigned context
+    /// (see [`SignRequest::PhaseVote`]).
     pub(crate) fn new(
         keypair: &Keypair,
         chain_id: ChainID,
         view: ViewNumber,
         block: CryptoHash,
         phase: Phase,
+        justify_view: ViewNumber,
+        locked_view: ViewNumber,
     ) -> Result<Self, SignError> {
         // MIRASET PATCH #9: typed request through the validator signer; same signed bytes.
         let signature = keypair.sign(&SignRequest::PhaseVote {
@@ -205,6 +210,8 @@ impl PhaseVote {
             view,
             block,
             phase,
+            justify_view,
+            locked_view,
         })?;
 
         Ok(Self {

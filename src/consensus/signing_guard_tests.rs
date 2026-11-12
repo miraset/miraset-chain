@@ -158,7 +158,7 @@ fn test_guard_rejects_corrupt_records() {
     drop(SigningGuard::open(&path, identity(), OpenMode::CreateIfMissing).unwrap());
 
     let db = Database::create(&path).unwrap();
-    write_record(&db, LAST_VOTE_KEY, &[FORMAT_VERSION, 1, 2, 3]).unwrap();
+    write_records(&db, &[(LAST_VOTE_KEY, vec![FORMAT_VERSION, 1, 2, 3])]).unwrap();
     drop(db);
     assert!(matches!(
         SigningGuard::open(&path, identity(), OpenMode::RequireExisting),
@@ -173,7 +173,7 @@ fn test_guard_rejects_corrupt_records() {
     }
     .encode();
     bad_phase[VOTE_RECORD_LEN - 1] = MAX_PHASE_CODE + 1;
-    write_record(&db, LAST_VOTE_KEY, &bad_phase).unwrap();
+    write_records(&db, &[(LAST_VOTE_KEY, bad_phase)]).unwrap();
     drop(db);
     assert!(matches!(
         SigningGuard::open(&path, identity(), OpenMode::RequireExisting),
@@ -239,5 +239,140 @@ fn test_identical_resend_after_reopen_is_not_a_conflict() {
     assert_eq!(
         reopened.authorize(&signed).unwrap(),
         Authorization::IdenticalResend
+    );
+}
+
+fn record(view: u64, block: u8) -> VoteRecord {
+    VoteRecord::from_parts(view, [block; 32], Phase::Generic)
+}
+
+fn lock(justify_view: u64, locked_view: u64) -> Option<LockContext> {
+    Some(LockContext {
+        justify_view,
+        locked_view,
+    })
+}
+
+#[test]
+fn test_lock_floor_rises_with_votes_and_refuses_lower_justify() {
+    let dir = TempDir::new().unwrap();
+    let guard = open(&dir, OpenMode::CreateIfMissing).unwrap();
+    assert_eq!(guard.lock_floor().unwrap(), 0);
+    assert_eq!(
+        guard
+            .authorize_record(CHAIN, record(10, 0xaa), lock(9, 8))
+            .unwrap(),
+        Authorization::Fresh
+    );
+    assert_eq!(guard.lock_floor().unwrap(), 8);
+
+    // A later view whose justify is below the lock: the HotStuff lock rule would refuse it.
+    assert_eq!(
+        guard
+            .authorize_record(CHAIN, record(20, 0xbb), lock(7, 0))
+            .unwrap(),
+        Authorization::BelowLock {
+            justify_view: 7,
+            lock_floor: 8
+        }
+    );
+    // Refusal moves neither the vote record nor the floor.
+    assert_eq!(guard.last_vote().unwrap(), Some(record(10, 0xaa)));
+    assert_eq!(guard.lock_floor().unwrap(), 8);
+
+    // Justify at the lock view (the locked certificate itself) or above is allowed; a lower
+    // reported lock never lowers the floor.
+    assert_eq!(
+        guard
+            .authorize_record(CHAIN, record(21, 0xbb), lock(8, 0))
+            .unwrap(),
+        Authorization::Fresh
+    );
+    assert_eq!(guard.lock_floor().unwrap(), 8);
+}
+
+#[test]
+fn test_lock_floor_survives_reopen_after_chain_data_loss() {
+    let dir = TempDir::new().unwrap();
+    open(&dir, OpenMode::CreateIfMissing)
+        .unwrap()
+        .authorize_record(CHAIN, record(30, 0xaa), lock(29, 28))
+        .unwrap();
+    // After a resync the replica's own lock is back at genesis (view 0).
+    let reopened = open(&dir, OpenMode::RequireExisting).unwrap();
+    assert_eq!(reopened.lock_floor().unwrap(), 28);
+    assert_eq!(
+        reopened
+            .authorize_record(CHAIN, record(40, 0xcc), lock(27, 0))
+            .unwrap(),
+        Authorization::BelowLock {
+            justify_view: 27,
+            lock_floor: 28
+        }
+    );
+    assert_eq!(
+        reopened
+            .authorize_record(CHAIN, record(40, 0xcc), lock(39, 38))
+            .unwrap(),
+        Authorization::Fresh
+    );
+    assert_eq!(reopened.lock_floor().unwrap(), 38);
+}
+
+#[test]
+fn test_identical_resend_and_transport_checks_ignore_lock_floor() {
+    let dir = TempDir::new().unwrap();
+    let guard = open(&dir, OpenMode::CreateIfMissing).unwrap();
+    guard
+        .authorize_record(CHAIN, record(10, 0xaa), lock(9, 9))
+        .unwrap();
+    // The transport layer sees the signed vote without lock context: identical re-send.
+    assert_eq!(
+        guard
+            .authorize(&vote(CHAIN, 10, 0xaa, Phase::Generic))
+            .unwrap(),
+        Authorization::IdenticalResend
+    );
+    assert_eq!(
+        guard
+            .authorize_record(CHAIN, record(10, 0xaa), lock(0, 0))
+            .unwrap(),
+        Authorization::IdenticalResend
+    );
+}
+
+#[test]
+fn test_guard_rejects_corrupt_lock_floor() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("guard.redb");
+    drop(SigningGuard::open(&path, identity(), OpenMode::CreateIfMissing).unwrap());
+    let db = Database::create(&path).unwrap();
+    write_records(&db, &[(LOCK_FLOOR_KEY, vec![FORMAT_VERSION, 1])]).unwrap();
+    drop(db);
+    assert!(matches!(
+        SigningGuard::open(&path, identity(), OpenMode::RequireExisting),
+        Err(SigningGuardError::Corrupt("lock floor"))
+    ));
+}
+
+#[test]
+fn test_lock_context_above_the_vote_view_is_refused_without_raising_the_floor() {
+    let dir = TempDir::new().unwrap();
+    let guard = open(&dir, OpenMode::CreateIfMissing).unwrap();
+    for bad in [lock(11, 0), lock(9, 11), lock(9, u64::MAX)] {
+        assert_eq!(
+            guard
+                .authorize_record(CHAIN, record(10, 0xaa), bad)
+                .unwrap(),
+            Authorization::InvalidLockContext { view: 10 }
+        );
+    }
+    assert_eq!(guard.lock_floor().unwrap(), 0);
+    assert_eq!(guard.last_vote().unwrap(), None);
+    assert_eq!(
+        guard
+            .authorize_record(CHAIN, record(10, 0xaa), lock(9, 9))
+            .unwrap(),
+        Authorization::Fresh
     );
 }

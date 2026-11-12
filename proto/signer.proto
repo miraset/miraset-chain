@@ -37,6 +37,12 @@ message PhaseVote {
   // 32-byte block hash.
   bytes block = 3;
   Phase phase = 4;
+  // HotStuff lock context, not signed (TODO 8.5.2): view of the certificate this vote builds
+  // on, and the node's locked certificate view after processing it. The signer keeps a
+  // durable lock floor from them. Required: a request without them (an older node) is
+  // rejected as invalid, so the lock check can never be silently skipped.
+  optional uint64 justify_view = 5;
+  optional uint64 locked_view = 6;
 }
 
 message TimeoutVote {

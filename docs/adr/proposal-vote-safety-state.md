@@ -219,3 +219,42 @@ cross-host double signing (TODO 8.3.4).
 
 Cross-host double signing remains with TODO 8.3.4.
 
+
+## 11. Lock floor (TODO 8.5.2, 2026-11-12)
+
+The 8.4.5 review found that the guard kept phase votes but not HotStuff's lock (`locked_pc`),
+which lives in the chain database: a resync or restore let a validator vote without its old
+lock. Fixed as follows.
+
+- **Vendored patch #11.** `SignRequest::PhaseVote` carries `justify_view` (the certificate the
+  vote builds on: the proposed block's `justify`, or the nudge's `justify`) and `locked_view`
+  (the replica's lock after processing that certificate). They are context, not signed content;
+  signatures and the wire format of `PhaseVote` are unchanged. The remote signer protocol
+  (`proto/signer.proto`) carries them as fields 5 and 6; a sender that omits them sends 0,
+  which a guard holding any lock refuses.
+- **Guard.** A fresh vote must have `justify_view >= lock_floor`; the floor is then raised to
+  `locked_view` in the same fsynced transaction as the vote record. Identical re-sends and the
+  transport layer (`GuardedNetwork`, no context) skip the check. A refusal is
+  `Authorization::BelowLock`, counted as `miraset_vote_refused_total{reason="below_lock"}`.
+- **Why views suffice.** `safe_pc` accepts a certificate whose view is above the lock's view or
+  whose block extends the locked block. A certificate on a block that extends the locked block
+  has a view at or above the lock's view, so an honest replica that still has its lock never
+  trips the floor; a replica that lost it is held to the same rule.
+- **Consequence (owner decision 2026-11-12: fail closed).** If more than f validators are
+  restored below their locks, they refuse every vote on the rolled-back fork and finality stops
+  until newer chain data is back. No override exists. T4 now asserts exactly that: no fork of
+  the finalized history during the stall, and resumed progress after the newer chain databases
+  are restored. With the floor check disabled, T4 fails with "validator 0 finalized a fork at
+  height 14", which is what the previous T4 (which expected the cluster to resume) allowed.
+- **Independent review (2026-11-12, rust-reviewer; no CRITICAL).** Fixed: (HIGH) the unsigned
+  context is bounded: `justify_view` or `locked_view` above the vote's view is refused as
+  `InvalidLockContext` before any write, so a bad caller cannot raise the floor permanently;
+  (HIGH) the remote-signer fields are proto3 `optional` and required, so an older node without
+  them gets an invalid-argument error instead of silently skipping the check; (MEDIUM) the
+  guard's doc now says it enforces a necessary condition of `safe_pc`, not the full rule;
+  T3 now asserts zero below-lock refusals on its honest restart/wipe run (liveness evidence on
+  real vote sequences). Accepted: one `error!` log per refused view during a fail-closed stall
+  (about one per second with 1s views); no reset path by design (owner decision).
+- **Single validator (n = 1).** A lone validator whose chain data is wiped is the same case with
+  f = 0: it refuses to rebuild from genesis and stays without commits until the chain data is
+  back (`tests/e2e_validator.rs::test_e2e_wiped_chain_data_with_guard_kept_refuses_fork_until_data_is_back`).

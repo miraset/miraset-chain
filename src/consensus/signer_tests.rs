@@ -31,11 +31,17 @@ fn signer(dir: &TempDir) -> Arc<GuardedSigner> {
 }
 
 fn phase_vote(chain: u64, view: u64, block: u8) -> SignRequest {
+    locked_vote(chain, view, block, view.saturating_sub(1), 0)
+}
+
+fn locked_vote(chain: u64, view: u64, block: u8, justify: u64, locked: u64) -> SignRequest {
     SignRequest::PhaseVote {
         chain_id: ChainID::new(chain),
         view: ViewNumber::new(view),
         block: CryptoHash::new([block; 32]),
         phase: Phase::Generic,
+        justify_view: ViewNumber::new(justify),
+        locked_view: ViewNumber::new(locked),
     }
 }
 
@@ -116,4 +122,17 @@ fn test_any_request_for_another_chain_is_a_failure() {
 fn test_guard_for_another_key_is_rejected() {
     let dir = TempDir::new().unwrap();
     assert!(GuardedSigner::new(key(), guard(&dir, [9u8; 32])).is_err());
+}
+
+#[test]
+fn test_vote_below_lock_floor_is_refused_not_failed() {
+    let dir = TempDir::new().unwrap();
+    let signer = signer(&dir);
+    signer.sign(&locked_vote(CHAIN, 10, 0xaa, 9, 8)).unwrap();
+    assert!(matches!(
+        signer.sign(&locked_vote(CHAIN, 11, 0xbb, 7, 0)),
+        Err(SignError::Refused(reason)) if reason.contains("lock floor")
+    ));
+    assert_eq!(signer.below_lock_refused(), 1);
+    assert!(signer.sign(&locked_vote(CHAIN, 11, 0xbb, 10, 8)).is_ok());
 }
