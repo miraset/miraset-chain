@@ -99,6 +99,25 @@ pub fn genesis_state_commitment_with_params(
     genesis_commitment_of(&genesis_app_entries(initial_accounts, params))
 }
 
+/// The pacemaker epoch length is a genesis parameter (TODO 8.5.2 F2): refuse a configuration
+/// that disagrees with the value committed in the store's genesis state.
+fn check_epoch_length_matches_genesis<K: KVStore>(
+    store: &K,
+    epoch_length: u32,
+) -> Result<(), String> {
+    let committed: ProtocolParams = store
+        .committed_app_state(&MirasetApp::protocol_params_key())
+        .and_then(|raw| serde_json::from_slice(&raw).ok())
+        .unwrap_or_default();
+    if committed.consensus_epoch_length != epoch_length {
+        return Err(format!(
+            "epoch_length {epoch_length} does not match genesis consensus_epoch_length {}",
+            committed.consensus_epoch_length
+        ));
+    }
+    Ok(())
+}
+
 /// Initialize genesis block tree storage with the given chain ID, validators, and initial accounts.
 pub fn init_genesis_with_chain_id<K: KVStore>(
     kv_store: K,
@@ -184,6 +203,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
     ) -> Result<Self, String> {
         config.validate().map_err(|e| e.to_string())?;
         validate_recovery_state(&kv_store, config.chain_id, config.expected_genesis_hash)?;
+        check_epoch_length_matches_genesis(&kv_store, config.epoch_length)?;
 
         let safety_halt = config.safety_halt.clone();
         let app = MirasetApp::new(mempool.clone());

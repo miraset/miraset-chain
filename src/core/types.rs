@@ -649,11 +649,20 @@ impl AllowanceAction {
     }
 }
 
+/// Default pacemaker epoch length in views (TODO 8.5.2 F2; owner decision 2026-11-12).
+pub const DEFAULT_CONSENSUS_EPOCH_LENGTH: u32 = 1;
+/// Largest pacemaker epoch length a genesis may set: a failed view can wait up to
+/// `epoch_length × max_view_time`, so any value above 1 brings back part of the F2 stall; 10 is
+/// the pre-8.5.2 default.
+pub const MAX_CONSENSUS_EPOCH_LENGTH: u32 = 10;
+
 /// Largest per-epoch reward budget a genesis may set (10^15 base units).
 pub const MAX_EPOCH_REWARD_BUDGET: u64 = 1_000_000_000_000_000;
 
 /// Protocol parameters fixed at genesis (TODO 8.5.1; owner decision 2026-11-12). Stored in
 /// genesis state, so the genesis commitment covers them; changing them needs a new genesis.
+/// Encoded with serde_json in field order: add fields only at the end, and expect any added
+/// field to change the genesis hash of existing chains.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolParams {
     /// Coordinator public keys (hex) allowed to co-sign compute receipts (ADR-0009).
@@ -673,6 +682,14 @@ pub struct ProtocolParams {
     /// only this long after it began, so at most one reward budget is minted per period.
     #[serde(default = "default_epoch_seconds")]
     pub epoch_seconds: u64,
+    /// Pacemaker epoch length in views, a consensus parameter every validator must share
+    /// (TODO 8.5.2 F2). Fixed at genesis so validators of one chain cannot disagree on it.
+    #[serde(default = "default_consensus_epoch_length")]
+    pub consensus_epoch_length: u32,
+}
+
+fn default_consensus_epoch_length() -> u32 {
+    DEFAULT_CONSENSUS_EPOCH_LENGTH
 }
 
 fn default_price_per_token() -> u64 {
@@ -695,6 +712,7 @@ impl Default for ProtocolParams {
             price_per_token: default_price_per_token(),
             epoch_reward_budget: default_epoch_reward_budget(),
             epoch_seconds: default_epoch_seconds(),
+            consensus_epoch_length: default_consensus_epoch_length(),
         }
     }
 }
@@ -723,6 +741,11 @@ impl ProtocolParams {
         }
         if self.epoch_seconds == 0 {
             return Err("epoch_seconds must be positive".into());
+        }
+        if !(1..=MAX_CONSENSUS_EPOCH_LENGTH).contains(&self.consensus_epoch_length) {
+            return Err(format!(
+                "consensus_epoch_length must be in 1..={MAX_CONSENSUS_EPOCH_LENGTH}"
+            ));
         }
         if self.epoch_reward_budget == 0 || self.epoch_reward_budget > MAX_EPOCH_REWARD_BUDGET {
             return Err(format!(
@@ -1464,6 +1487,14 @@ mod tests {
             },
             ProtocolParams {
                 epoch_reward_budget: 0,
+                ..good.clone()
+            },
+            ProtocolParams {
+                consensus_epoch_length: 0,
+                ..good.clone()
+            },
+            ProtocolParams {
+                consensus_epoch_length: MAX_CONSENSUS_EPOCH_LENGTH + 1,
                 ..good.clone()
             },
             ProtocolParams {

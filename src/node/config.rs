@@ -11,7 +11,7 @@ use crate::observability::DEFAULT_READY_MAX_COMMIT_AGE;
 /// Lower bound that leaves room for propose/vote round trips even on a local devnet.
 const MIN_MAX_VIEW_TIME: Duration = Duration::from_millis(100);
 /// Pacemaker epoch length (views); see [`NodeConfig::epoch_length`].
-pub const DEFAULT_EPOCH_LENGTH: u32 = 1;
+pub const DEFAULT_EPOCH_LENGTH: u32 = crate::core::types::DEFAULT_CONSENSUS_EPOCH_LENGTH;
 
 /// Configuration options for a MIRASET L1 node.
 ///
@@ -37,8 +37,8 @@ pub struct NodeConfig {
     /// `max_view_time`), so a failed view waits out the slack earlier fast views saved, up to
     /// `epoch_length × max_view_time`. 1 bounds that wait to about one view plus a timeout
     /// certificate (owner decision 2026-11-12, TODO 8.5.2 F2; `tests/view_timing.rs`).
-    /// Nothing binds it to genesis yet: changing it is a flag-day upgrade of every validator,
-    /// since mixed values disagree on which views accept timeout certificates.
+    /// The validator binary takes it from genesis (`protocol.consensus_epoch_length`), so the
+    /// genesis commitment covers it and validators of one chain cannot disagree on it.
     pub epoch_length: u32,
     pub max_view_time: Duration,
     pub log_events: bool,

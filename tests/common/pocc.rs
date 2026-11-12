@@ -53,6 +53,7 @@ impl Pocc {
             price_per_token: PRICE_PER_TOKEN,
             epoch_reward_budget: EPOCH_REWARD_BUDGET,
             epoch_seconds: EPOCH_SECONDS,
+            ..ProtocolParams::default()
         }
     }
 

@@ -187,10 +187,12 @@ taken before the restore), then restart. Restoring a backup taken at the current
 
 ## Known limitations
 
-- **Pacemaker epoch length is 1 (TODO 8.5.2 F2), compiled in and logged at startup
-  (`epoch_length=`).** It is a consensus parameter that nothing binds to genesis yet: validators
-  with different values disagree on which views accept timeout certificates, so upgrade all
-  validators at once (flag day), never as a rolling mix. Each timed-out view now needs a timeout
+- **Pacemaker epoch length is a genesis parameter (TODO 8.5.2 F2):** `protocol.consensus_epoch_length`,
+  default 1, range 1..=10, logged at startup (`epoch_length=`). It is part of the genesis
+  commitment, so validators of one chain share it, and a node refuses to start with chain data
+  created under a different value; changing it means a new genesis. Adding the field changed
+  every genesis hash: chain data and signing guards from before it fail with "genesis_hash
+  mismatch", so recreate existing devnets (`docker compose down -v`, guards included). Each timed-out view now needs a timeout
   certificate and there is no timeout backoff, so views close to `max_view_time` (slow links,
   large blocks) can time out repeatedly; the WAN re-measurement in 8.5.3 must include that case.
 - Each node uses roughly 0.2 CPU cores, mostly the consensus thread producing blocks. Upstream

@@ -302,4 +302,36 @@ mod tests {
         genesis.protocol.governance = vec![pubkey(1)];
         assert!(genesis.validate().is_err());
     }
+
+    /// TODO 8.5.2 F2: the pacemaker epoch length is a genesis parameter, so validators of one
+    /// chain share it and a different value is a different genesis commitment.
+    #[test]
+    fn test_consensus_epoch_length_is_part_of_the_genesis_hash() {
+        let mut genesis = sample();
+        assert_eq!(
+            genesis.protocol.consensus_epoch_length,
+            crate::node::DEFAULT_EPOCH_LENGTH
+        );
+        let default_hash = genesis.state_commitment();
+        genesis.protocol.consensus_epoch_length = 10;
+        assert!(genesis.validate().is_ok());
+        assert_ne!(genesis.state_commitment(), default_hash);
+        genesis.protocol.consensus_epoch_length = 0;
+        assert!(genesis.validate().is_err());
+        genesis.protocol.consensus_epoch_length =
+            crate::core::types::MAX_CONSENSUS_EPOCH_LENGTH + 1;
+        assert!(genesis.validate().is_err());
+
+        // A genesis file written before the field existed loads with the default.
+        let mut json: serde_json::Value = serde_json::to_value(sample()).unwrap();
+        json["protocol"]
+            .as_object_mut()
+            .unwrap()
+            .remove("consensus_epoch_length");
+        let parsed: GenesisConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            parsed.protocol.consensus_epoch_length,
+            crate::node::DEFAULT_EPOCH_LENGTH
+        );
+    }
 }

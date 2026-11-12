@@ -7,9 +7,12 @@
 //! 10 (the old default), 2.05 s with 1. Owner decision 2026-11-12: default 1.
 
 use ed25519_dalek::SigningKey;
+use miraset_chain::core::types::ProtocolParams;
 use miraset_chain::mempool::Mempool;
 use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub};
-use miraset_chain::node::{DEFAULT_EPOCH_LENGTH, MirasetNode, NodeConfig, init_genesis};
+use miraset_chain::node::{
+    DEFAULT_EPOCH_LENGTH, MirasetNode, NodeConfig, init_genesis_with_params,
+};
 use miraset_chain::storage::MemKVStore;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,7 +41,12 @@ fn longest_commit_gap(epoch_length: u32, seed: u8) -> Duration {
         .take(CRASHED)
         .map(|key| {
             let kv = MemKVStore::new();
-            init_genesis(kv.clone(), &validators, &[]);
+            let params = ProtocolParams {
+                consensus_epoch_length: epoch_length,
+                ..ProtocolParams::default()
+            };
+            let config_chain = NodeConfig::devnet(key.clone()).chain_id;
+            init_genesis_with_params(kv.clone(), config_chain, &validators, &[], &params);
             let config = NodeConfig {
                 max_view_time: VIEW_TIME,
                 epoch_length,
@@ -87,4 +95,33 @@ fn test_default_epoch_length_bounds_commit_gaps_with_a_crashed_leader() {
         old_gap > MAX_GAP_DEFAULT,
         "epoch length {OLD_EPOCH_LENGTH} no longer shows the accumulated-slack stall ({old_gap:?})"
     );
+}
+
+/// TODO 8.5.2 F2: a node refuses a pacemaker epoch length that differs from its genesis.
+#[test]
+fn test_node_refuses_epoch_length_that_differs_from_genesis() {
+    let key = SigningKey::from_bytes(&[90u8; 32]);
+    let kv = MemKVStore::new();
+    let config = NodeConfig {
+        epoch_length: OLD_EPOCH_LENGTH,
+        ..NodeConfig::devnet(key.clone())
+    };
+    init_genesis_with_params(
+        kv.clone(),
+        config.chain_id,
+        &[(key.verifying_key(), 1)],
+        &[],
+        &ProtocolParams::default(),
+    );
+    let hub = ChannelNetworkHub::new();
+    let result = MirasetNode::try_start(
+        config,
+        kv,
+        ChannelNetwork::new(key.verifying_key(), hub),
+        Mempool::new(),
+    );
+    let Err(error) = result else {
+        panic!("node started with an epoch length its genesis does not have");
+    };
+    assert!(error.contains("consensus_epoch_length"), "{error}");
 }

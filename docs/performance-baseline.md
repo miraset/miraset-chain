@@ -148,7 +148,8 @@ Observed while building and running the measurement; none is fixed here.
     views waits out their saved slack, up to `epoch_length × max_view_time` = 10 s with the old
     defaults (10 × 1 s), consistent with the measured 10.0–10.1 s maximum. `tests/view_timing.rs`
     reproduces it in process (one of five validators crashed: longest gap 5.0 s with
-    `epoch_length` 10, 2.05 s with 1). Owner decision: `epoch_length` default is now 1. The WAN
+    `epoch_length` 10, 2.05 s with 1). Owner decision: `epoch_length` default is now 1, fixed per chain in genesis
+    (`protocol.consensus_epoch_length`). The WAN
     rows above were measured with 10 and must be re-measured (8.5.3).
 
 ## What remains open for 8.5.3

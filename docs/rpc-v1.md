@@ -34,7 +34,7 @@ document records the engineering contract chosen for the devnet, not a productio
 | `GET /v1/blocks/latest` | `{highest_committed_block, height}` from one snapshot | `200` |
 | `GET /v1/blocks/{height}` | `{height, hash}` of a committed block | `200`, `404` above the tip |
 | `GET /v1/mempool` | `{pending_txs, pending_receipts}` on this node | `200` |
-| `GET /v1/params` | genesis protocol parameters: `coordinators`, `governance` (hex keys), `price_per_token`, `epoch_reward_budget`, `epoch_seconds` | `200` |
+| `GET /v1/params` | genesis protocol parameters: `coordinators`, `governance` (hex keys), `price_per_token`, `epoch_reward_budget`, `epoch_seconds`, `consensus_epoch_length` | `200` |
 | `GET /v1/allowances/{client}/{coordinator}` | `{client, coordinator, remaining}`: what the coordinator may still charge the client through receipts | `200` |
 | `GET /v1/events/blocks` | Server-Sent Events, see below | `200 text/event-stream` |
 | `GET /v1/health` | `{status: ok|halted, chain_id, reason?}` (not enveloped) | `200`, `503` when halted |

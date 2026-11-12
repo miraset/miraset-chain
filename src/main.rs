@@ -556,6 +556,8 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
     config.expected_genesis_hash = Some(genesis_hash);
     config.safety_halt = safety_halt.clone();
     config.ready_max_commit_age = Duration::from_secs(cli.ready_max_commit_age_secs);
+    // A consensus parameter fixed at genesis (TODO 8.5.2 F2).
+    config.epoch_length = genesis.protocol.consensus_epoch_length;
     let node = Arc::new(MirasetNode::try_start(
         config,
         kv_store,
@@ -578,7 +580,7 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
         p2p_addr = %cli.p2p_addr,
         rpc_addr = %cli.rpc_addr,
         // Consensus parameters every validator must share (TODO 8.5.2 F2).
-        epoch_length = miraset_chain::node::DEFAULT_EPOCH_LENGTH,
+        epoch_length = genesis.protocol.consensus_epoch_length,
         "starting MIRASET experimental/devnet validator (ADR-0016 Proposed)"
     );
 
