@@ -8,6 +8,14 @@
 //! Frame format: `u32 BE length` || `32-byte sender verifying key` || `borsh(Message)`.
 //! The sender key is self-declared and only checked against the configured peer table; it is
 //! NOT authenticated (TODO 8.4.1).
+//!
+//! Memory (TODO 8.5.2 F6): queues are bounded in bytes as well as messages. Each configured peer
+//! has an inbound budget (frames read from it and not yet taken by the replica), all peers share
+//! a global inbound budget, and each peer has an outbound budget (frames queued for it). A reader
+//! checks the sender key before allocating a frame body and waits (TCP backpressure, bounded by
+//! `BUDGET_WAIT_LIMIT`) while the budgets are full; a reserved body must arrive within
+//! `BODY_READ_LIMIT`. An outbound frame over the peer's budget is dropped like one over the count
+//! limit. Reservations travel with the queued item and are returned when it is dropped.
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use hotstuff_rs::networking::messages::Message;
@@ -16,6 +24,8 @@ use hotstuff_rs::types::crypto_primitives::VerifyingKey;
 use hotstuff_rs::types::update_sets::ValidatorSetUpdates;
 use hotstuff_rs::types::validator_set::ValidatorSet;
 use socket2::{SockRef, TcpKeepalive};
+
+use super::byte_budget::{ByteBudget, Reservation};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
@@ -30,6 +40,20 @@ const SENDER_KEY_BYTES: usize = 32;
 const MAX_INBOUND_CONNECTIONS: usize = 64;
 const INBOUND_QUEUE_CAPACITY: usize = 4096;
 const PEER_QUEUE_CAPACITY: usize = 1024;
+/// Bytes of frames from one peer waiting for the replica (room for four maximum frames).
+const PEER_INBOUND_BYTES: usize = 4 * MAX_FRAME_BYTES;
+/// Bytes of frames queued for one peer.
+const PEER_OUTBOUND_BYTES: usize = 4 * MAX_FRAME_BYTES;
+/// Bytes of frames from all peers waiting for the replica.
+const GLOBAL_INBOUND_BYTES: usize = 16 * MAX_FRAME_BYTES;
+/// How often a reader waiting for inbound budget re-checks it (and shutdown).
+const BUDGET_WAIT: Duration = Duration::from_millis(5);
+/// A reader that cannot reserve budget for this long closes its connection (the peer
+/// reconnects), so a stuck budget cannot park connection slots indefinitely.
+const BUDGET_WAIT_LIMIT: Duration = Duration::from_secs(30);
+/// A frame body holding a reservation must arrive within this long (16 MiB at about 0.5 MiB/s),
+/// so trickled bytes cannot pin a budget.
+const BODY_READ_LIMIT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 /// After a failed connect, messages to that peer are dropped (not queued) for this long.
@@ -51,7 +75,20 @@ const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// `hotstuff_rs` polls `recv` in a `yield_now` loop; wait briefly so idle nodes don't spin a core.
 const RECV_WAIT: Duration = Duration::from_millis(1);
 
-type PeerQueues = Arc<HashMap<VerifyingKey, SyncSender<Arc<Vec<u8>>>>>;
+type PeerQueues = Arc<HashMap<VerifyingKey, PeerQueue>>;
+type Budgets = Arc<HashMap<VerifyingKey, Arc<ByteBudget>>>;
+
+/// Outbound queue for one peer and the byte budget its queued frames hold.
+struct PeerQueue {
+    sender: SyncSender<Outbound>,
+    budget: Arc<ByteBudget>,
+}
+
+/// A frame queued for a peer and the outbound bytes it holds until written or dropped.
+type Outbound = (Arc<Vec<u8>>, Reservation);
+
+/// A received message and the inbound bytes it holds until the replica takes it.
+type Inbound = (VerifyingKey, Message, Reservation);
 
 /// Background threads (listener and per-peer senders) owned by a [`TcpNetwork`].
 /// Dropping it stops the transport and releases the listening socket.
@@ -75,8 +112,8 @@ pub struct TcpNetwork {
     local_key: VerifyingKey,
     peer_addresses: Arc<HashMap<VerifyingKey, String>>,
     peer_queues: PeerQueues,
-    local_inbound: SyncSender<(VerifyingKey, Message)>,
-    inbound: Arc<Mutex<Receiver<(VerifyingKey, Message)>>>,
+    local_inbound: SyncSender<Inbound>,
+    inbound: Arc<Mutex<Receiver<Inbound>>>,
     dropped_messages: Arc<AtomicU64>,
 }
 
@@ -110,9 +147,16 @@ impl TcpNetwork {
 
         let mut threads = Vec::new();
         let mut queues = HashMap::new();
+        let inbound_budgets: Budgets = Arc::new(
+            peer_addresses
+                .keys()
+                .map(|peer| (*peer, Arc::new(ByteBudget::new(PEER_INBOUND_BYTES))))
+                .collect(),
+        );
         for (peer, host) in peer_addresses.iter().filter(|(k, _)| **k != local_key) {
             let (tx, rx) = mpsc::sync_channel(PEER_QUEUE_CAPACITY);
-            queues.insert(*peer, tx);
+            let budget = Arc::new(ByteBudget::new(PEER_OUTBOUND_BYTES));
+            queues.insert(*peer, PeerQueue { sender: tx, budget });
             let worker = PeerWorker {
                 host: host.clone(),
                 queue: rx,
@@ -129,7 +173,8 @@ impl TcpNetwork {
         let acceptor = Acceptor {
             listener,
             inbound: inbound_tx.clone(),
-            peers: Arc::clone(&peer_addresses),
+            budgets: inbound_budgets,
+            global_budget: Arc::new(ByteBudget::new(GLOBAL_INBOUND_BYTES)),
             shutdown: Arc::clone(&shutdown),
         };
         threads.push(
@@ -169,7 +214,7 @@ impl TcpNetwork {
     fn deliver_local(&self, message: Message) {
         if self
             .local_inbound
-            .try_send((self.local_key, message))
+            .try_send((self.local_key, message, Reservation::none()))
             .is_err()
         {
             self.dropped_messages.fetch_add(1, Ordering::Relaxed);
@@ -180,7 +225,16 @@ impl TcpNetwork {
         let Some(queue) = self.peer_queues.get(peer) else {
             return;
         };
-        if queue.try_send(Arc::clone(frame)).is_err() {
+        let Some(reservation) = Reservation::try_new(&[&queue.budget], frame.len()) else {
+            self.dropped_messages.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        // On a full queue the item (and its reservation) is dropped here.
+        if queue
+            .sender
+            .try_send((Arc::clone(frame), reservation))
+            .is_err()
+        {
             self.dropped_messages.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -219,7 +273,10 @@ impl Network for TcpNetwork {
     }
 
     fn recv(&mut self) -> Option<(VerifyingKey, Message)> {
-        self.inbound.lock().ok()?.recv_timeout(RECV_WAIT).ok()
+        // Dropping the reservation returns the message's bytes to its budgets.
+        let (peer, message, _reservation) =
+            self.inbound.lock().ok()?.recv_timeout(RECV_WAIT).ok()?;
+        Some((peer, message))
     }
 }
 
@@ -244,7 +301,7 @@ fn encode_frame(sender: [u8; SENDER_KEY_BYTES], message: &Message) -> io::Result
 /// Outbound worker for one peer: owns a persistent connection and a bounded queue.
 struct PeerWorker {
     host: String,
-    queue: Receiver<Arc<Vec<u8>>>,
+    queue: Receiver<Outbound>,
     shutdown: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
 }
@@ -254,18 +311,22 @@ impl PeerWorker {
         let mut stream: Option<TcpStream> = None;
         let mut retry_after = Instant::now();
         while !self.shutdown.load(Ordering::Acquire) {
-            let frame = match self.queue.recv_timeout(WORKER_POLL_INTERVAL) {
-                Ok(frame) => frame,
+            // The reservation is returned when this iteration ends, written or not.
+            let (frame, _reservation) = match self.queue.recv_timeout(WORKER_POLL_INTERVAL) {
+                Ok(item) => item,
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return,
             };
-            if stream.is_none() && Instant::now() < retry_after {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                continue;
-            }
-            if !self.write_frame(&mut stream, &frame) {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+            let delivered = if stream.is_none() && Instant::now() < retry_after {
+                false
+            } else if self.write_frame(&mut stream, &frame) {
+                true
+            } else {
                 retry_after = Instant::now() + RECONNECT_BACKOFF;
+                false
+            };
+            if !delivered {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -307,8 +368,9 @@ impl PeerWorker {
 /// Accepts inbound connections and spawns a bounded number of frame readers.
 struct Acceptor {
     listener: TcpListener,
-    inbound: SyncSender<(VerifyingKey, Message)>,
-    peers: Arc<HashMap<VerifyingKey, String>>,
+    inbound: SyncSender<Inbound>,
+    budgets: Budgets,
+    global_budget: Arc<ByteBudget>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -334,7 +396,8 @@ impl Acceptor {
         let reader = FrameReader {
             stream,
             inbound: self.inbound.clone(),
-            peers: Arc::clone(&self.peers),
+            budgets: Arc::clone(&self.budgets),
+            global_budget: Arc::clone(&self.global_budget),
             shutdown: Arc::clone(&self.shutdown),
         };
         let guard = ActiveConn(Arc::clone(active));
@@ -360,8 +423,9 @@ impl Drop for ActiveConn {
 /// Reads frames from one persistent inbound connection until EOF, error, or shutdown.
 struct FrameReader {
     stream: TcpStream,
-    inbound: SyncSender<(VerifyingKey, Message)>,
-    peers: Arc<HashMap<VerifyingKey, String>>,
+    inbound: SyncSender<Inbound>,
+    budgets: Budgets,
+    global_budget: Arc<ByteBudget>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -371,27 +435,75 @@ impl FrameReader {
         detect_dead_peers(&self.stream)?;
         loop {
             let mut length_bytes = [0u8; 4];
-            if !self.read_full(&mut length_bytes)? {
+            if !self.read_full(&mut length_bytes, None)? {
                 return Ok(());
             }
             let length = u32::from_be_bytes(length_bytes) as usize;
             if !(SENDER_KEY_BYTES..=MAX_FRAME_BYTES).contains(&length) {
                 return Err(invalid("invalid frame length"));
             }
-            let mut frame = vec![0u8; length];
-            if !self.read_full(&mut frame)? {
+            let Some((peer, reservation)) = self.read_sender_and_reserve(length)? else {
+                return Ok(());
+            };
+            let mut body = vec![0u8; length - SENDER_KEY_BYTES];
+            if !self.read_full(&mut body, Some(Instant::now() + BODY_READ_LIMIT))? {
                 return Ok(());
             }
-            self.dispatch(&frame)?;
+            self.dispatch(peer, &body, reservation)?;
+        }
+    }
+
+    /// Read the sender key, refuse a non-member before anything is allocated for its body, and
+    /// wait (TCP backpressure) until `length` bytes fit in the sender's and the global inbound
+    /// budget. `None` on shutdown or EOF.
+    fn read_sender_and_reserve(
+        &mut self,
+        length: usize,
+    ) -> io::Result<Option<(VerifyingKey, Reservation)>> {
+        let mut sender_bytes = [0u8; SENDER_KEY_BYTES];
+        if !self.read_full(&mut sender_bytes, None)? {
+            return Ok(None);
+        }
+        let peer = VerifyingKey::from_bytes(&sender_bytes).map_err(|_| invalid("bad key"))?;
+        let peer_budget = Arc::clone(self.budgets.get(&peer).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "peer not in configured validator set",
+            )
+        })?);
+        let give_up = Instant::now() + BUDGET_WAIT_LIMIT;
+        loop {
+            if let Some(reservation) =
+                Reservation::try_new(&[&peer_budget, &self.global_budget], length)
+            {
+                return Ok(Some((peer, reservation)));
+            }
+            if self.shutdown.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            if Instant::now() >= give_up {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "inbound budget stayed full",
+                ));
+            }
+            thread::sleep(BUDGET_WAIT);
         }
     }
 
     /// Fill `buf`, retrying across read timeouts without losing partial progress.
-    /// Returns `Ok(false)` on shutdown or clean EOF before any byte of `buf` was read.
-    fn read_full(&mut self, buf: &mut [u8]) -> io::Result<bool> {
+    /// Returns `Ok(false)` on shutdown or clean EOF before any byte of `buf` was read. With a
+    /// `deadline`, the whole read must finish by then, whatever the progress.
+    fn read_full(&mut self, buf: &mut [u8], deadline: Option<Instant>) -> io::Result<bool> {
         let mut filled = 0;
         let mut last_progress = Instant::now();
         while filled < buf.len() {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "inbound frame body too slow",
+                ));
+            }
             if last_progress.elapsed() >= INBOUND_IDLE_TIMEOUT {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -421,20 +533,16 @@ impl FrameReader {
         Ok(true)
     }
 
-    fn dispatch(&self, frame: &[u8]) -> io::Result<()> {
-        let (sender_bytes, body) = frame.split_at(SENDER_KEY_BYTES);
-        let sender_bytes: [u8; SENDER_KEY_BYTES] = sender_bytes
-            .try_into()
-            .map_err(|_| invalid("invalid sender key"))?;
-        let peer = VerifyingKey::from_bytes(&sender_bytes).map_err(|_| invalid("bad key"))?;
-        if !self.peers.contains_key(&peer) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "peer not in configured validator set",
-            ));
-        }
+    /// Decode and queue one message with its reservation (returned when the replica takes it,
+    /// or here if the message is dropped).
+    fn dispatch(
+        &self,
+        peer: VerifyingKey,
+        body: &[u8],
+        reservation: Reservation,
+    ) -> io::Result<()> {
         let message = Message::try_from_slice(body).map_err(|_| invalid("bad message"))?;
-        match self.inbound.try_send((peer, message)) {
+        match self.inbound.try_send((peer, message, reservation)) {
             // A full inbound queue drops this message but keeps the connection.
             Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
             Err(TrySendError::Disconnected(_)) => Err(io::ErrorKind::BrokenPipe.into()),

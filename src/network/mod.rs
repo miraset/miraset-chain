@@ -1,3 +1,4 @@
+mod byte_budget;
 pub mod channel;
 pub mod tcp;
 

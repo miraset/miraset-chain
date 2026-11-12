@@ -94,3 +94,140 @@ fn test_tcp_network_direct_send_and_broadcast() {
     drop(runtime1);
     drop(runtime2);
 }
+
+// ---- TODO 8.5.2 F6: transport memory bounds ----------------------------------------------
+
+use borsh::BorshSerialize;
+use hotstuff_rs::block_sync::messages::BlockSyncResponse;
+use hotstuff_rs::hotstuff::types::PhaseCertificate;
+use hotstuff_rs::types::block::Block;
+use hotstuff_rs::types::data_types::{CryptoHash, Data, Datum};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Instant;
+
+const LARGE_PAYLOAD: usize = 1 << 20;
+/// The receiver's per-peer inbound budget is 64 MiB (4 × 16 MiB frames).
+const BUDGET_FRAMES: usize = 64;
+/// Kernel socket buffers on loopback can hold a few more megabytes beyond the budget.
+const SOCKET_SLACK_FRAMES: usize = 32;
+const FLOOD_FRAMES: usize = 300;
+
+/// A one-node transport that accepts frames claiming `peer`'s key.
+fn receiver_with_peer(peer: &SigningKey) -> (TcpNetwork, impl Drop, SocketAddr) {
+    let me = SigningKey::from_bytes(&[30u8; 32]).verifying_key();
+    let addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    let peer_addr: SocketAddr = format!("127.0.0.1:{}", free_port()).parse().unwrap();
+    let peers = HashMap::from([(me, addr), (peer.verifying_key(), peer_addr)]);
+    let (net, runtime) = TcpNetwork::bind(me, addr, peers).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    (net, runtime, addr)
+}
+
+fn frame_for(sender: &SigningKey, message: &Message) -> Vec<u8> {
+    let body = message.try_to_vec().unwrap();
+    let length = u32::try_from(32 + body.len()).unwrap();
+    let mut frame = length.to_be_bytes().to_vec();
+    frame.extend_from_slice(&sender.verifying_key().to_bytes());
+    frame.extend_from_slice(&body);
+    frame
+}
+
+/// A valid message of about 1 MiB.
+fn large_message() -> Message {
+    let block = Block::new(
+        BlockHeight::new(1),
+        PhaseCertificate::genesis_pc(),
+        CryptoHash::new([0u8; 32]),
+        Data::new(vec![Datum::new(vec![7u8; LARGE_PAYLOAD])]),
+    );
+    Message::from(BlockSyncResponse {
+        blocks: vec![block],
+        highest_pc: PhaseCertificate::genesis_pc(),
+    })
+}
+
+#[test]
+fn test_non_member_frame_is_refused_before_its_body_is_read() {
+    let member = SigningKey::from_bytes(&[31u8; 32]);
+    let outsider = SigningKey::from_bytes(&[32u8; 32]);
+    let (_net, _runtime, addr) = receiver_with_peer(&member);
+
+    let mut stream = TcpStream::connect(addr).unwrap();
+    let mut header = u32::try_from(16 * 1024 * 1024)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    header.extend_from_slice(&outsider.verifying_key().to_bytes());
+    stream.write_all(&header).unwrap();
+
+    // The receiver closes the connection at once; it neither allocates nor waits for 16 MiB.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let started = Instant::now();
+    let mut byte = [0u8; 1];
+    match stream.read(&mut byte) {
+        Ok(0) => {}
+        Err(e) if e.kind() == ErrorKind::ConnectionReset => {}
+        other => panic!(
+            "connection still open after {:?}: {other:?}",
+            started.elapsed()
+        ),
+    }
+}
+
+#[test]
+fn test_inbound_bytes_from_one_peer_are_bounded_by_backpressure() {
+    let peer = SigningKey::from_bytes(&[33u8; 32]);
+    let (mut net, _runtime, addr) = receiver_with_peer(&peer);
+    let frame = frame_for(&peer, &large_message());
+
+    let mut stream = TcpStream::connect(addr).unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    // The replica never calls `recv`: frames pile up until the peer's budget is full and the
+    // reader stops reading, so the sender's writes block.
+    let mut sent = 0;
+    while sent < FLOOD_FRAMES && stream.write_all(&frame).is_ok() {
+        sent += 1;
+    }
+    assert!(
+        sent < BUDGET_FRAMES + SOCKET_SLACK_FRAMES,
+        "receiver kept buffering: {sent} frames of 1 MiB accepted"
+    );
+
+    // Taking messages returns budget. The flooding connection may now hold a partial frame, so
+    // prove the reader resumes with a fresh connection and a message we can recognise.
+    drop(stream);
+    let marker = Message::from(BlockSyncRequest {
+        chain_id: ChainID::new(42),
+        start_height: BlockHeight::new(424_242),
+        limit: 1,
+    });
+    let mut fresh = TcpStream::connect(addr).unwrap();
+    fresh
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    fresh.write_all(&frame_for(&peer, &marker)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut drained = 0;
+    let found = loop {
+        assert!(
+            Instant::now() < deadline,
+            "marker not delivered after draining {drained} messages"
+        );
+        match net.recv() {
+            Some((_, Message::BlockSyncMessage(BlockSyncMessage::BlockSyncRequest(r))))
+                if r.start_height == BlockHeight::new(424_242) =>
+            {
+                break true;
+            }
+            Some(_) => drained += 1,
+            None => {}
+        }
+    };
+    assert!(found);
+    assert!(drained > 0, "flooded frames were never delivered");
+}

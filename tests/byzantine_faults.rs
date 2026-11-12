@@ -25,7 +25,7 @@ use hotstuff_rs::hotstuff::messages::HotStuffMessage;
 use hotstuff_rs::hotstuff::types::Phase;
 use hotstuff_rs::networking::messages::{Message, ProgressMessage};
 use hotstuff_rs::networking::network::Network;
-use hotstuff_rs::types::data_types::CryptoHash;
+use hotstuff_rs::types::data_types::{CryptoHash, Power};
 use hotstuff_rs::types::update_sets::ValidatorSetUpdates;
 use hotstuff_rs::types::validator_set::{ValidatorSet, VerifyingKey};
 use miraset_chain::core::types::Transaction;
@@ -217,6 +217,29 @@ impl Cluster {
         }
     }
 
+    /// Validator reconfiguration is disabled (TODO 8.3.3; reviewed in 8.5.2): no replica,
+    /// honest or Byzantine-proposed, ever records a validator-set update, and the committed set
+    /// is still the genesis set.
+    fn assert_validator_set_unchanged(&self, replicas: &[usize]) {
+        let mut genesis = ValidatorSet::new();
+        for key in &self.keys {
+            genesis.put(&key.verifying_key(), Power::new(1));
+        }
+        for &replica in replicas {
+            let snapshot = self.nodes[replica].block_tree_camera().snapshot();
+            assert_eq!(
+                snapshot.validator_set_update_block_height().expect("read"),
+                None,
+                "replica {replica} recorded a validator-set update"
+            );
+            let committed = snapshot.committed_validator_set().expect("read");
+            assert!(
+                committed.validators_and_powers() == genesis.validators_and_powers(),
+                "replica {replica} committed validator set changed"
+            );
+        }
+    }
+
     /// Safety: at every height two replicas both committed, they committed the same block.
     fn assert_no_conflicting_commits(&self, replicas: &[usize]) {
         let chains: Vec<Vec<CryptoHash>> = replicas
@@ -301,6 +324,7 @@ fn test_cloned_validator_key_equivocates_without_breaking_safety() {
     cluster.assert_no_conflicting_commits(&honest);
     // The clones run correct code: they also only commit quorum-certified blocks.
     cluster.assert_no_conflicting_commits(&(0..=CLONE).collect::<Vec<_>>());
+    cluster.assert_validator_set_unchanged(&(0..=CLONE).collect::<Vec<_>>());
     eprintln!(
         "equivocation: {proposal_views} views with conflicting proposals, {vote_views} with \
          conflicting votes, {split_views} where honest votes split; honest height {}",
