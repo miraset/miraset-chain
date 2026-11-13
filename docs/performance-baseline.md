@@ -308,3 +308,60 @@ Cluster of 5: idle RAM ≈ 55 MB, network ≈ 90 KB/s; under load RAM ≈ 5.7 Gi
     signature-cost risk from the review stays open at full 8 MiB blocks, which this load did
     not reach. RSS growth must be checked in a longer run.
 
+## Stress test: stepped load to saturation (2026-11-13)
+
+`scripts/devnet/stress.sh` (raw outputs kept outside the repository). 5 validators, 8 MiB blocks,
+`--min-block-interval-ms 1000`, `max_view_time` 2 s, RPC submission limit raised, each node
+limited to 2.5 GiB of memory. Transfers only (receipts are capped per coordinator and would hide
+the transaction ceiling). Four loadgens × 256 senders × 7 500 tx/s were to start 150 s apart
+(7.5k → 15k → 22.5k → 30k tx/s); metrics over the last 90 s of each step. Host: 16 cores,
+30 GB RAM, shared by the 5 validators, Prometheus and the loadgens.
+
+**What actually ran:** loadgens 3 and 4 never sent load. Their faucet funding transfers were
+refused with 503 (mempools full), so the offered load was 7.5k tx/s, then 15k tx/s for the rest
+of the run. The ceiling is already visible at 15k.
+
+| Measure (per validator) | 7.5k tx/s offered | 15k tx/s offered (3 windows, same picture) |
+|---|---|---|
+| Committed | **7 405 tx/s** (all admitted) | **5 900–7 130 tx/s** (saturated) |
+| Blocks | 1.0 /s, 2.76 MB | **0.51–0.57 /s**, 4.3–4.8 MB (up to 19 678 tx, the mempool cap) |
+| View timeouts | 0 | **0.24–0.29 /s** (one view in four), timeout certificates 0.28–0.37 /s |
+| Commit interval | p50 1.0 s, p99 3.9–4.7 s | p50 1.6–2.1 s, p99 4.9–9.5 s |
+| Admission | — | 503 "mempool full" for 55 % of offered transactions (3.6 M), 429 per-sender quota 0.03 M |
+| Latency of committed tx (whole run) | — | p50 8.4–12.6 s, p99 18–19 s, max 35 s |
+| CPU (process) | 0.86–0.88 cores | 1.15–1.30 cores (peaks ≈ 2 cores) |
+| RAM (process RSS) | 0.61–0.66 GB | 1.3–1.7 GB (peak container 1.6 GiB of the 2.5 GiB limit) |
+| Disk (`chain.redb`) | ≈ 0.95 GB after 2.5 min | 3.8 GB after ≈ 10 min (≈ 6.3 MB/s, ≈ 0.55 TB/day) |
+| Network, all (in / out) | 2.9–3.0 / 2.6–2.8 MB/s | 3.9–4.2 / 3.2–3.7 MB/s (≈ 33 / 30 Mbit/s) |
+| Network, P2P (each way) | ≈ 2.2 MB/s | 1.9–2.7 MB/s |
+| Faults | none | no OOM kill, no restart, no ERROR log line, no P2P rejection; agreement OK up to height 432 |
+
+Host: used memory peaked at 22 GB (9.4 GB still available); the cluster moved ≈ 37 MB/s
+(≈ 300 Mbit/s) at saturation.
+
+19. **Measured ceiling on this host: ≈ 7 000 tx/s** (5 validators, 1 block/s, 8 MiB blocks),
+    below the earlier 10–12k estimate. Past it, offering more does not commit more: blocks grow
+    toward the 20 000-transaction mempool cap (4–5 MB), a full block no longer fits a 2 s view
+    (the leader waits up to 1 s for the block interval, then builds the block; replicas then
+    re-execute it; signature checks are serial on both), so one view in four times out and
+    the block rate halves. Committed throughput stays near 7 000 tx/s, but latency and its
+    tail double.
+20. **Overload is shed safely:** mempools fill and refuse with 503, nothing crashes or forks,
+    memory stays bounded (≤ 1.7 GB RSS), and the chain keeps committing through the view
+    timeouts. The cost is latency (p99 ≈ 19 s) and refused submissions.
+21. **Where the ceiling comes from, by measured effect:**
+    - per-transaction CPU on one thread: signature check plus execution, once by the leader and
+      once by every replica;
+    - the strict 1 s block interval spends part of the 2 s view before production starts.
+
+    Candidate fixes, none measured yet:
+    - verify signatures in parallel (or once, at admission, with a cache);
+    - start the strict interval when the parent is received, not from its timestamp;
+    - cap a block's transactions so a block always fits the view;
+    - raise `max_view_time`;
+    - drop the strict block interval: blocks then come as fast as the CPU allows (see the
+      heartbeat-only run).
+22. **Test-harness gap:** the stress script funds each loadgen's senders when it starts, which
+    fails once mempools are full; offered load above 15k tx/s was not reached. Pre-funding
+    (a loadgen "fund only" mode) is needed to go further.
+

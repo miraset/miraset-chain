@@ -1,0 +1,16 @@
+services:
+  node0:
+    command: [start, --key-file=/var/lib/miraset-key/node0.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545, --rpc-submit-rate=100000, --rpc-submit-burst=100000, --min-block-interval-ms=1000]
+    mem_limit: 2560m
+  node1:
+    command: [start, --key-file=/var/lib/miraset-key/node1.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545, --rpc-submit-rate=100000, --rpc-submit-burst=100000, --min-block-interval-ms=1000]
+    mem_limit: 2560m
+  node2:
+    command: [start, --key-file=/var/lib/miraset-key/node2.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545, --rpc-submit-rate=100000, --rpc-submit-burst=100000, --min-block-interval-ms=1000]
+    mem_limit: 2560m
+  node3:
+    command: [start, --key-file=/var/lib/miraset-key/node3.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545, --rpc-submit-rate=100000, --rpc-submit-burst=100000, --min-block-interval-ms=1000]
+    mem_limit: 2560m
+  node4:
+    command: [start, --key-file=/var/lib/miraset-key/node4.key, --genesis=/devnet/genesis.json, --data-dir=/var/lib/miraset, --signing-guard=/var/lib/miraset-guard/signing-guard.redb, --p2p-addr=0.0.0.0:9948, --rpc-addr=0.0.0.0:8545, --rpc-submit-rate=100000, --rpc-submit-burst=100000, --min-block-interval-ms=1000]
+    mem_limit: 2560m
