@@ -274,3 +274,37 @@ Cluster of 5: idle RAM ≈ 50 MB, network ≈ 85 KB/s total; under the 10 000/s 
     to ≈ 8 GB/day and P2P from ≈ 690 KB/s to 45 KB/s per validator. Client-facing bandwidth at
     an over-capacity offer is dominated by refused submissions, not by consensus.
 
+## 8 MiB blocks at 1 block/s: idle and 10 000/s (2026-11-13)
+
+Same setup as the strict 1 block/s runs (5 validators, `--min-block-interval-ms 1000`, two
+5-minute runs, metrics over the last 4 minutes, RPC submission limit raised for the load run),
+after blocks became bounded by 8 MiB of payload instead of 100 transactions + 20 receipts
+(`d61f7e9`). Agreement OK up to height 329 after the runs.
+
+| Measure (per validator) | Idle (0 tx) | Offered 10 000/s (+ 15 % receipts) |
+|---|---|---|
+| Blocks | 1.0 /s, all empty (53 B) | 0.92 /s, mean interval 1.08 s, max 2.57 s; mean 7 507 tx + 256 receipts, max 9 968 tx; mean payload 2.95 MB |
+| Committed | — | **7 174 items/s** (6 938 tx/s + 237 receipts/s) |
+| Admission | — | 2.01 M tx admitted, 0.45 M refused 429 (per-sender quota); receipts 68 k admitted, 0.37 M refused 429 |
+| Latency of admitted items | — | tx p50 7.2 s, p99 9.9 s; receipts p50 4.8 s, p99 6.1 s |
+| Commit interval | p50 0.80 s, p99 1.97 s | p50 1.18–1.25 s, p99 4.7–4.8 s |
+| Disk growth | ≈ 5.5 MB/h → ≈ 130 MB/day | 2.03 GB in ≈ 5.5 min (≈ 6.5 MB/s) → **≈ 0.5 TB/day**; payload alone 2.7 MB/s ≈ 234 GB/day (storage ≈ 2.3× payload) |
+| RAM (container) | 8–14 MB | 1.14–1.16 GiB after 5 min |
+| RAM (process RSS) | 10.7 MB | 1.2–1.24 GB, still growing at the end (redb cache plus ≈ 50 k pending items); not shown to level off in 5 min |
+| CPU | 0.03 cores | 0.99–1.03 cores |
+| Network, all (in / out) | 8.7 / 9.2 KB/s | 3.5–3.6 MB/s in / 3.0–3.2 MB/s out (≈ 29 / 25 Mbit/s) |
+| Network, P2P only (each way) | 5.6 KB/s | 2.15–2.22 MB/s (≈ 17.5 Mbit/s) |
+| View timeouts, timeout certificates, P2P rejections | 0 | 0 |
+
+Cluster of 5: idle RAM ≈ 55 MB, network ≈ 90 KB/s; under load RAM ≈ 5.7 GiB, network
+≈ 33 MB/s (≈ 260 Mbit/s), of which P2P ≈ 11 MB/s.
+
+18. **8 MiB blocks raise throughput at 1 block/s from 120 to ≈ 7 200 items/s (60×)**; blocks
+    averaged 2.95 MB, about a third of the limit. The limit now is admission, not block size:
+    without mempool gossip a block carries only its leader's pool, and the per-sender quota
+    refused 18 % of offered transactions and 84 % of receipts. Costs scale with it: ≈ 1 CPU
+    core, ≈ 1.2 GB RSS and ≈ 0.5 TB/day of disk per validator, ≈ 17.5 Mbit/s P2P each way.
+    Commit intervals stretch (p99 ≈ 4.8 s, 0.92 blocks/s) without view timeouts; the
+    signature-cost risk from the review stays open at full 8 MiB blocks, which this load did
+    not reach. RSS growth must be checked in a longer run.
+
