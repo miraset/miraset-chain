@@ -237,3 +237,34 @@ Findings:
     hypothetical 10 000 committed items/s that would be ≈ 650 GB/day. Retention/pruning is an
     owner decision before any sustained high-throughput run.
 
+## Strict 1 block/s: idle and 10 000/s, with RAM and network (2026-11-13)
+
+`--min-block-interval-ms 1000` (owner request: at most one block per second, empty or not), on
+top of the heartbeat and `max_view_time` 2 s. Same setup as above: 5 validators, two 5-minute
+runs, metrics over the last 4 minutes; RPC submission limit raised for the load run.
+Network: `eth0` byte counters inside each validator container over 240 s (all traffic: P2P and
+client RPC) and `miraset_p2p_bytes_total` (P2P only). RAM: container memory (`docker stats`) and
+process RSS. Agreement checked after the runs (OK).
+
+| Measure (per validator) | Idle (0 tx) | Offered 10 000/s |
+|---|---|---|
+| Blocks | 1.0 /s, all empty | 1.0 /s, all full (100 tx + 20 receipts, 49 KB payload) |
+| Committed | — | **120 items/s** (100 tx/s + 20 receipts/s) |
+| Admission | — | 35 k admitted, 2.4 M refused with 429 (per-sender quota) |
+| Latency of admitted items | — | tx p50 11.9 s, p99 13.6 s; receipts p50 65 s (queue) |
+| Disk growth | ≈ 5 MB/h → ≈ 130 MB/day | 0.27–0.44 GB/h by file size (redb steps) ≈ 7–10 GB/day; ≈ 750 B × 120/s ≈ 7.8 GB/day |
+| RAM (container) | 8–12 MB | 48–53 MB after 5 min |
+| RAM (process RSS) | 10.7 MB, +5 MB/h | 51–56 MB, +0.3 GB/h (redb cache, levels off near 1 GiB) |
+| CPU | 0.025 cores | 0.39–0.41 cores |
+| Network, all (in / out) | 8.5 / 9.0 KB/s (0.07 Mbit/s each way, ≈ 1.5 GB/day total) | 1.33–1.43 MB/s in / 0.77–0.91 MB/s out (≈ 11 / 7 Mbit/s; mostly client submissions, 99 % refused) |
+| Network, P2P only (each way) | 5.6 KB/s | 44.8 KB/s (0.36 Mbit/s) |
+| View timeouts, P2P rejections | 0 | 0 |
+
+Cluster of 5: idle RAM ≈ 50 MB, network ≈ 85 KB/s total; under the 10 000/s offer RAM
+≈ 245 MB, network ≈ 10.7 MB/s total (≈ 86 Mbit/s), of which P2P ≈ 0.45 MB/s.
+
+17. **Strict 1 block/s caps throughput at 120 items/s** (block size cap per second), about 18×
+    below the heartbeat-only capacity (≈ 2 200/s); disk under full load drops from ≈ 145 GB/day
+    to ≈ 8 GB/day and P2P from ≈ 690 KB/s to 45 KB/s per validator. Client-facing bandwidth at
+    an over-capacity offer is dominated by refused submissions, not by consensus.
+

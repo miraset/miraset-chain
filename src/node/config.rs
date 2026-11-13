@@ -52,6 +52,12 @@ pub struct NodeConfig {
     /// view. The effective value never exceeds half of `max_view_time`, so a waiting leader
     /// always proposes before its replicas time out ([`Self::effective_empty_block_interval`]).
     pub empty_block_interval: Duration,
+    /// Strict block-rate limit: a leader proposes any block (empty or not) no earlier than this
+    /// after its parent, so the chain makes at most one block per interval. Zero (default)
+    /// leaves only the empty-block heartbeat. Capped at half of `max_view_time` like the
+    /// heartbeat ([`Self::effective_min_block_interval`]). Throughput is then bounded by
+    /// `MAX_BLOCK_TXS` + receipts per interval.
+    pub min_block_interval: Duration,
     pub log_events: bool,
     /// When set, startup fails unless the store's recorded genesis commitment matches.
     pub expected_genesis_hash: Option<[u8; 32]>,
@@ -73,6 +79,7 @@ impl std::fmt::Debug for NodeConfig {
             .field("experimental_mode", &self.experimental_mode)
             .field("max_view_time", &self.max_view_time)
             .field("empty_block_interval", &self.empty_block_interval)
+            .field("min_block_interval", &self.min_block_interval)
             .finish_non_exhaustive()
     }
 }
@@ -99,6 +106,7 @@ impl NodeConfig {
             epoch_length: DEFAULT_EPOCH_LENGTH,
             max_view_time: DEFAULT_MAX_VIEW_TIME,
             empty_block_interval: DEFAULT_EMPTY_BLOCK_INTERVAL,
+            min_block_interval: Duration::ZERO,
             log_events: false,
             expected_genesis_hash: None,
             safety_halt: SafetyHalt::new(),
@@ -109,6 +117,11 @@ impl NodeConfig {
     /// The heartbeat interval actually used: `empty_block_interval`, at most half the view time.
     pub fn effective_empty_block_interval(&self) -> Duration {
         self.empty_block_interval.min(self.max_view_time / 2)
+    }
+
+    /// The strict block-rate limit actually used: at most half the view time.
+    pub fn effective_min_block_interval(&self) -> Duration {
+        self.min_block_interval.min(self.max_view_time / 2)
     }
 
     /// Validates that the node configuration respects the current protocol gate boundaries.

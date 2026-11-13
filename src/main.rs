@@ -119,6 +119,11 @@ struct StartArgs {
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1_000_000))]
     rpc_submit_burst: u32,
 
+    /// Strict block-rate limit in milliseconds: no block (empty or not) sooner than this after
+    /// its parent; 0 = off (only the 1 s empty-block heartbeat). Capped at half the view time.
+    #[arg(long, default_value_t = 0)]
+    min_block_interval_ms: u64,
+
     /// On SIGTERM/SIGINT, refuse admission and report not ready for this long before stopping,
     /// so load balancers and clients move away first
     #[arg(long, default_value_t = 2_000, value_parser = clap::value_parser!(u64).range(0..=60_000))]
@@ -568,6 +573,7 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
     config.expected_genesis_hash = Some(genesis_hash);
     config.safety_halt = safety_halt.clone();
     config.ready_max_commit_age = Duration::from_secs(cli.ready_max_commit_age_secs);
+    config.min_block_interval = Duration::from_millis(cli.min_block_interval_ms);
     // A consensus parameter fixed at genesis (TODO 8.5.2 F2).
     config.epoch_length = genesis.protocol.consensus_epoch_length;
     let node = Arc::new(MirasetNode::try_start(

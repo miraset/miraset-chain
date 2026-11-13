@@ -47,6 +47,7 @@ const MAX_FAILED_CANDIDATES: usize = 256;
 pub struct MirasetApp {
     mempool: Mempool,
     empty_block_interval: std::time::Duration,
+    min_block_interval: std::time::Duration,
 }
 
 impl MirasetApp {
@@ -54,6 +55,7 @@ impl MirasetApp {
         Self {
             mempool,
             empty_block_interval: std::time::Duration::ZERO,
+            min_block_interval: std::time::Duration::ZERO,
         }
     }
 
@@ -63,6 +65,13 @@ impl MirasetApp {
     /// `NodeConfig::effective_empty_block_interval` (at most half of `max_view_time`).
     pub fn with_empty_block_interval(mut self, interval: std::time::Duration) -> Self {
         self.empty_block_interval = interval;
+        self
+    }
+
+    /// Propose any block (empty or not) at most once per `interval` of block time; zero turns
+    /// the limit off. Same view-time bound as [`Self::with_empty_block_interval`].
+    pub fn with_min_block_interval(mut self, interval: std::time::Duration) -> Self {
+        self.min_block_interval = interval;
         self
     }
 
@@ -300,6 +309,7 @@ impl<K: KVStore> App<K> for MirasetApp {
         // block are bounded, and each block makes progress through them. Eviction is local to
         // this node's pool: a transaction that only failed on this fork's state is dropped and
         // must be resubmitted.
+        heartbeat::wait_for_min_block_interval(&request, self.min_block_interval);
         heartbeat::wait_for_work_or_heartbeat(&request, &self.mempool, self.empty_block_interval);
         let tree = request.block_tree();
         // Block time: the local clock, but always after the parent block's (TODO 8.5.1).

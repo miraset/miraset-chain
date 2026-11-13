@@ -46,6 +46,22 @@ pub(super) fn wait_for_work_or_heartbeat<K: KVStore>(
     wait_until(Instant::now() + wait.min(interval), || has_work(mempool));
 }
 
+/// Strict block-rate limit (owner request 2026-11-13): whatever the work, a leader proposes no
+/// earlier than `interval` after its parent's block time, so the chain makes at most one block
+/// per `interval`. The wait is capped at `interval` from now, like the heartbeat.
+pub(super) fn wait_for_min_block_interval<K: KVStore>(
+    request: &ProduceBlockRequest<'_, K>,
+    interval: Duration,
+) {
+    if interval.is_zero() || request.parent_block().is_none() {
+        return;
+    }
+    let interval_ms = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+    let due_ms = MirasetApp::read_chain_time_ms(request.block_tree()).saturating_add(interval_ms);
+    let wait = Duration::from_millis(due_ms.saturating_sub(now_ms()));
+    wait_until(Instant::now() + wait.min(interval), || false);
+}
+
 /// Sleep until `deadline` or until `work` reports something to do, checking every [`POLL`].
 ///
 /// The caller caps the deadline at `interval` from now: the parent's block time comes from

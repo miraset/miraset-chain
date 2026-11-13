@@ -208,6 +208,10 @@ taken before the restore), then restart. Restoring a backup taken at the current
 
 ## Known limitations
 
+- **Block rate:** a leader proposes an empty block at most once per second (heartbeat) and a
+  block with work at once; `--min-block-interval-ms N` additionally limits every block to one per
+  N ms (owner request 2026-11-13; at 1000 the chain commits at most 100 transactions + 20
+  receipts per second). Both are capped at half of `max_view_time` (2 s).
 - **Pacemaker epoch length is a genesis parameter (TODO 8.5.2 F2):** `protocol.consensus_epoch_length`,
   default 1, range 1..=10, logged at startup (`epoch_length=`). It is part of the genesis
   commitment, so validators of one chain share it, and a node refuses to start with chain data

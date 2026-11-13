@@ -210,7 +210,8 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
 
         let safety_halt = config.safety_halt.clone();
         let app = MirasetApp::new(mempool.clone())
-            .with_empty_block_interval(config.effective_empty_block_interval());
+            .with_empty_block_interval(config.effective_empty_block_interval())
+            .with_min_block_interval(config.effective_min_block_interval());
         let hs_config = config.to_hotstuff_config();
 
         let (commit_sender, _) = broadcast::channel(1024);

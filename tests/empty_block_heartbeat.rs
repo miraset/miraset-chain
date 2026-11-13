@@ -174,3 +174,59 @@ fn test_transfers_commit_promptly_with_a_crashed_validator() {
         "slowest transfer {slowest:?} (view time {VIEW_TIME:?})"
     );
 }
+
+/// Strict block-rate limit (owner request 2026-11-13): with work waiting in every view, the
+/// chain still makes at most one block per `min_block_interval`.
+#[test]
+fn test_min_block_interval_limits_blocks_even_with_work() {
+    const LIMIT: Duration = Duration::from_millis(500);
+    const SENDERS: u8 = 40;
+    let senders: Vec<SigningKey> = (0..SENDERS).map(|i| key(100 + i)).collect();
+    let addrs: Vec<String> = senders.iter().map(address).collect();
+    let validator = key(60);
+    let vk = validator.verifying_key();
+    let kv = MemKVStore::new();
+    let pocc = Pocc::default();
+    let parties = pocc.genesis_accounts();
+    let mut accounts: Vec<(&str, u64)> = parties.iter().map(|(a, b)| (a.as_str(), *b)).collect();
+    accounts.extend(addrs.iter().map(|a| (a.as_str(), 1_000)));
+    init_genesis_with_params(kv.clone(), 1337, &[(vk, 1)], &accounts, &pocc.params());
+    let config = NodeConfig {
+        max_view_time: VIEW_TIME,
+        min_block_interval: LIMIT,
+        ..NodeConfig::devnet(validator)
+    };
+    let node = MirasetNode::start(
+        config,
+        kv,
+        ChannelNetwork::new(vk, ChannelNetworkHub::new()),
+        Mempool::new(),
+    );
+    wait(Duration::from_secs(10), "first commit", || {
+        node.highest_committed_height().is_some()
+    });
+    // Keep the mempool non-empty: one transfer per sender per nonce, well ahead of the chain.
+    for nonce in 0..10 {
+        for (sender, addr) in senders.iter().zip(&addrs) {
+            let mut tx = Transaction::new(addr, nonce, "bob", 1, 1);
+            tx.sign_with(sender);
+            let _ = node.submit_transaction(tx);
+        }
+    }
+    let before = node.highest_committed_height().unwrap();
+    thread::sleep(IDLE);
+    let blocks = node.highest_committed_height().unwrap() - before;
+    let most = (IDLE.as_millis() / LIMIT.as_millis()) as u64 + 1;
+    assert!(
+        blocks <= most,
+        "{blocks} blocks in {IDLE:?} with a {LIMIT:?} limit (at most {most})"
+    );
+    assert!(
+        blocks >= most / 2,
+        "chain stalled: {blocks} blocks in {IDLE:?}"
+    );
+    assert!(
+        node.get_account("bob").is_some_and(|a| a.balance > 0),
+        "work was committed under the limit"
+    );
+}
