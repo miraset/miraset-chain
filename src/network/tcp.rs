@@ -1,65 +1,54 @@
-//! Static-peer, length-framed TCP transport for `hotstuff_rs`.
+//! Static-peer TCP transport for `hotstuff_rs`, authenticated with Noise (TODO 8.4.1).
 //!
 //! Each configured peer gets its own outbound worker with a bounded queue and a persistent
 //! connection, so an unreachable or slow peer only delays (and eventually drops) its own
 //! messages instead of stalling delivery to the rest of the validator set. Peer addresses are
 //! `host:port` strings resolved at connect time, so container/DNS names work.
 //!
-//! Frame format: `u32 BE length` || `32-byte sender verifying key` || `borsh(Message)`.
-//! The sender key is self-declared and only checked against the configured peer table; it is
-//! NOT authenticated (TODO 8.4.1).
+//! **Identity (8.4.1, `docs/adr/proposal-transport-identity.md`).** Every connection starts with
+//! a Noise `XX` handshake in which each side proves its validator key (`noise.rs`). Outbound
+//! connections accept only the validator they dialled; inbound ones (`inbound.rs`) only
+//! configured validators, and the message origin is the proven key. A frame is
+//! `u32 BE plaintext length ‖ encrypted chunks`; nothing in it names the sender.
 //!
-//! Memory (TODO 8.5.2 F6): queues are bounded in bytes as well as messages. Each configured peer
-//! has an inbound budget (frames read from it and not yet taken by the replica), all peers share
-//! a global inbound budget, and each peer has an outbound budget (frames queued for it). A reader
-//! checks the sender key before allocating a frame body and waits (TCP backpressure, bounded by
-//! `BUDGET_WAIT_LIMIT`) while the budgets are full; a reserved body must arrive within
-//! `BODY_READ_LIMIT`. An outbound frame over the peer's budget is dropped like one over the count
-//! limit. Reservations travel with the queued item and are returned when it is dropped.
+//! **Memory (8.5.2 F6).** Queues are bounded in bytes as well as messages: per-validator and
+//! global inbound budgets (with TCP backpressure), and a per-peer outbound budget (frames over it
+//! are dropped). Reservations travel with the queued item and return when it is dropped.
 
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::BorshSerialize;
 use hotstuff_rs::networking::messages::Message;
 use hotstuff_rs::networking::network::Network;
 use hotstuff_rs::types::crypto_primitives::VerifyingKey;
 use hotstuff_rs::types::update_sets::ValidatorSetUpdates;
 use hotstuff_rs::types::validator_set::ValidatorSet;
 use socket2::{SockRef, TcpKeepalive};
-
-use super::byte_budget::{ByteBudget, Reservation};
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-const SENDER_KEY_BYTES: usize = 32;
-const MAX_INBOUND_CONNECTIONS: usize = 64;
+use super::byte_budget::{ByteBudget, Reservation};
+use super::inbound::{Acceptor, Budgets, HANDSHAKE_TIMEOUT};
+use super::noise::{Session, TransportIdentity, TransportRejections, rejection_of};
+
+/// Largest plaintext message (borsh `Message`).
+pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const INBOUND_QUEUE_CAPACITY: usize = 4096;
 const PEER_QUEUE_CAPACITY: usize = 1024;
-/// Bytes of frames from one peer waiting for the replica (room for four maximum frames).
+/// Bytes of frames from one validator waiting for the replica (room for four maximum frames).
 const PEER_INBOUND_BYTES: usize = 4 * MAX_FRAME_BYTES;
 /// Bytes of frames queued for one peer.
 const PEER_OUTBOUND_BYTES: usize = 4 * MAX_FRAME_BYTES;
-/// Bytes of frames from all peers waiting for the replica.
+/// Bytes of frames from all validators waiting for the replica.
 const GLOBAL_INBOUND_BYTES: usize = 16 * MAX_FRAME_BYTES;
-/// How often a reader waiting for inbound budget re-checks it (and shutdown).
-const BUDGET_WAIT: Duration = Duration::from_millis(5);
-/// A reader that cannot reserve budget for this long closes its connection (the peer
-/// reconnects), so a stuck budget cannot park connection slots indefinitely.
-const BUDGET_WAIT_LIMIT: Duration = Duration::from_secs(30);
-/// A frame body holding a reservation must arrive within this long (16 MiB at about 0.5 MiB/s),
-/// so trickled bytes cannot pin a budget.
-const BODY_READ_LIMIT: Duration = Duration::from_secs(30);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 /// After a failed connect, messages to that peer are dropped (not queued) for this long.
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(200);
-/// Read timeout used to periodically observe shutdown on idle inbound connections.
-const READ_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Abort a connection whose sent data stays unacknowledged this long (Linux `TCP_USER_TIMEOUT`).
 /// Without it, a peer that vanished without a RST (partition, IP change) black-holes writes into
 /// the kernel send buffer for many minutes while `write_all` keeps reporting success.
@@ -67,28 +56,25 @@ const READ_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TCP_USER_TIMEOUT: Duration = Duration::from_secs(3);
 const KEEPALIVE_IDLE: Duration = Duration::from_secs(2);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
-/// Live validators send block-sync advertisements every ~500ms, so an inbound connection silent
-/// for this long is dead; closing it frees its slot in `MAX_INBOUND_CONNECTIONS`.
-const INBOUND_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
-const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// `hotstuff_rs` polls `recv` in a `yield_now` loop; wait briefly so idle nodes don't spin a core.
 const RECV_WAIT: Duration = Duration::from_millis(1);
 
 type PeerQueues = Arc<HashMap<VerifyingKey, PeerQueue>>;
-type Budgets = Arc<HashMap<VerifyingKey, Arc<ByteBudget>>>;
 
-/// Outbound queue for one peer and the byte budget its queued frames hold.
+/// Outbound queue for one peer and the byte budget its queued messages hold.
 struct PeerQueue {
     sender: SyncSender<Outbound>,
     budget: Arc<ByteBudget>,
 }
 
-/// A frame queued for a peer and the outbound bytes it holds until written or dropped.
+/// A plaintext message body queued for a peer and the outbound bytes it holds until written or
+/// dropped. Each worker encrypts it in its own session.
 type Outbound = (Arc<Vec<u8>>, Reservation);
 
-/// A received message and the inbound bytes it holds until the replica takes it.
-type Inbound = (VerifyingKey, Message, Reservation);
+/// A received message, its authenticated origin, and the inbound bytes it holds until the
+/// replica takes it.
+pub(crate) type Inbound = (VerifyingKey, Message, Reservation);
 
 /// Background threads (listener and per-peer senders) owned by a [`TcpNetwork`].
 /// Dropping it stops the transport and releases the listening socket.
@@ -106,7 +92,7 @@ impl Drop for NetworkRuntime {
     }
 }
 
-/// Length-delimited framed TCP adapter implementing `hotstuff_rs::networking::network::Network`.
+/// Authenticated TCP adapter implementing `hotstuff_rs::networking::network::Network`.
 #[derive(Clone)]
 pub struct TcpNetwork {
     local_key: VerifyingKey,
@@ -115,12 +101,13 @@ pub struct TcpNetwork {
     local_inbound: SyncSender<Inbound>,
     inbound: Arc<Mutex<Receiver<Inbound>>>,
     dropped_messages: Arc<AtomicU64>,
+    rejections: Arc<TransportRejections>,
 }
 
 impl TcpNetwork {
     /// Bind with numeric peer socket addresses.
     pub fn bind(
-        local_key: VerifyingKey,
+        identity: Arc<TransportIdentity>,
         address: SocketAddr,
         peer_addresses: HashMap<VerifyingKey, SocketAddr>,
     ) -> io::Result<(Self, NetworkRuntime)> {
@@ -128,40 +115,41 @@ impl TcpNetwork {
             .into_iter()
             .map(|(key, addr)| (key, addr.to_string()))
             .collect();
-        Self::bind_with_hosts(local_key, address, peers)
+        Self::bind_with_hosts(identity, address, peers)
     }
 
-    /// Bind with `host:port` peer addresses that are resolved on every (re)connect.
+    /// Bind with `host:port` peer addresses that are resolved on every (re)connect. Only the
+    /// validators in `peer_addresses` can connect or be connected to.
     pub fn bind_with_hosts(
-        local_key: VerifyingKey,
+        identity: Arc<TransportIdentity>,
         address: SocketAddr,
         peer_addresses: HashMap<VerifyingKey, String>,
     ) -> io::Result<(Self, NetworkRuntime)> {
         let listener = TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
 
+        let local_key = identity.validator();
         let shutdown = Arc::new(AtomicBool::new(false));
         let dropped_messages = Arc::new(AtomicU64::new(0));
+        let rejections = Arc::new(TransportRejections::default());
         let (inbound_tx, inbound_rx) = mpsc::sync_channel(INBOUND_QUEUE_CAPACITY);
         let peer_addresses = Arc::new(peer_addresses);
 
         let mut threads = Vec::new();
         let mut queues = HashMap::new();
-        let inbound_budgets: Budgets = Arc::new(
-            peer_addresses
-                .keys()
-                .map(|peer| (*peer, Arc::new(ByteBudget::new(PEER_INBOUND_BYTES))))
-                .collect(),
-        );
         for (peer, host) in peer_addresses.iter().filter(|(k, _)| **k != local_key) {
             let (tx, rx) = mpsc::sync_channel(PEER_QUEUE_CAPACITY);
             let budget = Arc::new(ByteBudget::new(PEER_OUTBOUND_BYTES));
             queues.insert(*peer, PeerQueue { sender: tx, budget });
             let worker = PeerWorker {
+                peer: *peer,
                 host: host.clone(),
+                identity: Arc::clone(&identity),
+                peers: Arc::clone(&peer_addresses),
                 queue: rx,
                 shutdown: Arc::clone(&shutdown),
                 dropped: Arc::clone(&dropped_messages),
+                rejections: Arc::clone(&rejections),
             };
             threads.push(
                 thread::Builder::new()
@@ -170,11 +158,20 @@ impl TcpNetwork {
             );
         }
 
+        let budgets: Budgets = Arc::new(
+            peer_addresses
+                .keys()
+                .map(|peer| (*peer, Arc::new(ByteBudget::new(PEER_INBOUND_BYTES))))
+                .collect(),
+        );
         let acceptor = Acceptor {
             listener,
+            identity,
+            peers: Arc::clone(&peer_addresses),
             inbound: inbound_tx.clone(),
-            budgets: inbound_budgets,
+            budgets,
             global_budget: Arc::new(ByteBudget::new(GLOBAL_INBOUND_BYTES)),
+            rejections: Arc::clone(&rejections),
             shutdown: Arc::clone(&shutdown),
         };
         threads.push(
@@ -191,6 +188,7 @@ impl TcpNetwork {
                 local_inbound: inbound_tx,
                 inbound: Arc::new(Mutex::new(inbound_rx)),
                 dropped_messages,
+                rejections,
             },
             NetworkRuntime { shutdown, threads },
         ))
@@ -211,6 +209,11 @@ impl TcpNetwork {
         Arc::clone(&self.dropped_messages)
     }
 
+    /// Refused or closed connections by reason (handshake, attestation, framing, slots).
+    pub fn rejections(&self) -> Arc<TransportRejections> {
+        Arc::clone(&self.rejections)
+    }
+
     fn deliver_local(&self, message: Message) {
         if self
             .local_inbound
@@ -221,18 +224,18 @@ impl TcpNetwork {
         }
     }
 
-    fn enqueue(&self, peer: &VerifyingKey, frame: &Arc<Vec<u8>>) {
+    fn enqueue(&self, peer: &VerifyingKey, body: &Arc<Vec<u8>>) {
         let Some(queue) = self.peer_queues.get(peer) else {
             return;
         };
-        let Some(reservation) = Reservation::try_new(&[&queue.budget], frame.len()) else {
+        let Some(reservation) = Reservation::try_new(&[&queue.budget], body.len()) else {
             self.dropped_messages.fetch_add(1, Ordering::Relaxed);
             return;
         };
         // On a full queue the item (and its reservation) is dropped here.
         if queue
             .sender
-            .try_send((Arc::clone(frame), reservation))
+            .try_send((Arc::clone(body), reservation))
             .is_err()
         {
             self.dropped_messages.fetch_add(1, Ordering::Relaxed);
@@ -240,9 +243,9 @@ impl TcpNetwork {
     }
 
     fn encode(&self, message: &Message) -> Option<Arc<Vec<u8>>> {
-        match encode_frame(self.local_key.to_bytes(), message) {
-            Ok(frame) => Some(Arc::new(frame)),
-            Err(_) => {
+        match message.try_to_vec() {
+            Ok(body) if !body.is_empty() && body.len() <= MAX_FRAME_BYTES => Some(Arc::new(body)),
+            _ => {
                 self.dropped_messages.fetch_add(1, Ordering::Relaxed);
                 None
             }
@@ -256,9 +259,9 @@ impl Network for TcpNetwork {
     fn update_validator_set(&mut self, _updates: ValidatorSetUpdates) {}
 
     fn broadcast(&mut self, message: Message) {
-        if let Some(frame) = self.encode(&message) {
+        if let Some(body) = self.encode(&message) {
             for peer in self.peer_queues.keys() {
-                self.enqueue(peer, &frame);
+                self.enqueue(peer, &body);
             }
         }
         self.deliver_local(message);
@@ -267,8 +270,8 @@ impl Network for TcpNetwork {
     fn send(&mut self, peer: VerifyingKey, message: Message) {
         if peer == self.local_key {
             self.deliver_local(message);
-        } else if let Some(frame) = self.encode(&message) {
-            self.enqueue(&peer, &frame);
+        } else if let Some(body) = self.encode(&message) {
+            self.enqueue(&peer, &body);
         }
     }
 
@@ -280,46 +283,38 @@ impl Network for TcpNetwork {
     }
 }
 
-fn encode_frame(sender: [u8; SENDER_KEY_BYTES], message: &Message) -> io::Result<Vec<u8>> {
-    let body = message.try_to_vec()?;
-    let frame_len = SENDER_KEY_BYTES.saturating_add(body.len());
-    if frame_len > MAX_FRAME_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame exceeds max size",
-        ));
-    }
-    let length = u32::try_from(frame_len)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame length overflow"))?;
-    let mut frame = Vec::with_capacity(4 + frame_len);
-    frame.extend_from_slice(&length.to_be_bytes());
-    frame.extend_from_slice(&sender);
-    frame.extend_from_slice(&body);
-    Ok(frame)
+/// An authenticated outbound connection.
+struct Connection {
+    stream: TcpStream,
+    session: Session,
 }
 
-/// Outbound worker for one peer: owns a persistent connection and a bounded queue.
+/// Outbound worker for one peer: owns a persistent authenticated connection and a bounded queue.
 struct PeerWorker {
+    peer: VerifyingKey,
     host: String,
+    identity: Arc<TransportIdentity>,
+    peers: Arc<HashMap<VerifyingKey, String>>,
     queue: Receiver<Outbound>,
     shutdown: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
+    rejections: Arc<TransportRejections>,
 }
 
 impl PeerWorker {
     fn run(self) {
-        let mut stream: Option<TcpStream> = None;
+        let mut connection: Option<Connection> = None;
         let mut retry_after = Instant::now();
         while !self.shutdown.load(Ordering::Acquire) {
             // The reservation is returned when this iteration ends, written or not.
-            let (frame, _reservation) = match self.queue.recv_timeout(WORKER_POLL_INTERVAL) {
+            let (body, _reservation) = match self.queue.recv_timeout(WORKER_POLL_INTERVAL) {
                 Ok(item) => item,
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return,
             };
-            let delivered = if stream.is_none() && Instant::now() < retry_after {
+            let delivered = if connection.is_none() && Instant::now() < retry_after {
                 false
-            } else if self.write_frame(&mut stream, &frame) {
+            } else if self.write_frame(&mut connection, &body) {
                 true
             } else {
                 retry_after = Instant::now() + RECONNECT_BACKOFF;
@@ -331,227 +326,67 @@ impl PeerWorker {
         }
     }
 
-    /// Write on the existing connection, reconnecting once if it is absent or broken.
-    fn write_frame(&self, stream: &mut Option<TcpStream>, frame: &[u8]) -> bool {
+    /// Encrypt and write on the existing connection, reconnecting once if it is absent or broken.
+    fn write_frame(&self, connection: &mut Option<Connection>, body: &[u8]) -> bool {
         for _ in 0..2 {
-            if stream.is_none() {
-                *stream = self.connect().ok();
+            if connection.is_none() {
+                *connection = self.connect().ok();
             }
-            let Some(conn) = stream.as_mut() else {
+            let Some(conn) = connection.as_mut() else {
                 return false;
             };
-            if conn.write_all(frame).is_ok() {
+            let written = conn
+                .session
+                .seal_frame(body)
+                .and_then(|frame| conn.stream.write_all(&frame));
+            if written.is_ok() {
                 return true;
             }
-            *stream = None;
+            *connection = None;
         }
         false
     }
 
-    fn connect(&self) -> io::Result<TcpStream> {
+    fn connect(&self) -> io::Result<Connection> {
         let mut last_error = io::Error::new(io::ErrorKind::NotFound, "peer address unresolved");
         for address in self.host.to_socket_addrs()? {
-            match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
-                Ok(stream) => {
-                    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
-                    stream.set_nodelay(true)?;
-                    detect_dead_peers(&stream)?;
-                    return Ok(stream);
+            match self.connect_to(address) {
+                Ok(connection) => return Ok(connection),
+                Err(error) => {
+                    if let Some(reason) = rejection_of(&error) {
+                        self.rejections.record(reason);
+                        tracing::warn!(
+                            reason = reason.as_str(),
+                            %address,
+                            "outbound peer connection refused"
+                        );
+                    }
+                    last_error = error;
                 }
-                Err(error) => last_error = error,
             }
         }
         Err(last_error)
     }
-}
 
-/// Accepts inbound connections and spawns a bounded number of frame readers.
-struct Acceptor {
-    listener: TcpListener,
-    inbound: SyncSender<Inbound>,
-    budgets: Budgets,
-    global_budget: Arc<ByteBudget>,
-    shutdown: Arc<AtomicBool>,
-}
-
-impl Acceptor {
-    fn run(self) {
-        let active = Arc::new(AtomicUsize::new(0));
-        while !self.shutdown.load(Ordering::Acquire) {
-            match self.listener.accept() {
-                Ok((stream, _)) => self.spawn_reader(stream, &active),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(ACCEPT_POLL_INTERVAL);
-                }
-                Err(_) => thread::sleep(WORKER_POLL_INTERVAL),
-            }
-        }
-    }
-
-    fn spawn_reader(&self, stream: TcpStream, active: &Arc<AtomicUsize>) {
-        if active.fetch_add(1, Ordering::AcqRel) >= MAX_INBOUND_CONNECTIONS {
-            active.fetch_sub(1, Ordering::AcqRel);
-            return;
-        }
-        let reader = FrameReader {
-            stream,
-            inbound: self.inbound.clone(),
-            budgets: Arc::clone(&self.budgets),
-            global_budget: Arc::clone(&self.global_budget),
-            shutdown: Arc::clone(&self.shutdown),
-        };
-        let guard = ActiveConn(Arc::clone(active));
-        let spawned = thread::Builder::new()
-            .name("tcp-peer-reader".to_string())
-            .spawn(move || {
-                let _guard = guard;
-                let _ = reader.run();
-            });
-        // On spawn failure the closure (and its guard) is dropped, releasing the slot.
-        drop(spawned);
-    }
-}
-
-struct ActiveConn(Arc<AtomicUsize>);
-
-impl Drop for ActiveConn {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-/// Reads frames from one persistent inbound connection until EOF, error, or shutdown.
-struct FrameReader {
-    stream: TcpStream,
-    inbound: SyncSender<Inbound>,
-    budgets: Budgets,
-    global_budget: Arc<ByteBudget>,
-    shutdown: Arc<AtomicBool>,
-}
-
-impl FrameReader {
-    fn run(mut self) -> io::Result<()> {
-        self.stream.set_read_timeout(Some(READ_POLL_INTERVAL))?;
-        detect_dead_peers(&self.stream)?;
-        loop {
-            let mut length_bytes = [0u8; 4];
-            if !self.read_full(&mut length_bytes, None)? {
-                return Ok(());
-            }
-            let length = u32::from_be_bytes(length_bytes) as usize;
-            if !(SENDER_KEY_BYTES..=MAX_FRAME_BYTES).contains(&length) {
-                return Err(invalid("invalid frame length"));
-            }
-            let Some((peer, reservation)) = self.read_sender_and_reserve(length)? else {
-                return Ok(());
-            };
-            let mut body = vec![0u8; length - SENDER_KEY_BYTES];
-            if !self.read_full(&mut body, Some(Instant::now() + BODY_READ_LIMIT))? {
-                return Ok(());
-            }
-            self.dispatch(peer, &body, reservation)?;
-        }
-    }
-
-    /// Read the sender key, refuse a non-member before anything is allocated for its body, and
-    /// wait (TCP backpressure) until `length` bytes fit in the sender's and the global inbound
-    /// budget. `None` on shutdown or EOF.
-    fn read_sender_and_reserve(
-        &mut self,
-        length: usize,
-    ) -> io::Result<Option<(VerifyingKey, Reservation)>> {
-        let mut sender_bytes = [0u8; SENDER_KEY_BYTES];
-        if !self.read_full(&mut sender_bytes, None)? {
-            return Ok(None);
-        }
-        let peer = VerifyingKey::from_bytes(&sender_bytes).map_err(|_| invalid("bad key"))?;
-        let peer_budget = Arc::clone(self.budgets.get(&peer).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "peer not in configured validator set",
-            )
-        })?);
-        let give_up = Instant::now() + BUDGET_WAIT_LIMIT;
-        loop {
-            if let Some(reservation) =
-                Reservation::try_new(&[&peer_budget, &self.global_budget], length)
-            {
-                return Ok(Some((peer, reservation)));
-            }
-            if self.shutdown.load(Ordering::Acquire) {
-                return Ok(None);
-            }
-            if Instant::now() >= give_up {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "inbound budget stayed full",
-                ));
-            }
-            thread::sleep(BUDGET_WAIT);
-        }
-    }
-
-    /// Fill `buf`, retrying across read timeouts without losing partial progress.
-    /// Returns `Ok(false)` on shutdown or clean EOF before any byte of `buf` was read. With a
-    /// `deadline`, the whole read must finish by then, whatever the progress.
-    fn read_full(&mut self, buf: &mut [u8], deadline: Option<Instant>) -> io::Result<bool> {
-        let mut filled = 0;
-        let mut last_progress = Instant::now();
-        while filled < buf.len() {
-            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "inbound frame body too slow",
-                ));
-            }
-            if last_progress.elapsed() >= INBOUND_IDLE_TIMEOUT {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "inbound peer connection idle",
-                ));
-            }
-            if self.shutdown.load(Ordering::Acquire) {
-                return Ok(false);
-            }
-            match self.stream.read(&mut buf[filled..]) {
-                Ok(0) if filled == 0 => return Ok(false),
-                Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
-                Ok(n) => {
-                    filled += n;
-                    last_progress = Instant::now();
-                }
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                    ) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(true)
-    }
-
-    /// Decode and queue one message with its reservation (returned when the replica takes it,
-    /// or here if the message is dropped).
-    fn dispatch(
-        &self,
-        peer: VerifyingKey,
-        body: &[u8],
-        reservation: Reservation,
-    ) -> io::Result<()> {
-        let message = Message::try_from_slice(body).map_err(|_| invalid("bad message"))?;
-        match self.inbound.try_send((peer, message, reservation)) {
-            // A full inbound queue drops this message but keeps the connection.
-            Ok(()) | Err(TrySendError::Full(_)) => Ok(()),
-            Err(TrySendError::Disconnected(_)) => Err(io::ErrorKind::BrokenPipe.into()),
-        }
+    fn connect_to(&self, address: SocketAddr) -> io::Result<Connection> {
+        let mut stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)?;
+        stream.set_nodelay(true)?;
+        stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT))?;
+        detect_dead_peers(&stream)?;
+        let session = self.identity.initiate(
+            &mut stream,
+            &self.peers,
+            &self.peer,
+            Instant::now() + HANDSHAKE_TIMEOUT,
+        )?;
+        stream.set_read_timeout(None)?;
+        stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+        Ok(Connection { stream, session })
     }
 }
 
 /// Make silently-dead peers (no FIN/RST) surface as I/O errors within seconds.
-fn detect_dead_peers(stream: &TcpStream) -> io::Result<()> {
+pub(crate) fn detect_dead_peers(stream: &TcpStream) -> io::Result<()> {
     let socket = SockRef::from(stream);
     socket.set_tcp_keepalive(
         &TcpKeepalive::new()
@@ -561,8 +396,4 @@ fn detect_dead_peers(stream: &TcpStream) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     socket.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT))?;
     Ok(())
-}
-
-fn invalid(reason: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, reason)
 }

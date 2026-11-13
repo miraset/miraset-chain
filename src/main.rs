@@ -9,7 +9,7 @@ use miraset_chain::core::types::{
 };
 use miraset_chain::devnet::{self, DevnetSpec};
 use miraset_chain::mempool::Mempool;
-use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub, TcpNetwork};
+use miraset_chain::network::{ChannelNetwork, ChannelNetworkHub, TcpNetwork, TransportIdentity};
 use miraset_chain::node::{GenesisConfig, MirasetNode, NodeConfig, init_genesis_with_params};
 use miraset_chain::observability::logging::SAFETY_LOG_TARGET;
 use miraset_chain::observability::{LogFormat, VoteGuardLayer, init_logging};
@@ -532,25 +532,35 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
     );
     genesis.verify_store_validator_set(&kv_store)?;
 
-    let peers = genesis.peer_addresses(&vk)?;
-    let (tcp, runtime) = TcpNetwork::bind_with_hosts(vk, cli.p2p_addr, peers)?;
-    let p2p_dropped = tcp.dropped_messages_counter();
-    // Outermost layer: TcpNetwork delivers self-addressed votes inside `send`.
-    let network = GuardedNetwork::new(tcp, guard.clone(), safety_halt.clone());
-    let transport_refusals = network.refusals();
-
     // Key custody D1-D3: a local key moves into a GuardedSigner that checks the guard before
     // signing a phase vote; a remote signer holds key and guard in its own process. Either way
     // GuardedNetwork keeps this node's guard as a second layer.
     // A remote signer counts its refusals in its own process, so only a local one is exported.
     let (signer, signer_refusals): (Arc<dyn ValidatorSigner>, _) = match node_key {
         NodeKey::Local(signing_key) => {
-            let signer = GuardedSigner::new(*signing_key, guard)?;
+            let signer = GuardedSigner::new(*signing_key, guard.clone())?;
             let refusals = signer.refusals();
             (signer, Some(refusals))
         }
         NodeKey::Remote(remote) => (remote, None),
     };
+
+    // Authenticated transport (TODO 8.4.1): a per-start Noise key attested by the validator key.
+    // The signer may be remote (a blocking gRPC client), so attest off the async runtime.
+    let identity = {
+        let signer = Arc::clone(&signer);
+        let chain_id = genesis.chain_id;
+        tokio::task::spawn_blocking(move || TransportIdentity::new(signer, chain_id, genesis_hash))
+            .await
+            .map_err(|e| format!("transport identity task failed: {e}"))??
+    };
+    let peers = genesis.peer_addresses(&vk)?;
+    let (tcp, runtime) = TcpNetwork::bind_with_hosts(identity, cli.p2p_addr, peers)?;
+    let p2p_dropped = tcp.dropped_messages_counter();
+    // Outermost layer: TcpNetwork delivers self-addressed votes inside `send`.
+    let network = GuardedNetwork::new(tcp, guard, safety_halt.clone());
+    let transport_refusals = network.refusals();
+
     let mut config = NodeConfig::devnet_with_signer(signer);
     config.chain_id = genesis.chain_id;
     config.expected_genesis_hash = Some(genesis_hash);

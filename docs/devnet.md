@@ -138,10 +138,14 @@ in [`docs/performance-baseline.md`](performance-baseline.md). No target is appro
   thread) makes `/v1/health` return 503
   `{"status":"halted","reason":…}` and the process exit with code 3 after 5s; compose restarts it
   (`restart: on-failure`). Stale or conflicting votes are dropped and logged, not halted.
-- P2P identity is a self-declared key checked against the genesis peer table, not authenticated
-  (TODO 8.4.1, design in `docs/adr/proposal-transport-identity.md`). Proposals are unsigned in
-  `hotstuff_rs`, so any host that reaches a P2P port can impersonate the leader. The devnet
-  network must stay private.
+- P2P connections are authenticated (TODO 8.4.1, `docs/adr/proposal-transport-identity.md`):
+  each one starts with a Noise `XX` handshake in which both sides prove their genesis validator
+  key with a short-lived attestation (10 min, renewed automatically) of a per-start Noise key;
+  the chain ID and genesis hash are bound into the handshake. A host that is not a genesis
+  validator cannot send consensus messages, and a message's origin is the proven key. Validator
+  clocks must stay within about a minute of each other for attestations (NTP, as for block
+  timestamps). Refusals are counted by reason (`TcpNetwork::rejections`). Proposals are still
+  unsigned in `hotstuff_rs`, so a compromised validator can still propose as itself only.
 
 ## Starting and maintaining a validator (TODO 8.4.5)
 

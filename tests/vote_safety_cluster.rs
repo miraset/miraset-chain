@@ -29,7 +29,7 @@ use miraset_chain::consensus::{
 };
 use miraset_chain::core::types::Transaction;
 use miraset_chain::mempool::Mempool;
-use miraset_chain::network::{NetworkRuntime, TcpNetwork};
+use miraset_chain::network::{NetworkRuntime, TcpNetwork, TransportIdentity};
 use miraset_chain::node::{MirasetNode, NodeConfig, genesis_state_commitment, init_genesis};
 use miraset_chain::storage::RedbKVStore;
 use std::collections::{HashMap, HashSet};
@@ -222,8 +222,10 @@ impl Cluster {
             .collect();
         // A just-stopped replica may still be releasing its listener.
         let addr = self.addrs[i];
+        let identity = TransportIdentity::for_key(self.keys[i].clone(), CHAIN_ID, [0u8; 32])
+            .expect("transport identity");
         let (tcp, runtime) = retry_open(Path::new(&addr.to_string()), || {
-            TcpNetwork::bind_with_hosts(vk, addr, peers.clone())
+            TcpNetwork::bind_with_hosts(Arc::clone(&identity), addr, peers.clone())
         });
         let tap = VoteTap {
             inner: tcp,

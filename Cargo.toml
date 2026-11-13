@@ -33,6 +33,7 @@ hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 http-body-util = "0.1"
 tower-http = { version = "0.6", features = ["cors", "timeout"] }
 zeroize = "1"
+snow = "0.10"
 
 [dev-dependencies]
 

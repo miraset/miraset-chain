@@ -14,7 +14,7 @@ use ed25519_dalek::SigningKey;
 use hotstuff_rs::types::data_types::{BlockHeight, CryptoHash};
 use miraset_chain::core::types::Transaction;
 use miraset_chain::mempool::Mempool;
-use miraset_chain::network::{NetworkRuntime, TcpNetwork};
+use miraset_chain::network::{NetworkRuntime, TcpNetwork, TransportIdentity};
 use miraset_chain::node::{MirasetNode, NodeConfig, init_genesis};
 use miraset_chain::storage::RedbKVStore;
 use std::collections::HashMap;
@@ -28,6 +28,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const INITIAL_BALANCE: u64 = 100_000;
 const TRANSFER: u64 = 1_000;
 const FEE: u64 = 10;
+/// Shared by every node of the test network (the transport prologue binds it).
+const TRANSPORT_GENESIS: [u8; 32] = [0u8; 32];
 
 type TcpNode = MirasetNode<RedbKVStore, TcpNetwork>;
 
@@ -107,9 +109,14 @@ impl Cluster {
             .zip(&self.addrs)
             .map(|(k, a)| (k.verifying_key(), a.to_string()))
             .collect();
-        let (network, runtime) =
-            TcpNetwork::bind_with_hosts(key.verifying_key(), self.addrs[i], peers)
-                .expect("bind validator transport");
+        let identity = TransportIdentity::for_key(
+            key.clone(),
+            NodeConfig::devnet(key.clone()).chain_id,
+            TRANSPORT_GENESIS,
+        )
+        .expect("transport identity");
+        let (network, runtime) = TcpNetwork::bind_with_hosts(identity, self.addrs[i], peers)
+            .expect("bind validator transport");
         let store = open_existing(&self.db_paths[i]);
         let node = MirasetNode::try_start(NodeConfig::devnet(key), store, network, Mempool::new())
             .expect("node recovery/start");
