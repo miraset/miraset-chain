@@ -10,6 +10,12 @@ use crate::observability::DEFAULT_READY_MAX_COMMIT_AGE;
 
 /// Lower bound that leaves room for propose/vote round trips even on a local devnet.
 const MIN_MAX_VIEW_TIME: Duration = Duration::from_millis(100);
+/// View timeout; 2 s leaves the empty-block heartbeat (1 s) a full second of margin
+/// (owner decision 2026-11-13).
+pub const DEFAULT_MAX_VIEW_TIME: Duration = Duration::from_millis(2000);
+/// Empty-block heartbeat: at most one empty block per second (owner decision 2026-11-13).
+pub const DEFAULT_EMPTY_BLOCK_INTERVAL: Duration = Duration::from_millis(1000);
+
 /// Pacemaker epoch length (views); see [`NodeConfig::epoch_length`].
 pub const DEFAULT_EPOCH_LENGTH: u32 = crate::core::types::DEFAULT_CONSENSUS_EPOCH_LENGTH;
 
@@ -41,6 +47,11 @@ pub struct NodeConfig {
     /// genesis commitment covers it and validators of one chain cannot disagree on it.
     pub epoch_length: u32,
     pub max_view_time: Duration,
+    /// Without work, a leader proposes an empty block only once this long after its parent
+    /// (owner decision 2026-11-13; `src/app/chain_app/heartbeat.rs`). Zero proposes in every
+    /// view. The effective value never exceeds half of `max_view_time`, so a waiting leader
+    /// always proposes before its replicas time out ([`Self::effective_empty_block_interval`]).
+    pub empty_block_interval: Duration,
     pub log_events: bool,
     /// When set, startup fails unless the store's recorded genesis commitment matches.
     pub expected_genesis_hash: Option<[u8; 32]>,
@@ -61,6 +72,7 @@ impl std::fmt::Debug for NodeConfig {
             .field("chain_id", &self.chain_id)
             .field("experimental_mode", &self.experimental_mode)
             .field("max_view_time", &self.max_view_time)
+            .field("empty_block_interval", &self.empty_block_interval)
             .finish_non_exhaustive()
     }
 }
@@ -85,12 +97,18 @@ impl NodeConfig {
             block_sync_trigger_timeout: Duration::from_secs(3),
             progress_msg_buffer_capacity: 1024 * 1024, // 1MB buffer
             epoch_length: DEFAULT_EPOCH_LENGTH,
-            max_view_time: Duration::from_millis(1000),
+            max_view_time: DEFAULT_MAX_VIEW_TIME,
+            empty_block_interval: DEFAULT_EMPTY_BLOCK_INTERVAL,
             log_events: false,
             expected_genesis_hash: None,
             safety_halt: SafetyHalt::new(),
             ready_max_commit_age: DEFAULT_READY_MAX_COMMIT_AGE,
         }
+    }
+
+    /// The heartbeat interval actually used: `empty_block_interval`, at most half the view time.
+    pub fn effective_empty_block_interval(&self) -> Duration {
+        self.empty_block_interval.min(self.max_view_time / 2)
     }
 
     /// Validates that the node configuration respects the current protocol gate boundaries.
@@ -171,6 +189,29 @@ mod tests {
         };
         assert!(zero.validate().is_err());
         assert!(base.validate().is_ok());
+    }
+
+    #[test]
+    fn test_empty_block_interval_never_exceeds_half_the_view_time() {
+        let base = NodeConfig::devnet(SigningKey::from_bytes(&[1u8; 32]));
+        assert_eq!(
+            base.effective_empty_block_interval(),
+            DEFAULT_EMPTY_BLOCK_INTERVAL
+        );
+        assert!(base.effective_empty_block_interval() * 2 <= base.max_view_time);
+        let short_views = NodeConfig {
+            max_view_time: Duration::from_millis(500),
+            ..base.clone()
+        };
+        assert_eq!(
+            short_views.effective_empty_block_interval(),
+            Duration::from_millis(250)
+        );
+        let off = NodeConfig {
+            empty_block_interval: Duration::ZERO,
+            ..base
+        };
+        assert_eq!(off.effective_empty_block_interval(), Duration::ZERO);
     }
 
     #[test]

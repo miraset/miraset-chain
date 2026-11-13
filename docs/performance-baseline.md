@@ -191,6 +191,9 @@ Findings:
     3 GB per validator per day with no transactions at all. Any disk-growth estimate under load
     starts from this floor. Options (empty-block suppression, pruning, longer `max_view_time`
     when idle) are owner decisions (plan §9 decision 4).
+    **Decided 2026-11-13:** empty-block heartbeat, at most one empty block per second when idle
+    (`src/app/chain_app/heartbeat.rs`, TODO 8.5.3 step 3); this baseline predates it and is
+    to be re-measured.
 12. **Memory follows the redb page cache, not a leak.** RSS rises smoothly while the file grows
     in allocation steps (node0: 10 MB → 68 MB as the DB went 0.6 MB → 72 MB). `RedbKVStore`
     opens with redb's default 1 GiB cache, so RSS should level off near 1 GiB plus the process

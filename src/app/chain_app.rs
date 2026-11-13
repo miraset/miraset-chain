@@ -10,6 +10,7 @@ use hotstuff_rs::types::data_types::{CryptoHash, Data, Datum};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
 
 mod execution;
+mod heartbeat;
 use execution::BlockExecution;
 
 /// Most transactions and receipts a produced block carries.
@@ -45,11 +46,24 @@ const MAX_FAILED_CANDIDATES: usize = 256;
 /// Application state machine implementing `hotstuff_rs::app::App`.
 pub struct MirasetApp {
     mempool: Mempool,
+    empty_block_interval: std::time::Duration,
 }
 
 impl MirasetApp {
     pub fn new(mempool: Mempool) -> Self {
-        Self { mempool }
+        Self {
+            mempool,
+            empty_block_interval: std::time::Duration::ZERO,
+        }
+    }
+
+    /// Propose an empty block at most once per `interval` of block time (zero: every view).
+    /// See `chain_app/heartbeat.rs`. The leader waits inside `produce_block` for up to
+    /// `interval`, so callers must keep it well below the view time; the node passes
+    /// `NodeConfig::effective_empty_block_interval` (at most half of `max_view_time`).
+    pub fn with_empty_block_interval(mut self, interval: std::time::Duration) -> Self {
+        self.empty_block_interval = interval;
+        self
     }
 
     pub fn mempool(&self) -> &Mempool {
@@ -286,6 +300,7 @@ impl<K: KVStore> App<K> for MirasetApp {
         // block are bounded, and each block makes progress through them. Eviction is local to
         // this node's pool: a transaction that only failed on this fork's state is dropped and
         // must be resubmitted.
+        heartbeat::wait_for_work_or_heartbeat(&request, &self.mempool, self.empty_block_interval);
         let tree = request.block_tree();
         // Block time: the local clock, but always after the parent block's (TODO 8.5.1).
         let timestamp_ms = now_ms().max(Self::read_chain_time_ms(tree).saturating_add(1));

@@ -216,6 +216,12 @@ taken before the restore), then restart. Restoring a backup taken at the current
   mismatch", so recreate existing devnets (`docker compose down -v`, guards included). Each timed-out view now needs a timeout
   certificate and there is no timeout backoff, so views close to `max_view_time` (slow links,
   large blocks) can time out repeatedly; the WAN re-measurement in 8.5.3 must include that case.
+- **Empty-block heartbeat (TODO 8.5.3 finding 11):** without work, a leader proposes an empty
+  block at most once per `empty_block_interval` (default 1 s; `max_view_time` default 2 s; the
+  interval used is at most half the view time, 0 disables it). Transactions are proposed at
+  once by a leader that holds them, but nodes do not gossip transactions, so one sent to a
+  single validator can wait up to (N − 1) × interval (≈ 4 s with 5 validators) while other
+  leaders send heartbeat blocks first. Send to several validators where latency matters.
 - Each node uses roughly 0.2 CPU cores, mostly the consensus thread producing blocks. Upstream
   `hotstuff_rs` busy loops (event bus, block-sync server) are patched in `lib/hotstuff_rs`.
 - The validator set is static; reconfiguration is disabled (TODO 8.3.3).

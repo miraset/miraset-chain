@@ -5,6 +5,11 @@
 //! start plus k × `max_view_time`), so the dead leader's view waits out the slack the fast views
 //! before it saved. Measured 2026-11-12 with 1 s views: longest commit gap 5.0 s with `epoch_length`
 //! 10 (the old default), 2.05 s with 1. Owner decision 2026-11-12: default 1.
+//!
+//! The empty-block heartbeat is off here, so only the pacemaker is measured. With it on, an idle
+//! chain needs three heartbeat-spaced blocks to commit again after the dead view (3.5 s gap
+//! measured 2026-11-13 with a 0.5 s heartbeat); nothing is waiting then, and blocks with work
+//! are proposed at once (`tests/empty_block_heartbeat.rs`).
 
 use ed25519_dalek::SigningKey;
 use miraset_chain::core::types::ProtocolParams;
@@ -50,6 +55,7 @@ fn longest_commit_gap(epoch_length: u32, seed: u8) -> Duration {
             let config = NodeConfig {
                 max_view_time: VIEW_TIME,
                 epoch_length,
+                empty_block_interval: Duration::ZERO,
                 ..NodeConfig::devnet(key.clone())
             };
             let network = ChannelNetwork::new(key.verifying_key(), hub.clone());
