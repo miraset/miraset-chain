@@ -1,0 +1,9 @@
+# Prometheus for the docker devnet measurement profile (TODO 8.5.3, docs/measurement-plan.md I5).
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+scrape_configs:
+  - job_name: miraset
+    metrics_path: /metrics
+    static_configs:
+      - targets: [node0:8545, node1:8545, node2:8545, node3:8545, node4:8545]

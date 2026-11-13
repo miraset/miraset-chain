@@ -151,6 +151,11 @@ fn test_authenticated_peer_messages_arrive_with_the_proven_origin() {
     let frame = session.seal_frame(&message_bytes(&marker(7))).unwrap();
     stream.write_all(&frame).unwrap();
     assert_eq!(receive_marker(&mut net, 7), 0);
+    assert_eq!(
+        net.traffic().received(),
+        frame.len() as u64,
+        "received bytes are counted on the wire"
+    );
 }
 
 /// In Noise `XX` the initiator finishes when it sends the last message, before the responder

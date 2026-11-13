@@ -1,13 +1,16 @@
 use hotstuff_rs::block_tree::accessors::public::BlockTreeCamera;
 use hotstuff_rs::block_tree::pluggables::KVStore;
-use hotstuff_rs::events::{CommitBlockEvent, EndSyncEvent, StartSyncEvent, StartViewEvent};
+use hotstuff_rs::events::{
+    CollectTCEvent, CommitBlockEvent, EndSyncEvent, StartSyncEvent, StartViewEvent,
+    ViewTimeoutEvent,
+};
 use hotstuff_rs::networking::network::Network;
 use hotstuff_rs::replica::{Replica, ReplicaSpec};
 use hotstuff_rs::types::data_types::{BlockHeight, CryptoHash, Power};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
 use hotstuff_rs::types::validator_set::{ValidatorSet, ValidatorSetState, VerifyingKey};
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use crate::app::MirasetApp;
@@ -218,6 +221,8 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         let metrics_for_sync_start = Arc::clone(&metrics);
         let metrics_for_sync_end = Arc::clone(&metrics);
         let metrics_for_view = Arc::clone(&metrics);
+        let metrics_for_timeout = Arc::clone(&metrics);
+        let metrics_for_tc = Arc::clone(&metrics);
         let ready_max_commit_age = config.ready_max_commit_age;
 
         let replica = ReplicaSpec::builder()
@@ -231,8 +236,21 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             .on_end_sync(move |event: &EndSyncEvent| {
                 metrics_for_sync_end.record_sync_end(event.blocks_synced)
             })
-            .on_start_view(move |_: &StartViewEvent| metrics_for_view.record_view_started())
+            .on_start_view(move |event: &StartViewEvent| {
+                metrics_for_view.record_view_started();
+                metrics_for_view.runtime().record_view(event.view.int());
+            })
+            .on_view_timeout(move |_: &ViewTimeoutEvent| {
+                metrics_for_timeout.runtime().record_view_timeout()
+            })
+            .on_collect_tc(move |_: &CollectTCEvent| {
+                metrics_for_tc.runtime().record_timeout_certificate()
+            })
             .on_commit_block(move |event: &CommitBlockEvent| {
+                // Timed before any work in this handler (I2); sync commits do not form intervals.
+                metrics_for_event
+                    .runtime()
+                    .record_commit_time(Instant::now(), !metrics_for_event.is_syncing());
                 let block_hash_hex = hex::encode(event.block.bytes());
                 let timestamp_secs = event
                     .timestamp
@@ -273,13 +291,27 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                                 for receipt in &payload.compute_receipts {
                                     mempool_for_event.remove_receipt(&receipt.task_id);
                                 }
+                                metrics_for_event.runtime().record_block(
+                                    payload.transactions.len(),
+                                    payload.compute_receipts.len(),
+                                    datum.bytes().len(),
+                                );
                                 (payload.transactions.len(), payload.compute_receipts.len())
                             }
-                            Err(_) => return,
+                            Err(_) => {
+                                metrics_for_event.runtime().record_unreadable_block();
+                                return;
+                            }
                         }
                     }
-                    Ok(Some(_)) => (0, 0),
-                    _ => return,
+                    Ok(Some(_)) => {
+                        metrics_for_event.runtime().record_block(0, 0, 0);
+                        (0, 0)
+                    }
+                    _ => {
+                        metrics_for_event.runtime().record_unreadable_block();
+                        return;
+                    }
                 };
 
                 let _ = commit_tx.send(CommitEvent {

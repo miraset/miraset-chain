@@ -54,6 +54,18 @@ fn test_e2e_probes_metrics_json_logs_and_graceful_drain() {
         "miraset_blocks_synced_total ",
         "miraset_vote_refused_total{layer=\"signer\",reason=\"stale\"} 0",
         "miraset_vote_refused_total{layer=\"transport\",reason=\"conflicting\"} 0",
+        // Measurement campaign (TODO 8.5.3): block shape, view health, storage, process, P2P.
+        "miraset_p2p_rejected_total{reason=\"unknown_validator\"} 0",
+        "miraset_block_txs_count ",
+        "miraset_empty_blocks_total ",
+        "miraset_commit_interval_seconds_bucket{le=\"+Inf\"} ",
+        "miraset_view ",
+        "miraset_view_timeouts_total ",
+        "miraset_storage_bytes{file=\"chain_db\"} ",
+        "miraset_storage_bytes{file=\"signing_guard\"} ",
+        "miraset_process_resident_bytes ",
+        "miraset_process_open_fds ",
+        "miraset_p2p_bytes_total{direction=\"sent\"} ",
     ] {
         assert!(metrics.contains(series), "{series} missing:\n{metrics}");
     }

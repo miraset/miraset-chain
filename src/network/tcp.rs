@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 use super::byte_budget::{ByteBudget, Reservation};
 use super::inbound::{Acceptor, Budgets, HANDSHAKE_TIMEOUT};
 use super::noise::{Session, TransportIdentity, TransportRejections, rejection_of};
+use crate::observability::TransportTraffic;
 
 /// Largest plaintext message (borsh `Message`).
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -102,6 +103,7 @@ pub struct TcpNetwork {
     inbound: Arc<Mutex<Receiver<Inbound>>>,
     dropped_messages: Arc<AtomicU64>,
     rejections: Arc<TransportRejections>,
+    traffic: Arc<TransportTraffic>,
 }
 
 impl TcpNetwork {
@@ -132,6 +134,7 @@ impl TcpNetwork {
         let shutdown = Arc::new(AtomicBool::new(false));
         let dropped_messages = Arc::new(AtomicU64::new(0));
         let rejections = Arc::new(TransportRejections::default());
+        let traffic = Arc::new(TransportTraffic::default());
         let (inbound_tx, inbound_rx) = mpsc::sync_channel(INBOUND_QUEUE_CAPACITY);
         let peer_addresses = Arc::new(peer_addresses);
 
@@ -150,6 +153,7 @@ impl TcpNetwork {
                 shutdown: Arc::clone(&shutdown),
                 dropped: Arc::clone(&dropped_messages),
                 rejections: Arc::clone(&rejections),
+                traffic: Arc::clone(&traffic),
             };
             threads.push(
                 thread::Builder::new()
@@ -172,6 +176,7 @@ impl TcpNetwork {
             budgets,
             global_budget: Arc::new(ByteBudget::new(GLOBAL_INBOUND_BYTES)),
             rejections: Arc::clone(&rejections),
+            traffic: Arc::clone(&traffic),
             shutdown: Arc::clone(&shutdown),
         };
         threads.push(
@@ -189,6 +194,7 @@ impl TcpNetwork {
                 inbound: Arc::new(Mutex::new(inbound_rx)),
                 dropped_messages,
                 rejections,
+                traffic,
             },
             NetworkRuntime { shutdown, threads },
         ))
@@ -207,6 +213,11 @@ impl TcpNetwork {
     /// Shared handle to the dropped-message counter, for metrics export.
     pub fn dropped_messages_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.dropped_messages)
+    }
+
+    /// P2P bytes sent and received on the wire (TODO 8.5.3 I7).
+    pub fn traffic(&self) -> Arc<TransportTraffic> {
+        Arc::clone(&self.traffic)
     }
 
     /// Refused or closed connections by reason (handshake, attestation, framing, slots).
@@ -299,6 +310,7 @@ struct PeerWorker {
     shutdown: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
     rejections: Arc<TransportRejections>,
+    traffic: Arc<TransportTraffic>,
 }
 
 impl PeerWorker {
@@ -335,11 +347,12 @@ impl PeerWorker {
             let Some(conn) = connection.as_mut() else {
                 return false;
             };
-            let written = conn
-                .session
-                .seal_frame(body)
-                .and_then(|frame| conn.stream.write_all(&frame));
-            if written.is_ok() {
+            let written = conn.session.seal_frame(body).and_then(|frame| {
+                conn.stream.write_all(&frame)?;
+                Ok(frame.len())
+            });
+            if let Ok(bytes) = written {
+                self.traffic.record_sent(bytes);
                 return true;
             }
             *connection = None;

@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::runtime_metrics::RuntimeMetrics;
 use super::vote_refusals::{VoteGuardLayer, VoteRefusals};
 use crate::network::{Rejection, TransportRejections};
 use crate::node::AdmissionError;
@@ -129,6 +130,7 @@ pub struct NodeMetrics {
     rpc_rejected: [AtomicU64; RpcReject::ALL.len()],
     p2p_dropped: OnceLock<Arc<AtomicU64>>,
     p2p_rejections: OnceLock<Arc<TransportRejections>>,
+    runtime: RuntimeMetrics,
     vote_refusals: [OnceLock<Arc<VoteRefusals>>; VoteGuardLayer::ALL.len()],
 }
 
@@ -147,6 +149,7 @@ impl Default for NodeMetrics {
             rpc_rejected: Default::default(),
             p2p_dropped: OnceLock::new(),
             p2p_rejections: OnceLock::new(),
+            runtime: RuntimeMetrics::default(),
             vote_refusals: Default::default(),
         }
     }
@@ -254,6 +257,11 @@ impl NodeMetrics {
     /// Export the transport's dropped-message counter. Only the first call takes effect.
     pub fn attach_p2p_dropped(&self, counter: Arc<AtomicU64>) {
         let _ = self.p2p_dropped.set(counter);
+    }
+
+    /// Block shape, view health, storage, process and traffic metrics (TODO 8.5.3).
+    pub fn runtime(&self) -> &RuntimeMetrics {
+        &self.runtime
     }
 
     /// Export the transport's refused-connection counters (TODO 8.4.1). First call wins.
@@ -400,6 +408,7 @@ impl NodeMetrics {
 
         self.render_sync(&mut out);
         self.render_vote_refusals(&mut out);
+        self.runtime.render(&mut out);
 
         gauge(
             &mut out,
@@ -546,7 +555,12 @@ mod tests {
             ),
             "2"
         );
-        let series = text.lines().filter(|l| !l.starts_with('#')).count();
+        let runtime_series = {
+            let mut runtime = String::new();
+            metrics.runtime().render(&mut runtime);
+            runtime.lines().filter(|l| !l.starts_with('#')).count()
+        };
+        let series = text.lines().filter(|l| !l.starts_with('#')).count() - runtime_series;
         assert_eq!(
             series, 26,
             "fixed series without a commit, the p2p counter or vote refusals"
@@ -605,7 +619,16 @@ mod tests {
         metrics.record_commit(Some(1));
         let text = metrics.render(ScrapeState::default());
         for line in text.lines().filter(|l| !l.starts_with('#')) {
-            let name = line.split(['{', ' ']).next().unwrap();
+            let series = line.split(['{', ' ']).next().unwrap();
+            // Histogram samples belong to their base name's TYPE/HELP.
+            let name = ["_bucket", "_sum", "_count"]
+                .iter()
+                .find_map(|suffix| {
+                    series
+                        .strip_suffix(suffix)
+                        .filter(|base| text.contains(&format!("# TYPE {base} histogram")))
+                })
+                .unwrap_or(series);
             assert!(
                 text.contains(&format!("# TYPE {name} ")),
                 "{name} has no TYPE"

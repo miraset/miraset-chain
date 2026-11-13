@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: miraset
+    folder: MIRASET
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

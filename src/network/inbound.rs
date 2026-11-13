@@ -25,6 +25,7 @@ use super::noise::{
     rejection_of,
 };
 use super::tcp::{Inbound, MAX_FRAME_BYTES, detect_dead_peers};
+use crate::observability::TransportTraffic;
 
 pub(crate) const MAX_PENDING_HANDSHAKES: usize = 16;
 /// Pending handshakes per source IP, so one host cannot occupy every slot.
@@ -60,6 +61,7 @@ pub(crate) struct Acceptor {
     pub(crate) budgets: Budgets,
     pub(crate) global_budget: Arc<ByteBudget>,
     pub(crate) rejections: Arc<TransportRejections>,
+    pub(crate) traffic: Arc<TransportTraffic>,
     pub(crate) shutdown: Arc<AtomicBool>,
 }
 
@@ -139,6 +141,7 @@ impl Acceptor {
             peer_budget: budget,
             global_budget: Arc::clone(&self.global_budget),
             inbound: self.inbound.clone(),
+            traffic: Arc::clone(&self.traffic),
             shutdown: Arc::clone(&self.shutdown),
             closed: Arc::clone(&closed),
         };
@@ -204,6 +207,7 @@ struct FrameReader {
     peer_budget: Arc<ByteBudget>,
     global_budget: Arc<ByteBudget>,
     inbound: SyncSender<Inbound>,
+    traffic: Arc<TransportTraffic>,
     shutdown: Arc<AtomicBool>,
     closed: Arc<AtomicBool>,
 }
@@ -232,7 +236,9 @@ impl FrameReader {
                     return Ok(());
                 }
                 self.session.open_chunk(sealed_chunk, chunk)?;
+                self.traffic.record_received(sealed_chunk.len());
             }
+            self.traffic.record_received(length_bytes.len());
             self.dispatch(&body, reservation)?;
         }
     }

@@ -55,6 +55,19 @@ Refused or closed P2P connections are counted as `miraset_p2p_rejected_total{rea
 `frame_too_large`, `decrypt_failed`, `slots_full`); a rising `unknown_validator` or
 `handshake_failed` means something other than a genesis validator is reaching the P2P port.
 
+For measurements (TODO 8.5.3, `docs/measurement-plan.md`) `/metrics` also exports:
+
+| Series | Meaning |
+|---|---|
+| `miraset_block_txs`, `miraset_block_receipts`, `miraset_block_payload_bytes` (histograms) | shape of each committed block |
+| `miraset_empty_blocks_total` | committed blocks with no transaction or receipt |
+| `miraset_commit_interval_seconds` (histogram) | time between consecutive consensus commits on this node (block-sync commits excluded) |
+| `miraset_unreadable_blocks_total` | committed blocks whose payload could not be read for metrics (should stay 0) |
+| `miraset_view`, `miraset_view_timeouts_total`, `miraset_timeout_certificates_total` | consensus view health |
+| `miraset_storage_bytes{file="chain_db"\|"signing_guard"}` | database file sizes, read at scrape (redb file length grows in allocation steps; fit growth over long windows) |
+| `miraset_process_resident_bytes`, `_cpu_seconds_total`, `_open_fds`, `_threads`, `_write_bytes_total` | process resources from `/proc/self` (Linux) |
+| `miraset_p2p_bytes_total{direction}` | P2P bytes of established-session frames (length prefix + encrypted chunks); handshakes and refused frames are not counted |
+
 Logs go to stderr: text by default, one JSON object per line with `--log-format json`; `RUST_LOG`
 sets the filter (default `info`). On SIGTERM a validator stops admission (`/v1/transactions` and
 `/v1/receipts` return 503), reports `draining` for `--shutdown-drain-ms` (default 2000), then
