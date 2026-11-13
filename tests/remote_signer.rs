@@ -137,6 +137,11 @@ fn test_remote_signatures_equal_local_signatures() {
             chain_id: ChainID::new(CHAIN),
             highest_committed_block_height: BlockHeight::new(2),
         },
+        SignRequest::TransportIdentity {
+            chain_id: ChainID::new(CHAIN),
+            noise_static_pubkey: [3u8; 32],
+            not_after: 1_800_000_000,
+        },
     ];
     for request in &requests {
         let ours = remote.sign(request).unwrap();

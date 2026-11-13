@@ -47,7 +47,20 @@ pub enum SignRequest {
         chain_id: ChainID,
         highest_committed_block_height: BlockHeight,
     },
+    /// MIRASET (TODO 8.4.1, transport-identity proposal T2): the validator attests the X25519
+    /// static key of its Noise transport session until `not_after` (Unix seconds), so an
+    /// attestation leaked from a compromised node expires instead of impersonating the
+    /// validator's transport indefinitely. Domain-separated signing bytes
+    /// ([`TRANSPORT_IDENTITY_DOMAIN`]); never equal to any consensus signature.
+    TransportIdentity {
+        chain_id: ChainID,
+        noise_static_pubkey: [u8; 32],
+        not_after: u64,
+    },
 }
+
+/// Domain prefix of [`SignRequest::TransportIdentity`] signing bytes.
+pub const TRANSPORT_IDENTITY_DOMAIN: &[u8] = b"MIRASET:P2P-ID:v1";
 
 impl SignRequest {
     /// The bytes that are signed, identical to upstream `hotstuff_rs` 0.4.0.
@@ -65,6 +78,17 @@ impl SignRequest {
                 chain_id,
                 highest_committed_block_height,
             } => (*chain_id, *highest_committed_block_height).try_to_vec(),
+            SignRequest::TransportIdentity {
+                chain_id,
+                noise_static_pubkey,
+                not_after,
+            } => {
+                let mut bytes = TRANSPORT_IDENTITY_DOMAIN.to_vec();
+                bytes.extend_from_slice(&chain_id.int().to_be_bytes());
+                bytes.extend_from_slice(noise_static_pubkey);
+                bytes.extend_from_slice(&not_after.to_be_bytes());
+                Ok(bytes)
+            }
         };
         encoded.expect("borsh encoding of fixed-size values cannot fail")
     }
@@ -74,7 +98,8 @@ impl SignRequest {
         match self {
             SignRequest::PhaseVote { chain_id, .. }
             | SignRequest::TimeoutVote { chain_id, .. }
-            | SignRequest::AdvertiseBlock { chain_id, .. } => *chain_id,
+            | SignRequest::AdvertiseBlock { chain_id, .. }
+            | SignRequest::TransportIdentity { chain_id, .. } => *chain_id,
         }
     }
 }

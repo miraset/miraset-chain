@@ -1,7 +1,7 @@
 # Proposal: Authenticated validator transport (TODO 8.4.1)
 
-**Status**: Proposed 2026-11-09, awaiting approval (§8). Not a numbered ADR; see
-`docs/adr/README.md`.
+**Status**: Approved by the project owner 2026-11-12 (all four §8 decisions; see §10);
+implementation in progress. Not a numbered ADR; see `docs/adr/README.md`.
 **Date**: 2026-11-09
 **Requirements**:
 - PRD R09 / AT09: authenticate peers and messages; bound bytes, queues, pending work and
@@ -211,3 +211,27 @@ plus its pure-Rust crypto backends), subject to a licence and maintenance review
 - Validator-set changes and their effect on the peer table: 8.3.3.
 - Metrics export and readiness: 8.4.4.
 - Independent review of the handshake binding: 8.5.2.
+
+## 10. Approval record (2026-11-12)
+
+**Approved by:** project owner, 2026-11-12, in the engineering session working TODO 8.5.2 (its
+last open HIGH, a spoofed sender key occupying a validator's inbound budget, needs this).
+
+| # | Decision |
+|---|---|
+| 1 | T1–T5 approved: Noise `XX` with a validator-attested per-start static key replaces the self-declared sender, including the `TransportIdentity` signer purpose (patch #9 extension, signer proto change). |
+| 2 | T7 approved: static TCP + Noise; no libp2p/QUIC now. |
+| 3 | New dependency `snow` approved. |
+| 4 | Order approved: this before the cross-host remote signer, which will reuse the Noise session layer instead of mTLS (amends proposal-validator-key-custody §11 "open: mTLS"). |
+
+### Refinement during implementation (2026-11-13)
+
+Slice 1 review (security-reviewer) found that an attestation over only `(chain_id, noise key)`
+never expires: one leaked from a compromised node would let an attacker present that validator's
+transport identity (and so inject its unsigned proposals and nudges) after recovery, until the
+validator key is rotated. The attestation therefore also signs `not_after` (Unix seconds):
+`"MIRASET:P2P-ID:v1" ‖ chain_id ‖ noise key ‖ not_after` (65 bytes). The node re-attests before
+expiry; peers reject expired attestations and ones valid for longer than the configured lifetime
+(plus clock tolerance). This bounds T3's exposure to the attestation lifetime and relies on the
+NTP requirement validators already have (8.5.1).
+

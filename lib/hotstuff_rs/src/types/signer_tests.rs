@@ -136,3 +136,25 @@ fn test_phase_vote_lock_context_is_not_signed() {
         signer.sign(&request(1, 0)).unwrap().bytes()
     );
 }
+
+/// TODO 8.4.1: the transport attestation has a fixed golden encoding, and its length differs from
+/// every consensus signature's, so no attestation can ever be the same signed message.
+#[test]
+fn test_transport_identity_signing_bytes_are_domain_separated() {
+    let request = SignRequest::TransportIdentity {
+        chain_id: CHAIN,
+        noise_static_pubkey: [0xab; 32],
+        not_after: 1_800_000_000,
+    };
+    let bytes = request.signing_bytes();
+    let mut golden = b"MIRASET:P2P-ID:v1".to_vec();
+    golden.extend_from_slice(&1337u64.to_be_bytes());
+    golden.extend_from_slice(&[0xab; 32]);
+    golden.extend_from_slice(&1_800_000_000u64.to_be_bytes());
+    assert_eq!(bytes, golden);
+    assert_eq!(bytes.len(), 65);
+    for (other, _) in requests() {
+        assert_ne!(other.signing_bytes().len(), bytes.len());
+    }
+    assert!(request.chain_id() == CHAIN);
+}

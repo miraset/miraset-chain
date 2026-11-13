@@ -136,3 +136,57 @@ fn test_vote_below_lock_floor_is_refused_not_failed() {
     assert_eq!(signer.below_lock_refused(), 1);
     assert!(signer.sign(&locked_vote(CHAIN, 11, 0xbb, 10, 8)).is_ok());
 }
+
+/// TODO 8.4.1: a transport attestation is signed without touching the vote guard, and only for
+/// the signer's own chain.
+#[test]
+fn test_transport_identity_is_signed_outside_the_vote_guard() {
+    let dir = TempDir::new().unwrap();
+    let signer = signer(&dir);
+    signer.sign(&phase_vote(CHAIN, 7, 0xaa)).unwrap();
+    let attestation = SignRequest::TransportIdentity {
+        chain_id: ChainID::new(CHAIN),
+        noise_static_pubkey: [5u8; 32],
+        not_after: 1_800_000_000,
+    };
+    let signature = signer.sign(&attestation).unwrap();
+    let signature = ed25519_dalek::Signature::from_bytes(&signature.bytes());
+    assert!(
+        key()
+            .verifying_key()
+            .verify(&attestation.signing_bytes(), &signature)
+            .is_ok()
+    );
+    assert_eq!(
+        signer.last_signed_view().unwrap(),
+        Some(7),
+        "guard untouched"
+    );
+    let other_chain = SignRequest::TransportIdentity {
+        chain_id: ChainID::new(CHAIN + 1),
+        noise_static_pubkey: [5u8; 32],
+        not_after: 1_800_000_000,
+    };
+    assert!(matches!(
+        signer.sign(&other_chain),
+        Err(SignError::Failed(_))
+    ));
+}
+
+/// The attestation's domain prefix differs from every other domain the validator key could sign
+/// under (transactions, receipts), so no variable-length payload can collide with it.
+#[test]
+fn test_transport_identity_domain_differs_from_payload_domains() {
+    use crate::core::types::{
+        DOMAIN_RECEIPT_SIGN_V1, DOMAIN_RECEIPT_WORKER_SIGN_V1, DOMAIN_TX_SIGN_V1,
+    };
+    use hotstuff_rs::types::signer::TRANSPORT_IDENTITY_DOMAIN;
+    for domain in [
+        DOMAIN_TX_SIGN_V1,
+        DOMAIN_RECEIPT_SIGN_V1,
+        DOMAIN_RECEIPT_WORKER_SIGN_V1,
+    ] {
+        assert!(!domain.starts_with(TRANSPORT_IDENTITY_DOMAIN));
+        assert!(!TRANSPORT_IDENTITY_DOMAIN.starts_with(domain));
+    }
+}

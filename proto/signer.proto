@@ -55,11 +55,22 @@ message AdvertiseBlock {
   uint64 highest_committed_block_height = 2;
 }
 
+// Transport attestation (TODO 8.4.1): the validator vouches for the X25519 static key of its
+// Noise session for one process start. No slashing rule applies: it cannot cause equivocation.
+message TransportIdentity {
+  uint64 chain_id = 1;
+  // 32-byte X25519 public key.
+  bytes noise_static_pubkey = 2;
+  // Unix seconds after which peers reject the attestation.
+  uint64 not_after = 3;
+}
+
 message SignRequest {
   oneof request {
     PhaseVote phase_vote = 1;
     TimeoutVote timeout_vote = 2;
     AdvertiseBlock advertise_block = 3;
+    TransportIdentity transport_identity = 4;
   }
 }
 

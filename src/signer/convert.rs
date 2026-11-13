@@ -62,6 +62,15 @@ pub fn to_wire(request: &SignRequest) -> proto::SignRequest {
             chain_id: chain_id.int(),
             highest_committed_block_height: highest_committed_block_height.int(),
         }),
+        SignRequest::TransportIdentity {
+            chain_id,
+            noise_static_pubkey,
+            not_after,
+        } => Request::TransportIdentity(proto::TransportIdentity {
+            chain_id: chain_id.int(),
+            noise_static_pubkey: noise_static_pubkey.to_vec(),
+            not_after: *not_after,
+        }),
     };
     proto::SignRequest {
         request: Some(request),
@@ -102,6 +111,15 @@ pub fn from_wire(request: &proto::SignRequest) -> Result<SignRequest, String> {
                 advertise.highest_committed_block_height,
             ),
         }),
+        Request::TransportIdentity(identity) => Ok(SignRequest::TransportIdentity {
+            chain_id: ChainID::new(identity.chain_id),
+            noise_static_pubkey: identity
+                .noise_static_pubkey
+                .as_slice()
+                .try_into()
+                .map_err(|_| "noise static key must be 32 bytes".to_string())?,
+            not_after: identity.not_after,
+        }),
     }
 }
 
@@ -135,6 +153,11 @@ mod tests {
         all.push(SignRequest::AdvertiseBlock {
             chain_id,
             highest_committed_block_height: BlockHeight::new(3),
+        });
+        all.push(SignRequest::TransportIdentity {
+            chain_id,
+            noise_static_pubkey: [9u8; 32],
+            not_after: 1_800_000_000,
         });
         all
     }
@@ -172,5 +195,14 @@ mod tests {
         assert!(from_wire(&vote(vec![0u8; 32], generic)).is_ok());
         // TODO 8.5.2: an older sender without lock context is refused, not silently unchecked.
         assert!(from_wire(&vote_with(vec![0u8; 32], generic, None)).is_err());
+        let identity = |key: Vec<u8>| proto::SignRequest {
+            request: Some(Request::TransportIdentity(proto::TransportIdentity {
+                chain_id: 1,
+                noise_static_pubkey: key,
+                not_after: 1_800_000_000,
+            })),
+        };
+        assert!(from_wire(&identity(vec![0u8; 31])).is_err());
+        assert!(from_wire(&identity(vec![0u8; 32])).is_ok());
     }
 }
