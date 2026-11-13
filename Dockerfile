@@ -21,9 +21,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /var/lib/miraset miraset \
     && mkdir -p /var/lib/miraset /var/lib/miraset-guard /var/lib/miraset-key /devnet \
-       /keys/faucet /keys/node0 /keys/node1 /keys/node2 /keys/node3 /keys/node4 \
-    && chmod 700 /var/lib/miraset-key /keys/faucet /keys/node0 /keys/node1 /keys/node2 \
-       /keys/node3 /keys/node4 \
+       /keys/faucet /keys/coordinator /keys/governance \
+       /keys/node0 /keys/node1 /keys/node2 /keys/node3 /keys/node4 \
+    && chmod 700 /var/lib/miraset-key /keys/faucet /keys/coordinator /keys/governance \
+       /keys/node0 /keys/node1 /keys/node2 /keys/node3 /keys/node4 \
     && chown -R miraset:miraset /var/lib/miraset /var/lib/miraset-guard /var/lib/miraset-key \
        /devnet /keys
 COPY --from=build /usr/local/bin/miraset-chain /usr/local/bin/miraset-chain
