@@ -161,3 +161,40 @@ Observed while building and running the measurement; none is fixed here.
   days. Expect chain data to grow with wall time (finding 4).
 - Real multi-host WAN measurements (this baseline is emulated on one host).
 - Reconfiguration scenarios: blocked while validator-set changes are disabled (8.3.3).
+
+## Idle baseline (2026-11-13, TODO 8.5.3 step 3)
+
+Current code after 8.5.2 / 8.4.1 (genesis `consensus_epoch_length` 1, Noise transport, byte
+budgets), git `af63ae1`. Isolated Docker devnet, 5 validators, `--profile observe`, no load,
+30 min; values from Prometheus over the last 25 min (`docs/measurement-plan.md` §4.5). Same host
+as the 2026-11-10 baseline. Per validator; the five agree within the ranges shown.
+
+| Measure | Value |
+|---|---|
+| Committed blocks | 23.1 /s, all empty (payload 53 B) |
+| Commit interval (consensus) | p50 29 ms, p99 0.32 s |
+| View timeouts | ≈ 0.0013 /s (one per ~12 min) |
+| Chain DB growth | 120–133 MB/h → **2.9–3.2 GB/day, ≈ 1.1 TB/year per validator at zero load** |
+| Disk per empty block | ≈ 1.4–1.6 KB (block, certificate with signatures, indexes, redb overhead) |
+| Signing guard | 300 KB, constant |
+| Resident memory | 68 MB after 30 min, rising ~105 MB/h in step with the database (see finding 12) |
+| CPU | 0.11 cores |
+| P2P traffic | 52.7 KB/s each way (≈ 4.5 GB/day) |
+| Open fds / threads | 22 / 30, flat |
+| P2P rejections, unreadable blocks | 0 |
+| Disk write bytes (`/proc/self/io`) | not available inside the container |
+
+Findings:
+
+11. **Idle chain growth is dominated by empty blocks.** With epoch length 1 every view that
+    commits produces a block whether or not there is work, about 23 per second. That is roughly
+    3 GB per validator per day with no transactions at all. Any disk-growth estimate under load
+    starts from this floor. Options (empty-block suppression, pruning, longer `max_view_time`
+    when idle) are owner decisions (plan §9 decision 4).
+12. **Memory follows the redb page cache, not a leak.** RSS rises smoothly while the file grows
+    in allocation steps (node0: 10 MB → 68 MB as the DB went 0.6 MB → 72 MB). `RedbKVStore`
+    opens with redb's default 1 GiB cache, so RSS should level off near 1 GiB plus the process
+    base. To confirm in the long soak; a configurable cache size would bound it.
+13. `miraset_process_write_bytes_total` is missing in the containers (`/proc/self/io` not
+    readable there); disk writes must come from `docker stats` or the host until fixed.
+

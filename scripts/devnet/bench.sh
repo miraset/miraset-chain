@@ -10,6 +10,11 @@
 # Usage (repo root, with `docker compose up -d --build` running):
 #   scripts/devnet/bench.sh [--profile lan|wan|wan-far] [--rates "10 20 40"] [--duration 120]
 #                           [--warmup 20] [--senders 32] [--receipt-share 0.15] [--out DIR]
+#                           [--check-heights N]
+# --check-heights N checks agreement on the newest N heights after each rate instead of every
+# height (0, the default). With empty blocks at tens per second per validator, a full walk grows
+# by ~100k heights per half hour; a window larger than the heights committed since the previous
+# check keeps every height checked once.
 set -euo pipefail
 
 COMPOSE="${COMPOSE:-docker compose}"
@@ -19,7 +24,7 @@ IN_NETWORK_RPCS=(--rpc http://node0:8545 --rpc http://node1:8545 --rpc http://no
 # Per-item cost (amount 1 + fee 10, or receipt cost 1), doubled for headroom.
 ITEM_BUDGET=22
 
-profile=lan rates="10 20 40" duration=120 warmup=20 senders=32 share=0.15 out=""
+profile=lan rates="10 20 40" duration=120 warmup=20 senders=32 share=0.15 out="" check_heights=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile) profile="$2"; shift 2 ;;
@@ -29,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --senders) senders="$2"; shift 2 ;;
     --receipt-share) share="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
+    --check-heights) check_heights="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -39,7 +45,8 @@ mkdir -p "$out"
 # height x node requests would carry the WAN delay and the check would take hours.
 check_agreement() {
   [[ "$profile" == lan ]] || "$HERE/netem.sh" lan >/dev/null
-  python3 "$HERE/check_consensus.py" --rpc "$ALL_RPCS" --min-reachable 5
+  python3 "$HERE/check_consensus.py" --rpc "$ALL_RPCS" --min-reachable 5 \
+    --max-heights "$check_heights"
   [[ "$profile" == lan ]] || "$HERE/netem.sh" "$profile" >/dev/null
 }
 
