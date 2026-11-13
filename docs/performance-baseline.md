@@ -201,3 +201,39 @@ Findings:
 13. `miraset_process_write_bytes_total` is missing in the containers (`/proc/self/io` not
     readable there); disk writes must come from `docker stats` or the host until fixed.
 
+## Empty-block heartbeat: idle and 10 000/s (2026-11-13)
+
+Git `0844356` (heartbeat 1 s, `max_view_time` 2 s). Isolated Docker devnet, 5 validators,
+`--profile observe`; two 5-minute runs (owner request), metrics over the last 4 minutes, per
+validator. For the load run only, the RPC submission limit was raised on the nodes
+(`--rpc-submit-rate 100000 --rpc-submit-burst 100000`, scratch compose override) because one
+loadgen container is one client and the default 50/s per client would have been measured
+instead of the chain. Agreement checked at every recent height after each run (OK).
+
+| Measure | Idle (0 tx) | Offered 10 000/s (256 senders, 15 % receipts) |
+|---|---|---|
+| Committed | — | **2 216 items/s** (1 847 tx/s + 369 receipts/s); 100 tx + 20 receipts in every block |
+| Blocks | 1.0 /s, all empty (was 23/s) | 17 /s, none empty |
+| Admission | — | 646 k admitted, 2.25 M refused with 429 (mempool per-sender quota: backpressure) |
+| Latency of admitted items | — | tx p50 0.30 s, p90 1.5 s, p95 9.2 s, p99 187 s (queue); receipts p50 2.5 s, p99 9.5 s |
+| Commit interval | p50 0.80 s, p99 2.0 s | p50 0.05 s, p99 0.25 s |
+| Chain DB growth | ≈ 5 MB/h (1 block/s × ~1.5 KB) → ≈ 130 MB/day, ≈ 47 GB/year | 5.8–6.3 GB/h → **≈ 145 GB/day** (≈ 750 B per committed item) |
+| Payload per block | 53 B | 48 KB |
+| Memory (RSS) | 11 MB, +5 MB/h | 490–505 MB after 5 min, +4.4 GB/h (redb cache, see finding 12) |
+| CPU | 0.026 cores | 0.66–0.96 cores |
+| P2P traffic | 5.6 KB/s each way | 680–700 KB/s each way |
+| Open fds | 22 | 106–337 (client connections) |
+| View timeouts, P2P rejections, unreadable blocks | 0 | 0 |
+
+Findings:
+
+14. **The heartbeat cuts idle cost ~20×:** blocks 23/s → 1/s, disk ≈ 3 GB/day → ≈ 130 MB/day,
+    CPU 0.11 → 0.026 cores, P2P 53 → 5.6 KB/s.
+15. **Capacity is ≈ 2 200 committed items/s on this host, bounded by the block size cap**
+    (`MAX_BLOCK_TXS` 100 + 20 receipts per block, every block full at ≈ 17 blocks/s). 10 000/s
+    is not reachable without larger blocks or faster views; the mempool sheds the excess with 429
+    and the tail latency of admitted items grows with the queue (p99 ≈ 3 min).
+16. **Disk under full load ≈ 145 GB/day per validator** (≈ 750 B per committed item); at a
+    hypothetical 10 000 committed items/s that would be ≈ 650 GB/day. Retention/pruning is an
+    owner decision before any sustained high-throughput run.
+
