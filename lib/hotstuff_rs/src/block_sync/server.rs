@@ -125,6 +125,8 @@ impl<N: Network + 'static, K: KVStore> BlockSyncServer<N, K> {
                     // used `max`, so any peer could ask for the whole chain (and, through the
                     // accessor's pre-allocation, for gigabytes with `limit = u32::MAX`).
                     min(limit, self.config.request_limit),
+                    // MIRASET PATCH #15: read no more block data than one response may carry.
+                    self.config.response_byte_limit,
                 );
                 let highest_pc_res = bt_snapshot.highest_pc();
 
@@ -227,6 +229,15 @@ pub(crate) struct BlockSyncServerConfiguration {
     /// Maximum number of blocks that this server can provide in a Block Sync Response.
     pub(crate) request_limit: u32,
 
+    /// MIRASET PATCH #15: most block data bytes in one Block Sync Response; the first block is
+    /// always included.
+    pub(crate) response_byte_limit: u64,
+
     /// How often the sync server should broadcast [`BlockSyncAdvertiseMessage`]s.
     pub(crate) advertise_time: Duration,
 }
+
+
+#[cfg(test)]
+#[path = "response_bytes_tests.rs"]
+mod response_bytes_tests;

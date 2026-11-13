@@ -62,7 +62,19 @@ impl HotStuffMessage {
     /// Returns the number of bytes required to store a given instance of the [`HotStuffMessage`] enum.
     pub fn size(&self) -> u64 {
         match self {
-            HotStuffMessage::Proposal(_) => mem::size_of::<Proposal>() as u64,
+            // MIRASET PATCH #16: count the block's data too. Upstream counted only the struct
+            // (a few hundred bytes), so a buffer of `progress_msg_buffer_capacity` bytes could
+            // hold thousands of buffered proposals of up to 8 MiB each.
+            HotStuffMessage::Proposal(proposal) => {
+                let data: u64 = proposal
+                    .block
+                    .data
+                    .vec()
+                    .iter()
+                    .map(|datum| datum.bytes().len() as u64)
+                    .sum();
+                (mem::size_of::<Proposal>() as u64).saturating_add(data)
+            }
             HotStuffMessage::Nudge(_) => mem::size_of::<Nudge>() as u64,
             HotStuffMessage::PhaseVote(_) => mem::size_of::<PhaseVote>() as u64,
             HotStuffMessage::NewView(_) => mem::size_of::<NewView>() as u64,
@@ -271,3 +283,7 @@ pub struct NewView {
     /// The sending replica's `highest_pc`.
     pub highest_pc: PhaseCertificate,
 }
+
+#[cfg(test)]
+#[path = "proposal_size_tests.rs"]
+mod proposal_size_tests;

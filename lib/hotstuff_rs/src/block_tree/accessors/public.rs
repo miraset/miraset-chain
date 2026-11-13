@@ -43,10 +43,15 @@ impl<S: KVGet> BlockTreeSnapshot<S> {
     /// up until the limit.
     ///
     /// If tail is None, then the chain starts from genesis instead.
+    ///
+    /// MIRASET PATCH #15: also stops before a block whose data would take the total past
+    /// `byte_limit` (the first block is always returned), so a sync server never reads more
+    /// than it can send.
     pub(crate) fn blocks_from_height_to_newest(
         &self,
         height: BlockHeight,
         limit: u32,
+        byte_limit: u64,
     ) -> Result<Vec<Block>, BlockTreeError> {
         // MIRASET PATCH #12: `limit = 0` means no blocks. Upstream's `len == limit` checks never
         // matched 0, so it returned every block to the tip. Callers bound `limit` (the sync
@@ -55,15 +60,20 @@ impl<S: KVGet> BlockTreeSnapshot<S> {
             return Ok(Vec::new());
         }
         let mut res = Vec::with_capacity(limit as usize);
+        let mut bytes = ResponseBytes::new(byte_limit);
 
         // Get committed blocks starting from the specified height.
         let mut cursor = height;
         while let Some(block_hash) = self.0.block_at_height(cursor)? {
-            res.push(self.0.block(&block_hash)?.ok_or(
+            let block = self.0.block(&block_hash)?.ok_or(
                 BlockTreeError::BlockExpectedButNotFound {
                     block: block_hash.clone(),
                 },
-            )?);
+            )?;
+            if !bytes.admit(&block) {
+                return Ok(res);
+            }
+            res.push(block);
             cursor += 1;
 
             if res.len() == limit as usize {
@@ -80,6 +90,9 @@ impl<S: KVGet> BlockTreeSnapshot<S> {
             .rev()
             .filter(|block| block.height >= height);
         for block in speculative_blocks {
+            if !bytes.admit(&block) {
+                break;
+            }
             res.push(block);
 
             if res.len() == limit as usize {
@@ -244,5 +257,40 @@ impl<S: KVGet> BlockTreeSnapshot<S> {
 
     pub fn highest_view_voted(&self) -> Result<Option<ViewNumber>, BlockTreeError> {
         Ok(self.0.highest_view_phase_voted()?)
+    }
+}
+
+/// MIRASET PATCH #15: running total of block data bytes in a sync response. The first block is
+/// always admitted, so a single block larger than the limit can still be synced.
+pub(crate) struct ResponseBytes {
+    limit: u64,
+    total: u64,
+    blocks: usize,
+}
+
+impl ResponseBytes {
+    pub(crate) fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            total: 0,
+            blocks: 0,
+        }
+    }
+
+    /// Count `block` in if it fits (or is the first); `false` means stop before it.
+    pub(crate) fn admit(&mut self, block: &Block) -> bool {
+        let size: u64 = block
+            .data
+            .vec()
+            .iter()
+            .map(|datum| datum.bytes().len() as u64)
+            .sum();
+        let total = self.total.saturating_add(size);
+        if self.blocks > 0 && total > self.limit {
+            return false;
+        }
+        self.total = total;
+        self.blocks += 1;
+        true
     }
 }

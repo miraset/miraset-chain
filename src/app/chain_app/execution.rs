@@ -73,6 +73,14 @@ impl BlockExecution {
             .unwrap_or_else(|| MirasetApp::read_account(tree, address))
     }
 
+    /// The account as this block has left it so far, without taking it out of the state.
+    fn account<K: KVStore>(&self, tree: &Tree<'_, '_, K>, address: &str) -> AccountState {
+        self.local_accounts
+            .get(address)
+            .cloned()
+            .unwrap_or_else(|| MirasetApp::read_account(tree, address))
+    }
+
     /// The account nonce a transaction from `address` must carry next on top of this state.
     pub(super) fn account_nonce<K: KVStore>(&self, tree: &Tree<'_, '_, K>, address: &str) -> u64 {
         self.local_accounts.get(address).map_or_else(
@@ -146,12 +154,17 @@ impl BlockExecution {
             .or_else(|| MirasetApp::read_worker(tree, id))
     }
 
-    /// Apply one transaction: sender signature, nonce and funds, then its effect.
+    /// Apply one transaction: sender signature, nonce and funds, then its effect. After a
+    /// failure (`None`) the state may be partly changed; use [`Self::try_transaction`] to try a
+    /// candidate.
     pub(super) fn apply_transaction<K: KVStore>(
         &mut self,
         tree: &Tree<'_, '_, K>,
         tx: &Transaction,
     ) -> Option<()> {
+        if !is_system_call(tx) {
+            return self.apply_transfer(tree, tx);
+        }
         let sender_acc = self.take_account(tree, &tx.sender);
         // Reject an unsigned/forged sender, a replayed or out-of-order nonce, overflow, or
         // insufficient funds.
@@ -159,20 +172,61 @@ impl BlockExecution {
         self.local_accounts
             .insert(tx.sender.clone(), updated_sender);
 
-        if tx.recipient == "system:allowance" {
-            self.apply_allowance(tx)
-        } else if tx.recipient == "system:worker_registry" && !tx.payload.is_empty() {
-            let action: WorkerBondAction = serde_json::from_slice(&tx.payload).ok()?;
-            self.apply_worker_action(tree, tx, action)
-        } else if tx.recipient == "system:epoch_manager" && !tx.payload.is_empty() {
-            self.apply_epoch_rollover(tree, tx)
-        } else {
-            let mut recipient_acc = self.take_account(tree, &tx.recipient);
-            recipient_acc.balance = recipient_acc.balance.checked_add(tx.amount)?;
-            self.local_accounts
-                .insert(tx.recipient.clone(), recipient_acc);
-            Some(())
+        match tx.recipient.as_str() {
+            "system:allowance" => self.apply_allowance(tx),
+            "system:worker_registry" => {
+                let action: WorkerBondAction = serde_json::from_slice(&tx.payload).ok()?;
+                self.apply_worker_action(tree, tx, action)
+            }
+            "system:epoch_manager" => self.apply_epoch_rollover(tree, tx),
+            _ => None,
         }
+    }
+
+    /// Apply `tx` if it is valid on top of this state; otherwise leave the state unchanged.
+    ///
+    /// Transfers check everything before they change anything, so a failed one costs nothing.
+    /// System calls are tried on a copy of the block's state so far, which costs time in
+    /// proportion to the block; block production bounds how many it tries
+    /// (`MAX_SYSTEM_CALLS_PER_BLOCK`).
+    pub(super) fn try_transaction<K: KVStore>(
+        &mut self,
+        tree: &Tree<'_, '_, K>,
+        tx: &Transaction,
+    ) -> bool {
+        if !is_system_call(tx) {
+            return self.apply_transfer(tree, tx).is_some();
+        }
+        let mut trial = self.clone();
+        if trial.apply_transaction(tree, tx).is_some() {
+            *self = trial;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A plain transfer; changes nothing unless it applies. A sender paying itself keeps the
+    /// amount (only the fee and nonce change), as before this was made all-or-nothing.
+    fn apply_transfer<K: KVStore>(
+        &mut self,
+        tree: &Tree<'_, '_, K>,
+        tx: &Transaction,
+    ) -> Option<()> {
+        // Reject an unsigned/forged sender, a replayed or out-of-order nonce, overflow, or
+        // insufficient funds.
+        let updated_sender =
+            MirasetApp::apply_transaction_to_sender(tx, &self.account(tree, &tx.sender)).ok()?;
+        let mut recipient = if tx.recipient == tx.sender {
+            updated_sender.clone()
+        } else {
+            self.account(tree, &tx.recipient)
+        };
+        recipient.balance = recipient.balance.checked_add(tx.amount)?;
+        self.local_accounts
+            .insert(tx.sender.clone(), updated_sender);
+        self.local_accounts.insert(tx.recipient.clone(), recipient);
+        Some(())
     }
 
     fn apply_worker_action<K: KVStore>(
@@ -367,7 +421,8 @@ impl BlockExecution {
     /// Apply one PoCC compute receipt (TODO 8.5.1; see `ComputeReceipt` for the rules):
     /// authorized coordinator, registered and bonded worker that signed it, no replay, client
     /// confirmation, and payment `tokens × price` from the client to the worker's owner, all
-    /// with checked arithmetic.
+    /// with checked arithmetic. Every check runs before anything changes, so a receipt that
+    /// fails (`None`) leaves the state unchanged and block production can try it in place.
     pub(super) fn apply_receipt<K: KVStore>(
         &mut self,
         tree: &Tree<'_, '_, K>,
@@ -384,7 +439,11 @@ impl BlockExecution {
         }
 
         // The worker must be registered with a bond (ADR-0007) and must have signed.
-        let mut worker = self.take_worker(tree, &receipt.worker_id)?;
+        let mut worker = self
+            .local_workers
+            .get(&receipt.worker_id)
+            .cloned()
+            .or_else(|| MirasetApp::read_worker(tree, &receipt.worker_id))?;
         if !worker.active || worker.stake < MIN_WORKER_BOND || worker.owner_address.is_empty() {
             return None;
         }
@@ -414,32 +473,35 @@ impl BlockExecution {
         // The client must have allowed this coordinator to charge it at least the cost.
         let allowed = self.allowance(tree, &receipt.client_address, &receipt.coordinator_pubkey);
         let remaining = allowed.checked_sub(cost)?;
+        // Client and owner differ (checked above), so both updates read the unchanged state.
+        let mut client = self.account(tree, &receipt.client_address);
+        client.balance = client.balance.checked_sub(cost)?;
+        let mut owner = self.account(tree, &worker.owner_address);
+        owner.balance = owner.balance.checked_add(cost)?;
+        // Verified output tokens feed the epoch's compute reward pool (REWARDS §3.3).
+        worker.completed_tasks = worker.completed_tasks.checked_add(1)?;
+        worker.epoch_tokens = worker.epoch_tokens.checked_add(receipt.tokens_computed)?;
+        let total_tokens = self
+            .current_epoch
+            .total_tokens
+            .checked_add(receipt.tokens_computed)?;
+        let total_receipts = self.current_epoch.total_receipts.checked_add(1)?;
+
+        // Every check passed: commit.
         self.set_allowance(
             &receipt.client_address,
             &receipt.coordinator_pubkey,
             remaining,
         );
-        let mut client = self.take_account(tree, &receipt.client_address);
-        client.balance = client.balance.checked_sub(cost)?;
         self.local_accounts
             .insert(receipt.client_address.clone(), client);
-        let mut owner = self.take_account(tree, &worker.owner_address);
-        owner.balance = owner.balance.checked_add(cost)?;
         self.local_accounts
             .insert(worker.owner_address.clone(), owner);
-
         self.local_tasks.insert(receipt.task_id.clone());
         self.put(t_key, b"settled".to_vec());
-
-        // Verified output tokens feed the epoch's compute reward pool (REWARDS §3.3).
-        worker.completed_tasks = worker.completed_tasks.checked_add(1)?;
-        worker.epoch_tokens = worker.epoch_tokens.checked_add(receipt.tokens_computed)?;
         self.local_workers.insert(receipt.worker_id.clone(), worker);
-        self.current_epoch.total_tokens = self
-            .current_epoch
-            .total_tokens
-            .checked_add(receipt.tokens_computed)?;
-        self.current_epoch.total_receipts = self.current_epoch.total_receipts.checked_add(1)?;
+        self.current_epoch.total_tokens = total_tokens;
+        self.current_epoch.total_receipts = total_receipts;
         self.epoch_modified = true;
         Some(())
     }
@@ -484,6 +546,16 @@ impl BlockExecution {
         self.updates
             .insert(MirasetApp::state_commitment_key(), state_root.to_vec());
         Some((self.updates, state_root))
+    }
+}
+
+/// Whether `tx` calls a system module rather than moving funds to an account. Any other
+/// recipient, including a `system:` module without a payload, is a plain transfer.
+pub(super) fn is_system_call(tx: &Transaction) -> bool {
+    match tx.recipient.as_str() {
+        "system:allowance" => true,
+        "system:worker_registry" | "system:epoch_manager" => !tx.payload.is_empty(),
+        _ => false,
     }
 }
 

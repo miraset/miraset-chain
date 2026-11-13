@@ -8,6 +8,21 @@ use std::time::Duration;
 use crate::consensus::SafetyHalt;
 use crate::observability::DEFAULT_READY_MAX_COMMIT_AGE;
 
+/// Most block data bytes in one block-sync response (vendored hotstuff_rs patch #15). A
+/// response of `block_sync_request_limit` blocks of up to `MAX_BLOCK_BYTES` each would not fit
+/// one transport frame; with this cap it does, with room for certificates and encoding.
+pub const BLOCK_SYNC_RESPONSE_BYTES: u64 = 12 * 1024 * 1024;
+const _: () = assert!(
+    BLOCK_SYNC_RESPONSE_BYTES as usize >= crate::app::chain_app::MAX_BLOCK_BYTES
+        && BLOCK_SYNC_RESPONSE_BYTES as usize + 2 * 1024 * 1024
+            <= crate::network::tcp::MAX_FRAME_BYTES
+);
+
+/// Bytes of early (future-view) consensus messages a replica buffers. Proposals count with
+/// their block data (vendored hotstuff_rs patch #16), so this bounds the buffer's memory; it
+/// holds a few full 8 MiB proposals, and a proposal larger than the free space is dropped.
+pub const PROGRESS_MSG_BUFFER_BYTES: u64 = 3 * crate::app::chain_app::MAX_BLOCK_BYTES as u64;
+
 /// Lower bound that leaves room for propose/vote round trips even on a local devnet.
 const MIN_MAX_VIEW_TIME: Duration = Duration::from_millis(100);
 /// View timeout; 2 s leaves the empty-block heartbeat (1 s) a full second of margin
@@ -56,7 +71,7 @@ pub struct NodeConfig {
     /// after its parent, so the chain makes at most one block per interval. Zero (default)
     /// leaves only the empty-block heartbeat. Capped at half of `max_view_time` like the
     /// heartbeat ([`Self::effective_min_block_interval`]). Throughput is then bounded by
-    /// `MAX_BLOCK_TXS` + receipts per interval.
+    /// `MAX_BLOCK_BYTES` (8 MiB) of payload per interval.
     pub min_block_interval: Duration,
     pub log_events: bool,
     /// When set, startup fails unless the store's recorded genesis commitment matches.
@@ -102,7 +117,7 @@ impl NodeConfig {
             block_sync_blacklist_expiry_time: Duration::from_secs(10),
             block_sync_trigger_min_view_difference: 5,
             block_sync_trigger_timeout: Duration::from_secs(3),
-            progress_msg_buffer_capacity: 1024 * 1024, // 1MB buffer
+            progress_msg_buffer_capacity: PROGRESS_MSG_BUFFER_BYTES,
             epoch_length: DEFAULT_EPOCH_LENGTH,
             max_view_time: DEFAULT_MAX_VIEW_TIME,
             empty_block_interval: DEFAULT_EMPTY_BLOCK_INTERVAL,
@@ -141,8 +156,10 @@ impl NodeConfig {
         if self.block_sync_request_limit == 0 {
             return Err("block_sync_request_limit must be non-zero");
         }
-        if self.progress_msg_buffer_capacity == 0 {
-            return Err("progress_msg_buffer_capacity must be non-zero");
+        // Proposals count with their data (patch #16): a smaller buffer could never hold a
+        // full block's proposal that arrives a little early.
+        if self.progress_msg_buffer_capacity < 2 * crate::app::chain_app::MAX_BLOCK_BYTES as u64 {
+            return Err("progress_msg_buffer_capacity must hold at least two full proposals");
         }
         // A zero view time makes every view time out immediately, stalling liveness.
         // (Sub-second values are exact since the vendored pacemaker patch; see
@@ -165,6 +182,7 @@ impl NodeConfig {
             .signer(Arc::clone(&self.signer))
             .chain_id(ChainID::new(self.chain_id))
             .block_sync_request_limit(self.block_sync_request_limit)
+            .block_sync_response_byte_limit(BLOCK_SYNC_RESPONSE_BYTES)
             .block_sync_server_advertise_time(self.block_sync_server_advertise_time)
             .block_sync_response_timeout(self.block_sync_response_timeout)
             .block_sync_blacklist_expiry_time(self.block_sync_blacklist_expiry_time)

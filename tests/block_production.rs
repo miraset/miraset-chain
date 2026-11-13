@@ -228,3 +228,51 @@ fn test_candidates_that_fail_execution_are_evicted_and_do_not_block_progress() {
             .all(|a| node.get_account(a).map(|acc| acc.nonce) == Some(0))
     );
 }
+
+/// Execution edge cases after the all-or-nothing rewrite (8 MiB blocks, 2026-11-13): a
+/// self-transfer keeps the amount and pays only the fee; a `system:` module without a payload
+/// is an ordinary recipient; a failing system call leaves its sender untouched (it is tried on
+/// a copy of the block state) while the sender's other candidates are dropped with it.
+#[test]
+fn test_self_transfer_plain_system_recipient_and_failed_system_call() {
+    let frank = key(46);
+    let erin = key(47);
+    let (frank_addr, erin_addr) = (address(&frank), address(&erin));
+    let mempool = Mempool::new();
+    assert!(
+        mempool
+            .insert_tx(transfer(&frank, 0, &frank_addr, 300))
+            .is_ok()
+    );
+    assert!(
+        mempool
+            .insert_tx(transfer(&frank, 1, "system:worker_registry", 50))
+            .is_ok()
+    );
+    // An allowance must carry amount 0; this one fails inside the system call, after the
+    // sender's nonce and fee were already applied on the trial copy.
+    let mut bad_allowance = Transaction::new(&erin_addr, 0, "system:allowance", 5, 1);
+    bad_allowance.sign_with(&erin);
+    assert!(mempool.insert_tx(bad_allowance).is_ok());
+
+    let node = start(
+        &[(frank_addr.as_str(), 1_000), (erin_addr.as_str(), 1_000)],
+        mempool,
+    );
+    wait(FULL_MEMPOOL_DEADLINE, "frank's transfers committed", || {
+        node.get_account(&frank_addr).map(|a| a.nonce) == Some(2)
+    });
+    let height = node.highest_committed_height().unwrap();
+    wait(FULL_MEMPOOL_DEADLINE, "more blocks", || {
+        node.highest_committed_height().unwrap() >= height + 3
+    });
+
+    // 1 000 − 1 (fee, self-transfer) − 50 − 1.
+    assert_eq!(node.get_account(&frank_addr).unwrap().balance, 948);
+    assert_eq!(
+        node.get_account("system:worker_registry").unwrap().balance,
+        50
+    );
+    let erin_acc = node.get_account(&erin_addr).unwrap();
+    assert_eq!((erin_acc.nonce, erin_acc.balance), (0, 1_000));
+}

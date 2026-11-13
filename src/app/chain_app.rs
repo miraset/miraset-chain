@@ -13,9 +13,21 @@ mod execution;
 mod heartbeat;
 use execution::BlockExecution;
 
-/// Most transactions and receipts a produced block carries.
-pub const MAX_BLOCK_TXS: usize = 100;
-pub const MAX_BLOCK_RECEIPTS: usize = 20;
+/// Largest block payload, in canonical bytes (owner decision 2026-11-13: 8 MiB). Leaders fill
+/// blocks up to it and validators refuse anything larger, before decoding it.
+pub const MAX_BLOCK_BYTES: usize = 8 * 1024 * 1024;
+/// Payload room transactions may not use, so compute receipts still fit when transactions
+/// alone could fill the block. Receipts may use whatever transactions leave.
+pub const RECEIPT_RESERVED_BYTES: usize = 1024 * 1024;
+/// System calls (allowance, worker registry, epoch manager) a leader tries per block. Each try
+/// copies the block's state so far (see `BlockExecution::try_transaction`), so this bounds
+/// block production time; transfers and receipts are not limited by count.
+const MAX_SYSTEM_CALLS_PER_BLOCK: usize = 256;
+/// Canonical payload bytes with no transactions or receipts: magic, version, state root,
+/// timestamp and the two item counts.
+const EMPTY_PAYLOAD_BYTES: usize = 4 + 1 + 32 + 8 + 4 + 4;
+/// Length prefix of each transaction or receipt in the canonical payload.
+const ITEM_PREFIX_BYTES: usize = 4;
 /// How far a proposed block's timestamp may run ahead of a validator's clock. Validators need
 /// clocks synchronised well within this (NTP); a larger skew makes a validator refuse honest
 /// proposals.
@@ -284,19 +296,9 @@ impl MirasetApp {
     }
 }
 
-/// Keep `item` if it applies on top of `execution`; otherwise leave `execution` unchanged.
-/// One application per candidate (PRD R04, TODO 8.5.3 finding b).
-fn try_apply(
-    execution: &mut BlockExecution,
-    apply: impl FnOnce(&mut BlockExecution) -> Option<()>,
-) -> bool {
-    let mut trial = execution.clone();
-    if apply(&mut trial).is_some() {
-        *execution = trial;
-        true
-    } else {
-        false
-    }
+/// Canonical bytes `item` adds to a payload; `None` if it has no canonical encoding.
+fn item_bytes(encoded: Result<Vec<u8>, &'static str>) -> Option<usize> {
+    encoded.ok().map(|bytes| ITEM_PREFIX_BYTES + bytes.len())
 }
 
 impl<K: KVStore> App<K> for MirasetApp {
@@ -318,8 +320,14 @@ impl<K: KVStore> App<K> for MirasetApp {
         execution
             .set_block_time(tree, timestamp_ms)
             .expect("a timestamp after the parent's is always accepted");
+        // Byte budget (MAX_BLOCK_BYTES): a candidate that does not fit ends selection of its
+        // kind, so the block is full to within one item (transactions are at most the RPC
+        // body limit).
+        let mut payload_bytes = EMPTY_PAYLOAD_BYTES;
+        let tx_budget = MAX_BLOCK_BYTES - RECEIPT_RESERVED_BYTES;
         let mut failures = 0usize;
-        let selected_txs: Vec<Transaction> = self.mempool.select_txs(MAX_BLOCK_TXS, |tx| {
+        let mut system_calls = 0usize;
+        let selected_txs: Vec<Transaction> = self.mempool.select_txs(usize::MAX, |tx| {
             let expected = execution.account_nonce(tree, &tx.sender);
             if tx.nonce < expected {
                 return TxVerdict::Skip;
@@ -327,7 +335,23 @@ impl<K: KVStore> App<K> for MirasetApp {
             if tx.nonce > expected {
                 return TxVerdict::DropSender;
             }
-            if try_apply(&mut execution, |e| e.apply_transaction(tree, tx)) {
+            let Some(size) = item_bytes(tx.to_canonical_bytes()) else {
+                return TxVerdict::Evict;
+            };
+            if EMPTY_PAYLOAD_BYTES + size > tx_budget {
+                return TxVerdict::Evict; // could never fit a block
+            }
+            if payload_bytes + size > tx_budget {
+                return TxVerdict::Stop;
+            }
+            if execution::is_system_call(tx) {
+                if system_calls >= MAX_SYSTEM_CALLS_PER_BLOCK {
+                    return TxVerdict::DropSender; // stays pooled for a later block
+                }
+                system_calls += 1;
+            }
+            if execution.try_transaction(tree, tx) {
+                payload_bytes += size;
                 TxVerdict::Included
             } else {
                 failures += 1;
@@ -340,8 +364,19 @@ impl<K: KVStore> App<K> for MirasetApp {
         });
         failures = 0;
         let selected_receipts: Vec<ComputeReceipt> =
-            self.mempool.select_receipts(MAX_BLOCK_RECEIPTS, |receipt| {
-                if try_apply(&mut execution, |e| e.apply_receipt(tree, receipt)) {
+            self.mempool.select_receipts(usize::MAX, |receipt| {
+                let Some(size) = item_bytes(receipt.to_canonical_bytes()) else {
+                    return ReceiptVerdict::Evict;
+                };
+                if EMPTY_PAYLOAD_BYTES + size > MAX_BLOCK_BYTES {
+                    return ReceiptVerdict::Evict; // could never fit a block
+                }
+                if payload_bytes + size > MAX_BLOCK_BYTES {
+                    return ReceiptVerdict::Stop;
+                }
+                // `apply_receipt` changes nothing when it fails, so no copy is needed.
+                if execution.apply_receipt(tree, receipt).is_some() {
+                    payload_bytes += size;
                     ReceiptVerdict::Included
                 } else {
                     failures += 1;
@@ -355,23 +390,27 @@ impl<K: KVStore> App<K> for MirasetApp {
 
         // `finish` is the same code validators run after applying the payload, so the state
         // root and updates match what `validate_block` will compute.
-        let mut payload =
-            BlockPayload::new(selected_txs, selected_receipts).with_timestamp_ms(timestamp_ms);
-        let app_state_updates = match execution.finish() {
-            Some((updates, state_root)) => {
-                payload.state_root = state_root;
-                Some(updates)
-            }
-            None => {
-                payload = BlockPayload::default().with_timestamp_ms(timestamp_ms);
-                let (updates, state_root) =
-                    Self::compute_state_updates_with_commitment(tree, &payload)
-                        .expect("empty block state commitment must succeed");
-                payload.state_root = state_root;
-                Some(updates)
-            }
+        let (payload, app_state_updates) = match execution.finish() {
+            Some((updates, state_root)) => (
+                BlockPayload::new(selected_txs, selected_receipts)
+                    .with_timestamp_ms(timestamp_ms)
+                    .with_state_root(state_root),
+                updates,
+            ),
+            None => Self::empty_block(tree, timestamp_ms),
         };
-
+        // Validators refuse anything over the limit; the byte accounting above keeps blocks
+        // within it, and this check keeps an accounting error from stalling the chain.
+        let (payload, app_state_updates) = if payload.to_bytes().len() > MAX_BLOCK_BYTES {
+            tracing::error!(
+                transactions = payload.transactions.len(),
+                receipts = payload.compute_receipts.len(),
+                "produced block exceeds MAX_BLOCK_BYTES; proposing an empty block instead"
+            );
+            Self::empty_block(tree, timestamp_ms)
+        } else {
+            (payload, app_state_updates)
+        };
         let payload_bytes = payload.to_bytes();
         let hash_arr = payload
             .commitment_hash()
@@ -382,7 +421,7 @@ impl<K: KVStore> App<K> for MirasetApp {
         ProduceBlockResponse {
             data_hash,
             data,
-            app_state_updates,
+            app_state_updates: Some(app_state_updates),
             validator_set_updates: None,
         }
     }
@@ -405,6 +444,36 @@ impl<K: KVStore> App<K> for MirasetApp {
 }
 
 impl MirasetApp {
+    /// An empty block at `timestamp_ms` on top of `tree`, with its state commitment.
+    fn empty_block<K: KVStore>(
+        tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
+        timestamp_ms: u64,
+    ) -> (BlockPayload, AppStateUpdates) {
+        let payload = BlockPayload::default().with_timestamp_ms(timestamp_ms);
+        let (updates, state_root) = Self::compute_state_updates_with_commitment(tree, &payload)
+            .expect("empty block state commitment must succeed");
+        (payload.with_state_root(state_root), updates)
+    }
+
+    /// The payload of a proposed block, if its data is exactly one canonical payload datum of
+    /// at most [`MAX_BLOCK_BYTES`] that matches `data_hash`. The size is checked first, so an
+    /// oversized block is refused before any decoding work.
+    fn decode_proposed_payload(data: &Data, data_hash: CryptoHash) -> Option<BlockPayload> {
+        let [datum] = data.vec().as_slice() else {
+            return None;
+        };
+        if datum.bytes().len() > MAX_BLOCK_BYTES {
+            return None;
+        }
+        let payload = BlockPayload::from_bytes(datum.bytes()).ok()?;
+        // Reject any noncanonical representation.
+        if payload.to_canonical_bytes().ok()?.as_slice() != datum.bytes() {
+            return None;
+        }
+        // Domain-separated commitment hash integrity.
+        (data_hash.bytes() == payload.commitment_hash().ok()?).then_some(payload)
+    }
+
     /// Validate a proposed block; with `clock_ms`, also refuse a timestamp more than
     /// `MAX_FUTURE_DRIFT_MS` ahead of that clock (a proposer cannot pull epoch closes forward).
     fn validate<K: KVStore>(
@@ -412,33 +481,9 @@ impl MirasetApp {
         clock_ms: Option<u64>,
     ) -> ValidateBlockResponse {
         let block = request.proposed_block();
-
-        // Extract payload from data (must contain exactly one canonical BlockPayload datum)
-        if block.data.vec().len() != 1 {
-            return ValidateBlockResponse::Invalid;
-        }
-
-        let datum = &block.data.vec()[0];
-        let payload = match BlockPayload::from_bytes(datum.bytes()) {
-            Ok(p) => p,
-            Err(_) => return ValidateBlockResponse::Invalid,
-        };
-
-        // Reject any noncanonical representation
-        let Ok(canonical_bytes) = payload.to_canonical_bytes() else {
+        let Some(payload) = Self::decode_proposed_payload(&block.data, block.data_hash) else {
             return ValidateBlockResponse::Invalid;
         };
-        if canonical_bytes.as_slice() != datum.bytes() {
-            return ValidateBlockResponse::Invalid;
-        }
-
-        // Verify domain-separated commitment hash integrity
-        let Ok(expected_hash) = payload.commitment_hash() else {
-            return ValidateBlockResponse::Invalid;
-        };
-        if block.data_hash.bytes() != expected_hash {
-            return ValidateBlockResponse::Invalid;
-        }
 
         // Validate state transitions and deterministic state commitment root
         if let Some(now) = clock_ms
@@ -697,5 +742,53 @@ mod tests {
         assert!(!timestamp_near_clock(now - MAX_PAST_DRIFT_MS - 1, now));
         // A first block stamped near zero (to start epoch 0 in 1970) is refused.
         assert!(!timestamp_near_clock(1, now));
+    }
+
+    /// A payload with `count` transactions of `payload_len` payload bytes each, and its data.
+    fn sized_block(count: usize, payload_len: usize) -> (Data, CryptoHash, usize) {
+        let txs = (0..count)
+            .map(|i| {
+                let mut tx = Transaction::new("alice", i as u64, "bob", 1, 1);
+                tx.payload = vec![7; payload_len];
+                tx
+            })
+            .collect();
+        let payload = BlockPayload::new(txs, Vec::new()).with_timestamp_ms(1);
+        let bytes = payload.to_bytes();
+        let len = bytes.len();
+        let hash = CryptoHash::new(payload.commitment_hash().unwrap());
+        (Data::new(vec![Datum::new(bytes)]), hash, len)
+    }
+
+    #[test]
+    fn test_validators_refuse_blocks_over_max_block_bytes() {
+        let tx_payload = 64 * 1024;
+        let fits = MAX_BLOCK_BYTES / (tx_payload + 1024);
+        let (data, hash, len) = sized_block(fits, tx_payload);
+        assert!(len <= MAX_BLOCK_BYTES, "{len}");
+        assert!(MirasetApp::decode_proposed_payload(&data, hash).is_some());
+
+        let (data, hash, len) = sized_block(fits + 2, tx_payload);
+        assert!(len > MAX_BLOCK_BYTES, "{len}");
+        assert!(
+            MirasetApp::decode_proposed_payload(&data, hash).is_none(),
+            "a {len}-byte block is over the limit"
+        );
+    }
+
+    #[test]
+    fn test_empty_payload_size_matches_its_encoding() {
+        assert_eq!(
+            BlockPayload::default().to_bytes().len(),
+            EMPTY_PAYLOAD_BYTES
+        );
+        let tx = Transaction::new("alice", 0, "bob", 1, 1);
+        let one = BlockPayload::new(vec![tx.clone()], Vec::new())
+            .to_bytes()
+            .len();
+        assert_eq!(
+            one,
+            EMPTY_PAYLOAD_BYTES + item_bytes(tx.to_canonical_bytes()).unwrap()
+        );
     }
 }

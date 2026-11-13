@@ -225,6 +225,15 @@ pub struct Configuration {
         doc = "Set the limit for the number of blocks that a replica can request from its peer when syncing. Required."
     ))]
     pub block_sync_request_limit: u32,
+    // MIRASET PATCH #15: a byte cap on each Block Sync Response (block data bytes; at least one
+    // block is always sent). The default keeps upstream behaviour (no cap).
+    #[builder(
+        default = u64::MAX,
+        setter(
+            doc = "MIRASET: set the most block data bytes a Block Sync Response carries (at least one block is always sent). Optional; no cap by default."
+        )
+    )]
+    pub block_sync_response_byte_limit: u64,
     #[builder(setter(
         doc = "Set how frequently the sync server should advertise its Highest Committed Block and Highest PC. Required."
     ))]
@@ -305,6 +314,7 @@ impl
             chain_id: self.chain_id,
             keypair: keypair.clone(),
             request_limit: self.block_sync_request_limit,
+            response_byte_limit: self.block_sync_response_byte_limit,
             advertise_time: self.block_sync_server_advertise_time,
         };
         (

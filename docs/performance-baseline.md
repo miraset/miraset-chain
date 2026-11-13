@@ -263,6 +263,12 @@ process RSS. Agreement checked after the runs (OK).
 Cluster of 5: idle RAM ≈ 50 MB, network ≈ 85 KB/s total; under the 10 000/s offer RAM
 ≈ 245 MB, network ≈ 10.7 MB/s total (≈ 86 Mbit/s), of which P2P ≈ 0.45 MB/s.
 
+> **Superseded block limit (2026-11-13, later the same day):** the runs above used the old cap
+> of 100 transactions + 20 receipts per block. Blocks are now bounded by 8 MiB of payload
+> instead (`TODO.md` 8.5.3, "Block size 8 MiB"); throughput, disk and network under load must
+> be re-measured. A single-validator release run built a 17 491-transfer (5.46 MB) block in
+> ≈ 0.6–0.7 s.
+
 17. **Strict 1 block/s caps throughput at 120 items/s** (block size cap per second), about 18×
     below the heartbeat-only capacity (≈ 2 200/s); disk under full load drops from ≈ 145 GB/day
     to ≈ 8 GB/day and P2P from ≈ 690 KB/s to 45 KB/s per validator. Client-facing bandwidth at

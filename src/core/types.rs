@@ -49,6 +49,11 @@ pub struct Transaction {
 /// Appends a length-prefixed byte string, so adjacent variable-length fields in a
 /// canonical signing payload cannot be shifted into one another (e.g. recipient
 /// bytes bleeding into the following payload bytes).
+/// Bytes of the `u32` length prefix in front of each variable-length canonical field.
+const LENGTH_PREFIX_BYTES: usize = 4;
+/// Items a payload decoder reserves room for up front; more grow the vector as they are read.
+const PREALLOCATED_ITEMS: usize = 1024;
+
 fn write_length_prefixed(buf: &mut Vec<u8>, bytes: &[u8]) {
     buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     buf.extend_from_slice(bytes);
@@ -892,19 +897,22 @@ impl BlockPayload {
         input = &input[32..];
         let timestamp_ms = read_u64(&mut input)?;
         let tx_count = read_u32(&mut input)? as usize;
-        if tx_count > 10_000 {
-            return Err("block transaction count exceeds safety limit");
+        // Each item needs at least its length prefix, so a count the input cannot hold is
+        // refused before reading; allocation grows with what is actually read (blocks are
+        // bounded by bytes, not by item count: 8 MiB, owner decision 2026-11-13).
+        if tx_count > input.len() / LENGTH_PREFIX_BYTES {
+            return Err("block transaction count exceeds payload length");
         }
-        let mut transactions = Vec::with_capacity(tx_count);
+        let mut transactions = Vec::with_capacity(tx_count.min(PREALLOCATED_ITEMS));
         for _ in 0..tx_count {
             let raw_tx = read_length_prefixed_bytes(&mut input)?;
             transactions.push(Transaction::from_canonical_bytes(&raw_tx)?);
         }
         let receipt_count = read_u32(&mut input)? as usize;
-        if receipt_count > 10_000 {
-            return Err("block receipt count exceeds safety limit");
+        if receipt_count > input.len() / LENGTH_PREFIX_BYTES {
+            return Err("block receipt count exceeds payload length");
         }
-        let mut compute_receipts = Vec::with_capacity(receipt_count);
+        let mut compute_receipts = Vec::with_capacity(receipt_count.min(PREALLOCATED_ITEMS));
         for _ in 0..receipt_count {
             let raw_rcpt = read_length_prefixed_bytes(&mut input)?;
             compute_receipts.push(ComputeReceipt::from_canonical_bytes(&raw_rcpt)?);
@@ -1437,6 +1445,30 @@ mod tests {
         let mut b_bytes = block.to_canonical_bytes().unwrap();
         b_bytes.push(0x42);
         assert!(BlockPayload::from_canonical_bytes(&b_bytes).is_err());
+    }
+
+    /// Blocks are bounded by bytes (8 MiB), not item count: a block of more than the old
+    /// 10 000-item decoder cap must decode, or a leader could build blocks validators refuse.
+    #[test]
+    fn test_block_payload_decodes_more_items_than_the_old_count_cap() {
+        let txs: Vec<Transaction> = (0..12_000)
+            .map(|nonce| Transaction::new("alice", nonce, "bob", 1, 1))
+            .collect();
+        let block = BlockPayload::new(txs, Vec::new());
+        let bytes = block.to_canonical_bytes().unwrap();
+        assert_eq!(BlockPayload::from_canonical_bytes(&bytes).unwrap(), block);
+    }
+
+    #[test]
+    fn test_block_payload_refuses_counts_its_length_cannot_hold() {
+        let mut bytes = BlockPayload::default().to_canonical_bytes().unwrap();
+        // Transaction count field: after magic, version, state root and timestamp.
+        let count_at = 4 + 1 + 32 + 8;
+        bytes[count_at..count_at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(
+            BlockPayload::from_canonical_bytes(&bytes),
+            Err("block transaction count exceeds payload length")
+        );
     }
 
     #[test]
