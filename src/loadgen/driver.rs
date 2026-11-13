@@ -20,6 +20,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 const FUNDING_POLL: Duration = Duration::from_millis(200);
+/// Funding transfers in flight at once: below the mempool's per-sender quota (256).
+const FUNDING_BATCH: usize = 200;
+/// Wait before resubmitting a funding transfer the node refused for load (429, 503).
+const FUNDING_RETRY: Duration = Duration::from_millis(250);
 
 /// What a generator sends and where.
 pub struct Generator {
@@ -374,11 +378,47 @@ pub async fn fund(
         });
     }
     let submit = format!("{node_url}/v1/transactions");
-    for (offset, recipient) in recipients.iter().enumerate() {
-        let nonce = start.nonce + offset as u64;
-        let tx = workload::signed_transfer(faucet, nonce, recipient, amount, TRANSFER_FEE);
-        match client.post_json(&submit, &tx).await {
-            Ok(status) if status.is_success() => {}
+    let deadline = Instant::now() + timeout;
+    // In batches below the mempool's per-sender quota (256), each committed before the next,
+    // so any number of senders can be funded from the one faucet account.
+    for (batch_index, batch) in recipients.chunks(FUNDING_BATCH).enumerate() {
+        let first = start.nonce + (batch_index * FUNDING_BATCH) as u64;
+        for (offset, recipient) in batch.iter().enumerate() {
+            let nonce = first + offset as u64;
+            let tx = workload::signed_transfer(faucet, nonce, recipient, amount, TRANSFER_FEE);
+            submit_funding(client, &submit, &tx, nonce, deadline).await?;
+        }
+        let target = first + batch.len() as u64;
+        loop {
+            if account(client, node_url, &faucet_address).await?.nonce >= target {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(FundingError::Timeout(timeout));
+            }
+            tokio::time::sleep(FUNDING_POLL).await;
+        }
+    }
+    Ok(())
+}
+
+/// Submit one funding transfer, retrying while the node sheds load (429, 503): a loaded devnet
+/// has full mempools, and funding must still get through as blocks drain them.
+async fn submit_funding(
+    client: &RpcClient,
+    submit: &str,
+    tx: &crate::core::types::Transaction,
+    nonce: u64,
+    deadline: Instant,
+) -> Result<(), FundingError> {
+    let mut retried = false;
+    loop {
+        let reason = match client.post_json(submit, tx).await {
+            Ok(status) if status.is_success() => return Ok(()),
+            // After a refusal that may still have admitted it (a proxy's 503, say), "already
+            // known" means the transfer is in: count it as submitted.
+            Ok(StatusCode::CONFLICT) if retried => return Ok(()),
+            Ok(status) if is_backpressure(status) => format!("status {status}"),
             Ok(status) => {
                 return Err(FundingError::Rejected {
                     nonce,
@@ -391,17 +431,17 @@ pub async fn fund(
                     reason: e.to_string(),
                 });
             }
+        };
+        if Instant::now() >= deadline {
+            return Err(FundingError::Rejected { nonce, reason });
         }
+        retried = true;
+        tokio::time::sleep(FUNDING_RETRY).await;
     }
-    let target = start.nonce + recipients.len() as u64;
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if account(client, node_url, &faucet_address).await?.nonce >= target {
-            return Ok(());
-        }
-        tokio::time::sleep(FUNDING_POLL).await;
-    }
-    Err(FundingError::Timeout(timeout))
+}
+
+fn is_backpressure(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE
 }
 
 async fn account(

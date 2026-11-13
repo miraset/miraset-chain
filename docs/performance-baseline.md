@@ -365,3 +365,66 @@ Host: used memory peaked at 22 GB (9.4 GB still available); the cluster moved �
     fails once mempools are full; offered load above 15k tx/s was not reached. Pre-funding
     (a loadgen "fund only" mode) is needed to go further.
 
+## Stress test 2: parallel signature checks (2026-11-13)
+
+Same setup as stress test 1 (`scripts/devnet/stress.sh`, 5 validators, 8 MiB blocks, 1 block/s,
+2 s views, 2.5 GiB per node, transfers only), with two changes:
+
+- **Node:** transaction signatures are verified across up to 8 threads before execution: by
+  validators for the whole payload, and by the leader for pending transactions, each verified
+  once while it waits in the pool (`src/app/chain_app/signatures.rs`). New block timing metrics:
+  leader wait before building, build time, and validation time.
+- **Harness:** every loadgen funds its senders before any load (`--start-delay-secs`, funding
+  in batches with 429/503 retry), so all four steps ran this time: 7.5k, 15k, 22.5k and 30k
+  tx/s offered.
+
+| Measure (per validator) | 7.5k offered | 15k offered | 22.5k offered | 30k offered (host saturated) |
+|---|---|---|---|---|
+| Committed | 7 120–7 230 tx/s | **9 260–9 850 tx/s** | 8 520–9 060 tx/s | 6 015 tx/s |
+| Blocks | 0.91 /s, 2.9 MB | 0.75–0.77 /s, 4.6–4.7 MB | 0.64–0.65 /s, 5.0–5.2 MB | 0.36 /s, 6.2 MB |
+| Leader wait (1 block/s limit), mean | 0.51–0.56 s | 0.15–0.33 s | 0.05–0.22 s | 0–0.29 s |
+| Leader build, mean (p99) | 0.15–0.16 s (0.25–0.47) | 0.29–0.35 s (0.50–0.74) | 0.36–0.44 s (0.74–0.98) | 0.60–0.81 s (1.0–1.5) |
+| Validate, mean (p99) | 0.28 s (0.50) | 0.60–0.64 s (1.45–1.47) | 0.88–0.91 s (1.49) | 1.50–1.55 s (2.7–2.9) |
+| View timeouts | 0 | **0** | 0.08–0.09 /s | 0.35 /s |
+| Commit interval p50 / p99 | 1.4–1.5 / 4.8 s | 1.3–1.4 / 4.7–4.8 s | 1.4–1.5 / 4.9 s | 3.0–3.3 / 9.7–27 s |
+| CPU (process) | 1.07–1.10 cores | 1.9–2.0 | 2.1–2.2 | 2.2 (peaks 4) |
+| RAM (RSS) | 0.63–0.67 GB | 1.42–1.45 GB | 1.47–1.53 GB | 1.50–1.61 GB |
+| Network all, in / out | 3.0–3.1 / 2.7–2.9 MB/s | 4.7–4.9 / 4.0–4.3 MB/s | 5.4–5.6 / 4.2–4.6 MB/s | 5.9–6.0 / 4.4–4.8 MB/s |
+
+Whole run:
+
+- **Admission:** 503 for 6.2 M of 10.9 M offered transactions (mempools full), 429 for 0.06 M.
+- **Latency:** loadgen p50 7.4–15.7 s, p99 21–40 s.
+- **Faults:**
+  - no OOM kill, restart or fork; agreement OK up to height 528;
+  - node0 logged 156 `accept error: Too many open files` on its RPC listener at the top steps
+    (it serves funding, observation and a fifth of the load for four loadgens).
+- **Host:** node CPU summed to 14.4 of 16 cores at 30k, and the loadgens fell behind their
+  schedule by up to 25 s, so the 30k step measures the shared host, not the node.
+
+Micro-benchmark (release, this host, 20 000 pending transfers, `bench_refresh_on_a_full_pool`):
+the leader's pre-pass takes 115 ms the first time (verifies all) and 8 ms per later block (all
+cached); a validator's parallel pass over 20 000 signatures takes 103 ms, against ≈ 0.8 s
+serially. Histogram buckets for `miraset_block_txs` and `miraset_block_payload_bytes` were
+widened for 8 MiB blocks (dashboards keyed on the old `le` values change).
+
+23. **Parallel signature checks raise the measured ceiling from ≈ 7 000 to ≈ 9 800 tx/s
+    (+40 %)** at 15k offered. View timeouts there disappear (0 instead of one view in four),
+    and leader build drops to 0.15–0.35 s.
+24. **Validation is now the longest step** (0.6 → 1.5 s mean as load and host contention
+    grow), not signatures: what remains is serial execution (account reads and JSON
+    (de)serialisation, state commitment) plus CPU contention on a host running five
+    validators and four loadgens. On a dedicated host per validator the curve above 15k is
+    expected to hold better, but that is unmeasured. Next optimisation target: execution and
+    state encoding.
+25. **Point 2 (start the strict interval when the parent arrives), not implemented, by
+    measurement.**
+    - The leader's wait is 0.5 s at 7.5k: that is the 1 block/s limit doing its job.
+    - At saturation it falls to 0.05–0.3 s: a small part of the view next to validation
+      (0.9–1.5 s).
+    - Counting the interval from the parent's arrival instead of its timestamp would make
+      every wait longer, not shorter.
+26. **RPC file-descriptor limit:** under four loadgens, node0's HTTP listener ran out of file
+    descriptors (156 accept errors; the node kept running and committing). Raise `nofile` for
+    validator containers and bound concurrent RPC connections (follow-up).
+

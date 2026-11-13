@@ -278,6 +278,9 @@ struct LoadgenArgs {
     /// Amount the faucet sends each sender before the run
     #[arg(long, default_value_t = 10_000_000)]
     fund_amount: u64,
+    /// Start the load this many seconds after launch (senders are funded first)
+    #[arg(long, default_value_t = 0)]
+    start_delay_secs: u64,
 }
 
 #[tokio::main]
@@ -451,6 +454,7 @@ async fn run_loadgen(args: &LoadgenArgs) -> CliResult {
         warmup: Duration::from_secs(args.warmup_secs),
         drain_timeout: Duration::from_secs(args.drain_timeout_secs),
         fund_amount: args.fund_amount,
+        start_delay: Duration::from_secs(args.start_delay_secs),
         run_id: rand::random(),
         // From the environment so the token does not show in the process list.
         api_key: std::env::var(LOADGEN_API_KEY_ENV)

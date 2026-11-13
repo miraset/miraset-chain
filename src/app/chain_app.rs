@@ -11,7 +11,9 @@ use hotstuff_rs::types::update_sets::AppStateUpdates;
 
 mod execution;
 mod heartbeat;
+mod signatures;
 use execution::BlockExecution;
+use signatures::{SignatureCheck, VerifiedPool};
 
 /// Largest block payload, in canonical bytes (owner decision 2026-11-13: 8 MiB). Leaders fill
 /// blocks up to it and validators refuse anything larger, before decoding it.
@@ -58,6 +60,10 @@ const MAX_FAILED_CANDIDATES: usize = 256;
 /// Application state machine implementing `hotstuff_rs::app::App`.
 pub struct MirasetApp {
     mempool: Mempool,
+    /// Pending transactions whose signature the leader already verified.
+    verified_pool: VerifiedPool,
+    /// Block production and validation timings, when the node exports metrics.
+    metrics: Option<std::sync::Arc<crate::observability::NodeMetrics>>,
     empty_block_interval: std::time::Duration,
     min_block_interval: std::time::Duration,
 }
@@ -66,6 +72,8 @@ impl MirasetApp {
     pub fn new(mempool: Mempool) -> Self {
         Self {
             mempool,
+            verified_pool: VerifiedPool::default(),
+            metrics: None,
             empty_block_interval: std::time::Duration::ZERO,
             min_block_interval: std::time::Duration::ZERO,
         }
@@ -84,6 +92,15 @@ impl MirasetApp {
     /// the limit off. Same view-time bound as [`Self::with_empty_block_interval`].
     pub fn with_min_block_interval(mut self, interval: std::time::Duration) -> Self {
         self.min_block_interval = interval;
+        self
+    }
+
+    /// Record block production and validation timings in `metrics`.
+    pub fn with_metrics(
+        mut self,
+        metrics: std::sync::Arc<crate::observability::NodeMetrics>,
+    ) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -239,11 +256,23 @@ impl MirasetApp {
     /// verifies the sender's signature, enforces strict nonce sequencing (rejects replays
     /// and out-of-order submissions), and checks funds using checked arithmetic.
     /// Returns the updated sender account or a rejection reason; never mutates `sender_acc` in place.
+    /// Execution checks signatures through `BlockExecution` (in parallel where it can); this
+    /// combined form remains for the unit tests of the sender rules.
+    #[cfg(test)]
     fn apply_transaction_to_sender(
         tx: &Transaction,
         sender_acc: &AccountState,
     ) -> Result<AccountState, &'static str> {
         tx.verify_signature()?;
+        Self::apply_signed_transaction_to_sender(tx, sender_acc)
+    }
+
+    /// [`Self::apply_transaction_to_sender`] for a transaction whose signature was already
+    /// verified (`chain_app/signatures.rs`).
+    fn apply_signed_transaction_to_sender(
+        tx: &Transaction,
+        sender_acc: &AccountState,
+    ) -> Result<AccountState, &'static str> {
         // One key, one account: the sender address is the key in lowercase hex (TODO 8.5.1;
         // signature checks accept either case).
         if tx.sender.bytes().any(|b| b.is_ascii_uppercase()) {
@@ -284,7 +313,11 @@ impl MirasetApp {
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
         payload: &BlockPayload,
     ) -> Option<(AppStateUpdates, [u8; 32])> {
-        let mut execution = BlockExecution::new(tree);
+        // Signatures first, across threads; execution then skips them (see signatures.rs).
+        if !signatures::all_valid(&payload.transactions) {
+            return None;
+        }
+        let mut execution = BlockExecution::new(tree).with_signatures(SignatureCheck::AllVerified);
         execution.set_block_time(tree, payload.timestamp_ms)?;
         for tx in &payload.transactions {
             execution.apply_transaction(tree, tx)?;
@@ -311,12 +344,17 @@ impl<K: KVStore> App<K> for MirasetApp {
         // block are bounded, and each block makes progress through them. Eviction is local to
         // this node's pool: a transaction that only failed on this fork's state is dropped and
         // must be resubmitted.
+        let wait_start = std::time::Instant::now();
         heartbeat::wait_for_min_block_interval(&request, self.min_block_interval);
         heartbeat::wait_for_work_or_heartbeat(&request, &self.mempool, self.empty_block_interval);
+        let build_start = std::time::Instant::now();
         let tree = request.block_tree();
+        // Verify pending signatures across threads (each once while it waits in the pool).
+        let verified = self.verified_pool.refresh(&self.mempool.pending_txs());
         // Block time: the local clock, but always after the parent block's (TODO 8.5.1).
         let timestamp_ms = now_ms().max(Self::read_chain_time_ms(tree).saturating_add(1));
-        let mut execution = BlockExecution::new(tree);
+        let mut execution =
+            BlockExecution::new(tree).with_signatures(SignatureCheck::Verified(verified));
         execution
             .set_block_time(tree, timestamp_ms)
             .expect("a timestamp after the parent's is always accepted");
@@ -418,6 +456,11 @@ impl<K: KVStore> App<K> for MirasetApp {
         let data_hash = CryptoHash::new(hash_arr);
         let data = Data::new(vec![Datum::new(payload_bytes)]);
 
+        if let Some(metrics) = &self.metrics {
+            metrics
+                .runtime()
+                .record_block_production(build_start - wait_start, build_start.elapsed());
+        }
         ProduceBlockResponse {
             data_hash,
             data,
@@ -430,7 +473,12 @@ impl<K: KVStore> App<K> for MirasetApp {
         &mut self,
         request: ValidateBlockRequest<'_, '_, K>,
     ) -> ValidateBlockResponse {
-        Self::validate(request, Some(now_ms()))
+        let start = std::time::Instant::now();
+        let response = Self::validate(request, Some(now_ms()));
+        if let Some(metrics) = &self.metrics {
+            metrics.runtime().record_block_validation(start.elapsed());
+        }
+        response
     }
 
     /// Blocks fetched by block sync are history: their time is checked against the parent's,

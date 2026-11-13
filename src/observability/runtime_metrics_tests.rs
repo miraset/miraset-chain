@@ -155,3 +155,27 @@ fn test_observations_above_every_bound_land_in_inf_only() {
     assert_eq!(value(&out, "h_bucket{le=\"+Inf\"}"), "2");
     assert_eq!(value(&out, "h_count"), "2");
 }
+
+#[test]
+fn test_block_timings_are_exported_in_seconds() {
+    let metrics = RuntimeMetrics::default();
+    let ms = std::time::Duration::from_millis;
+    metrics.record_block_production(ms(900), ms(400));
+    metrics.record_block_validation(ms(600));
+    let mut out = String::new();
+    metrics.render(&mut out);
+    assert_eq!(value(&out, "miraset_block_produce_wait_seconds_sum"), "0.9");
+    assert_eq!(
+        value(&out, "miraset_block_produce_build_seconds_sum"),
+        "0.4"
+    );
+    assert_eq!(value(&out, "miraset_block_validate_seconds_count"), "1");
+    assert_eq!(
+        value(&out, "miraset_block_validate_seconds_bucket{le=\"0.5\"}"),
+        "0"
+    );
+    assert_eq!(
+        value(&out, "miraset_block_validate_seconds_bucket{le=\"0.75\"}"),
+        "1"
+    );
+}

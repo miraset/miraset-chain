@@ -496,6 +496,16 @@ impl Mempool {
         lock(&self.receipts).remove(task_id);
     }
 
+    /// A copy of every pending transaction (for checks done outside the pool lock, such as
+    /// the leader's parallel signature pre-pass).
+    pub fn pending_txs(&self) -> Vec<Transaction> {
+        let pool = lock(&self.txs);
+        pool.chains
+            .values()
+            .flat_map(|chain| chain.values().map(|pending| pending.item.clone()))
+            .collect()
+    }
+
     pub fn tx_count(&self) -> usize {
         lock(&self.txs).len
     }

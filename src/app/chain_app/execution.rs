@@ -6,6 +6,7 @@
 //! instead of re-executing the whole growing candidate list per candidate.
 
 use super::MirasetApp;
+use super::signatures::SignatureCheck;
 use crate::core::types::{
     AccountState, AllowanceAction, ComputeReceipt, EpochInfo, EpochRewardConfig, EpochStatus,
     MIN_WORKER_BOND, ProtocolParams, Transaction, WorkerBondAction, WorkerInfo,
@@ -37,6 +38,8 @@ pub(super) struct BlockExecution {
     epoch_modified: bool,
     /// Genesis protocol parameters (coordinators, governance, price, reward budget).
     params: ProtocolParams,
+    /// Which transaction signatures were already verified outside execution.
+    signatures: SignatureCheck,
 }
 
 type Tree<'a, 'b, K> = AppBlockTreeView<'a, K>;
@@ -59,7 +62,22 @@ impl BlockExecution {
             current_epoch: MirasetApp::read_current_epoch(tree),
             epoch_modified: false,
             params: MirasetApp::read_protocol_params(tree),
+            signatures: SignatureCheck::Inline,
         }
+    }
+
+    /// Skip the inline signature check for transactions `check` says were verified.
+    pub(super) fn with_signatures(mut self, check: SignatureCheck) -> Self {
+        self.signatures = check;
+        self
+    }
+
+    /// `tx`'s sender after paying for it: signature (unless already verified), nonce, funds.
+    fn charged_sender(&self, tx: &Transaction, sender: &AccountState) -> Option<AccountState> {
+        if self.signatures.needs_check(tx) {
+            tx.verify_signature().ok()?;
+        }
+        MirasetApp::apply_signed_transaction_to_sender(tx, sender).ok()
     }
 
     fn put(&mut self, key: Vec<u8>, value: Vec<u8>) {
@@ -168,7 +186,7 @@ impl BlockExecution {
         let sender_acc = self.take_account(tree, &tx.sender);
         // Reject an unsigned/forged sender, a replayed or out-of-order nonce, overflow, or
         // insufficient funds.
-        let updated_sender = MirasetApp::apply_transaction_to_sender(tx, &sender_acc).ok()?;
+        let updated_sender = self.charged_sender(tx, &sender_acc)?;
         self.local_accounts
             .insert(tx.sender.clone(), updated_sender);
 
@@ -215,8 +233,7 @@ impl BlockExecution {
     ) -> Option<()> {
         // Reject an unsigned/forged sender, a replayed or out-of-order nonce, overflow, or
         // insufficient funds.
-        let updated_sender =
-            MirasetApp::apply_transaction_to_sender(tx, &self.account(tree, &tx.sender)).ok()?;
+        let updated_sender = self.charged_sender(tx, &self.account(tree, &tx.sender))?;
         let mut recipient = if tx.recipient == tx.sender {
             updated_sender.clone()
         } else {

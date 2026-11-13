@@ -29,7 +29,9 @@ use tokio::time::Instant;
 use tracker::{Kind, KindReport, Tracker, Window, lock};
 
 const DRAIN_POLL: Duration = Duration::from_millis(250);
-const FUNDING_TIMEOUT: Duration = Duration::from_secs(120);
+/// Funding waits for its transfers to commit; on a loaded devnet blocks are slower and mempools
+/// full (funding retries 429/503), so this is generous.
+const FUNDING_TIMEOUT: Duration = Duration::from_secs(300);
 /// Time for the commit stream to connect before load starts.
 const SUBSCRIBE_SETTLE: Duration = Duration::from_millis(500);
 const RECONNECT_BACKOFF: Duration = Duration::from_millis(500);
@@ -50,6 +52,10 @@ pub struct LoadConfig {
     /// After load stops, how long to wait for admitted items to commit.
     pub drain_timeout: Duration,
     pub fund_amount: u64,
+    /// Start the load this long after the run starts (funding happens first), so several
+    /// loadgens can fund up front and then step the load at set times. Zero: start as soon as
+    /// funding is done.
+    pub start_delay: Duration,
     pub run_id: u64,
     /// RPC API token sent as `Authorization: Bearer` on submissions, for nodes started with
     /// `--rpc-api-keys`.
@@ -156,6 +162,7 @@ fn is_loopback_url(url: &str) -> bool {
 
 /// Fund senders, offer the load, drain, and report.
 pub async fn run(config: &LoadConfig) -> Result<LoadReport, LoadError> {
+    let launched = Instant::now();
     config.validate()?;
     if config.api_key.is_some() {
         for url in config.rpc_urls.iter().filter(|url| !is_loopback_url(url)) {
@@ -178,7 +185,17 @@ pub async fn run(config: &LoadConfig) -> Result<LoadReport, LoadError> {
         FUNDING_TIMEOUT,
     )
     .await?;
+    tracing::info!(senders = senders.len(), "senders funded");
     let workers = prepare_receipt_workers(config, &client, &observer_url).await?;
+    let scheduled = launched + config.start_delay;
+    if Instant::now() < scheduled {
+        tokio::time::sleep_until(scheduled).await;
+    } else if !config.start_delay.is_zero() {
+        tracing::warn!(
+            late_ms = (Instant::now() - scheduled).as_millis() as u64,
+            "funding outlasted --start-delay-secs; load starts late"
+        );
+    }
 
     // Load starts after the commit stream has had time to connect.
     let start = Instant::now() + SUBSCRIBE_SETTLE;
@@ -474,6 +491,7 @@ mod tests {
             warmup: Duration::from_secs(2),
             drain_timeout: Duration::from_secs(5),
             fund_amount: 1_000,
+            start_delay: Duration::ZERO,
             run_id: 1,
             api_key: None,
             coordinator: Some(workload::derive_key(1, "coordinator", 0)),

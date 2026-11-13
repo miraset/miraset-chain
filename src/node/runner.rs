@@ -209,16 +209,17 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
         check_epoch_length_matches_genesis(&kv_store, config.epoch_length)?;
 
         let safety_halt = config.safety_halt.clone();
+        let metrics = Arc::new(NodeMetrics::default());
         let app = MirasetApp::new(mempool.clone())
             .with_empty_block_interval(config.effective_empty_block_interval())
-            .with_min_block_interval(config.effective_min_block_interval());
+            .with_min_block_interval(config.effective_min_block_interval())
+            .with_metrics(Arc::clone(&metrics));
         let hs_config = config.to_hotstuff_config();
 
         let (commit_sender, _) = broadcast::channel(1024);
         let commit_tx = commit_sender.clone();
         let kv_for_event = kv_store.clone();
         let mempool_for_event = mempool.clone();
-        let metrics = Arc::new(NodeMetrics::default());
         let metrics_for_event = Arc::clone(&metrics);
         let metrics_for_sync_start = Arc::clone(&metrics);
         let metrics_for_sync_end = Arc::clone(&metrics);

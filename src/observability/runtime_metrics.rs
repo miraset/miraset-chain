@@ -8,12 +8,19 @@
 //! - **I4 process:** resident memory, CPU seconds, open fds, threads and bytes written, from
 //!   `/proc/self` at scrape time (Linux; absent elsewhere).
 //! - **I7 transport traffic:** P2P bytes sent and received (counters owned by the transport).
+//! - **Block timing (stress test, 2026-11-13):** how long a leader waited before building a
+//!   block (block-rate limit and heartbeat), how long it took to build it, and how long
+//!   validating a proposal took, to locate where a view's time goes.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 /// Fixed-bucket histogram over non-negative integer observations. The last bucket counts
 /// values above every bound, so `+Inf` is always the cumulative total of the buckets.
@@ -62,8 +69,18 @@ impl Histogram {
     }
 }
 
-const TXS_BOUNDS: &[u64] = &[0, 1, 5, 10, 25, 50, 75, 100];
-const BYTES_BOUNDS: &[u64] = &[256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576];
+// Blocks hold up to 8 MiB (≈ 23 000 transfers) since 2026-11-13.
+const TXS_BOUNDS: &[u64] = &[
+    0, 1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 15_000, 20_000, 25_000,
+];
+const BYTES_BOUNDS: &[u64] = &[
+    256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576, 2_097_152, 4_194_304, 6_291_456,
+    8_388_608,
+];
+/// Block production wait/build and validation times (ms).
+const STEP_MS_BOUNDS: &[u64] = &[
+    1, 5, 10, 25, 50, 100, 250, 500, 750, 1_000, 1_500, 2_000, 3_000, 5_000,
+];
 const INTERVAL_MS_BOUNDS: &[u64] = &[50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000];
 
 /// Transport byte counters (I7), owned by the P2P transport and shared with metrics.
@@ -112,6 +129,9 @@ pub struct RuntimeMetrics {
     empty_blocks_total: AtomicU64,
     unreadable_blocks_total: AtomicU64,
     commit_interval_ms: Histogram,
+    produce_wait_ms: Histogram,
+    produce_build_ms: Histogram,
+    validate_ms: Histogram,
     last_commit: Mutex<Option<Instant>>,
     view: AtomicU64,
     view_timeouts_total: AtomicU64,
@@ -141,6 +161,9 @@ impl Default for RuntimeMetrics {
             empty_blocks_total: AtomicU64::new(0),
             unreadable_blocks_total: AtomicU64::new(0),
             commit_interval_ms: Histogram::new(INTERVAL_MS_BOUNDS),
+            produce_wait_ms: Histogram::new(STEP_MS_BOUNDS),
+            produce_build_ms: Histogram::new(STEP_MS_BOUNDS),
+            validate_ms: Histogram::new(STEP_MS_BOUNDS),
             last_commit: Mutex::new(None),
             view: AtomicU64::new(0),
             view_timeouts_total: AtomicU64::new(0),
@@ -183,6 +206,18 @@ impl RuntimeMetrics {
             self.commit_interval_ms
                 .observe(u64::try_from(interval).unwrap_or(u64::MAX));
         }
+    }
+
+    /// A block this node produced as leader: time spent waiting before building it (block-rate
+    /// limit, heartbeat) and building it.
+    pub fn record_block_production(&self, waited: Duration, built: Duration) {
+        self.produce_wait_ms.observe(millis(waited));
+        self.produce_build_ms.observe(millis(built));
+    }
+
+    /// A live proposal this node validated (block sync excluded).
+    pub fn record_block_validation(&self, took: Duration) {
+        self.validate_ms.observe(millis(took));
     }
 
     /// The view this node entered.
@@ -234,6 +269,24 @@ impl RuntimeMetrics {
             out,
             "miraset_commit_interval_seconds",
             "Time between consecutive consensus commits on this node (block sync excluded).",
+            1000.0,
+        );
+        self.produce_wait_ms.render(
+            out,
+            "miraset_block_produce_wait_seconds",
+            "Time a leader waited before building a block (block-rate limit, heartbeat).",
+            1000.0,
+        );
+        self.produce_build_ms.render(
+            out,
+            "miraset_block_produce_build_seconds",
+            "Time a leader took to build a block (selection, execution, encoding).",
+            1000.0,
+        );
+        self.validate_ms.render(
+            out,
+            "miraset_block_validate_seconds",
+            "Time this node took to validate a live proposal.",
             1000.0,
         );
         counter(
