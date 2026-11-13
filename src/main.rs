@@ -557,6 +557,7 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
     let peers = genesis.peer_addresses(&vk)?;
     let (tcp, runtime) = TcpNetwork::bind_with_hosts(identity, cli.p2p_addr, peers)?;
     let p2p_dropped = tcp.dropped_messages_counter();
+    let p2p_rejections = tcp.rejections();
     // Outermost layer: TcpNetwork delivers self-addressed votes inside `send`.
     let network = GuardedNetwork::new(tcp, guard, safety_halt.clone());
     let transport_refusals = network.refusals();
@@ -575,6 +576,7 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
         Mempool::new(),
     )?);
     node.metrics().attach_p2p_dropped(p2p_dropped);
+    node.metrics().attach_p2p_rejections(p2p_rejections);
     node.metrics()
         .attach_vote_refusals(VoteGuardLayer::Transport, transport_refusals);
     if let Some(refusals) = signer_refusals {

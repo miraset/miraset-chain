@@ -9,6 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::vote_refusals::{VoteGuardLayer, VoteRefusals};
+use crate::network::{Rejection, TransportRejections};
 use crate::node::AdmissionError;
 
 /// Rejection reasons for transaction and receipt admission. Fixed set of label values.
@@ -127,6 +128,7 @@ pub struct NodeMetrics {
     admission: [AdmissionCounters; AdmissionKind::ALL.len()],
     rpc_rejected: [AtomicU64; RpcReject::ALL.len()],
     p2p_dropped: OnceLock<Arc<AtomicU64>>,
+    p2p_rejections: OnceLock<Arc<TransportRejections>>,
     vote_refusals: [OnceLock<Arc<VoteRefusals>>; VoteGuardLayer::ALL.len()],
 }
 
@@ -144,6 +146,7 @@ impl Default for NodeMetrics {
             admission: Default::default(),
             rpc_rejected: Default::default(),
             p2p_dropped: OnceLock::new(),
+            p2p_rejections: OnceLock::new(),
             vote_refusals: Default::default(),
         }
     }
@@ -251,6 +254,11 @@ impl NodeMetrics {
     /// Export the transport's dropped-message counter. Only the first call takes effect.
     pub fn attach_p2p_dropped(&self, counter: Arc<AtomicU64>) {
         let _ = self.p2p_dropped.set(counter);
+    }
+
+    /// Export the transport's refused-connection counters (TODO 8.4.1). First call wins.
+    pub fn attach_p2p_rejections(&self, rejections: Arc<TransportRejections>) {
+        let _ = self.p2p_rejections.set(rejections);
     }
 
     /// Export one guard layer's phase-vote refusals. Only the first call per layer takes effect.
@@ -372,6 +380,22 @@ impl NodeMetrics {
                 "miraset_p2p_dropped_messages_total {}",
                 dropped.load(Ordering::Relaxed)
             );
+        }
+
+        if let Some(rejections) = self.p2p_rejections.get() {
+            counter(
+                &mut out,
+                "miraset_p2p_rejected_total",
+                "P2P connections refused or closed by the authenticated transport, by reason.",
+            );
+            for reason in Rejection::ALL {
+                let _ = writeln!(
+                    out,
+                    "miraset_p2p_rejected_total{{reason=\"{}\"}} {}",
+                    reason.as_str(),
+                    rejections.get(reason)
+                );
+            }
         }
 
         self.render_sync(&mut out);
@@ -552,9 +576,31 @@ mod tests {
     }
 
     #[test]
+    fn test_p2p_rejections_are_exported_by_reason() {
+        let metrics = NodeMetrics::default();
+        let rejections = Arc::new(TransportRejections::default());
+        rejections.record(Rejection::UnknownValidator);
+        rejections.record(Rejection::UnknownValidator);
+        metrics.attach_p2p_rejections(Arc::clone(&rejections));
+        let text = metrics.render(ScrapeState::default());
+        assert_eq!(
+            value(
+                &text,
+                "miraset_p2p_rejected_total{reason=\"unknown_validator\"}"
+            ),
+            "2"
+        );
+        assert_eq!(
+            value(&text, "miraset_p2p_rejected_total{reason=\"slots_full\"}"),
+            "0"
+        );
+    }
+
+    #[test]
     fn test_every_series_has_help_and_type() {
         let metrics = NodeMetrics::default();
         metrics.attach_p2p_dropped(Arc::new(AtomicU64::new(0)));
+        metrics.attach_p2p_rejections(Arc::default());
         metrics.attach_vote_refusals(VoteGuardLayer::Signer, Arc::default());
         metrics.record_commit(Some(1));
         let text = metrics.render(ScrapeState::default());

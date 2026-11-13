@@ -50,6 +50,10 @@ Besides commits, admission, mempool and transport drops, `/metrics` exports bloc
 refused by the signing guard (`miraset_vote_refused_total{layer, reason}`, `layer` = `signer` for
 an in-process key or `transport` for `GuardedNetwork`, `reason` = `stale`, `conflicting` or `below_lock`). A
 validator with `--remote-signer` has no `signer` series; that process counts its own refusals.
+Refused or closed P2P connections are counted as `miraset_p2p_rejected_total{reason}`
+(`handshake_timeout`, `handshake_failed`, `bad_attestation`, `unknown_validator`,
+`frame_too_large`, `decrypt_failed`, `slots_full`); a rising `unknown_validator` or
+`handshake_failed` means something other than a genesis validator is reaching the P2P port.
 
 Logs go to stderr: text by default, one JSON object per line with `--log-format json`; `RUST_LOG`
 sets the filter (default `info`). On SIGTERM a validator stops admission (`/v1/transactions` and
