@@ -931,11 +931,19 @@ impl BlockPayload {
 
     /// Domain-separated cryptographic commitment hash for this block payload.
     pub fn commitment_hash(&self) -> Result<[u8; 32], &'static str> {
-        let canonical = self.to_canonical_bytes()?;
+        Ok(Self::commitment_hash_of_canonical(
+            &self.to_canonical_bytes()?,
+        ))
+    }
+
+    /// [`Self::commitment_hash`] of a payload already in canonical bytes, without encoding it
+    /// again. Callers must know `canonical` is this payload's canonical encoding.
+    #[must_use]
+    pub(crate) fn commitment_hash_of_canonical(canonical: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(DOMAIN_BLOCK_COMMIT_V1);
-        hasher.update(&canonical);
-        Ok(hasher.finalize().into())
+        hasher.update(canonical);
+        hasher.finalize().into()
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {

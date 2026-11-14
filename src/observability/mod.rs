@@ -11,5 +11,5 @@ pub use metrics::{AdmissionKind, AdmissionReject, NodeMetrics, RpcReject, Scrape
 pub use readiness::{
     DEFAULT_READY_MAX_COMMIT_AGE, Lifecycle, NotReadyReason, ReadinessInput, evaluate_readiness,
 };
-pub use runtime_metrics::{RuntimeMetrics, StorageFiles, TransportTraffic};
+pub use runtime_metrics::{RuntimeMetrics, StorageFiles, TransportTraffic, ValidationPhases};
 pub use vote_refusals::{VoteGuardLayer, VoteRefusals};

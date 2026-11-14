@@ -12,6 +12,7 @@ use hotstuff_rs::types::update_sets::AppStateUpdates;
 mod execution;
 mod heartbeat;
 mod signatures;
+use crate::observability::ValidationPhases;
 use execution::BlockExecution;
 use signatures::{SignatureCheck, VerifiedPool};
 
@@ -313,10 +314,23 @@ impl MirasetApp {
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
         payload: &BlockPayload,
     ) -> Option<(AppStateUpdates, [u8; 32])> {
+        Self::execute_payload(tree, payload, &mut ValidationPhases::default())
+    }
+
+    /// Execute `payload` as validators do, recording how long each phase took in `phases`.
+    fn execute_payload<K: KVStore>(
+        tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
+        payload: &BlockPayload,
+        phases: &mut ValidationPhases,
+    ) -> Option<(AppStateUpdates, [u8; 32])> {
         // Signatures first, across threads; execution then skips them (see signatures.rs).
-        if !signatures::all_valid(&payload.transactions) {
+        let start = std::time::Instant::now();
+        let signatures_ok = signatures::all_valid(&payload.transactions);
+        phases.signatures = start.elapsed();
+        if !signatures_ok {
             return None;
         }
+        let start = std::time::Instant::now();
         let mut execution = BlockExecution::new(tree).with_signatures(SignatureCheck::AllVerified);
         execution.set_block_time(tree, payload.timestamp_ms)?;
         for tx in &payload.transactions {
@@ -325,7 +339,11 @@ impl MirasetApp {
         for receipt in &payload.compute_receipts {
             execution.apply_receipt(tree, receipt)?;
         }
-        execution.finish()
+        phases.execute = start.elapsed();
+        let start = std::time::Instant::now();
+        let result = execution.finish();
+        phases.finish = start.elapsed();
+        result
     }
 }
 
@@ -450,10 +468,7 @@ impl<K: KVStore> App<K> for MirasetApp {
             (payload, app_state_updates)
         };
         let payload_bytes = payload.to_bytes();
-        let hash_arr = payload
-            .commitment_hash()
-            .expect("canonical block commitment hash failed");
-        let data_hash = CryptoHash::new(hash_arr);
+        let data_hash = CryptoHash::new(BlockPayload::commitment_hash_of_canonical(&payload_bytes));
         let data = Data::new(vec![Datum::new(payload_bytes)]);
 
         if let Some(metrics) = &self.metrics {
@@ -474,9 +489,15 @@ impl<K: KVStore> App<K> for MirasetApp {
         request: ValidateBlockRequest<'_, '_, K>,
     ) -> ValidateBlockResponse {
         let start = std::time::Instant::now();
-        let response = Self::validate(request, Some(now_ms()));
+        let mut phases = ValidationPhases::default();
+        let response = Self::validate(request, Some(now_ms()), &mut phases);
         if let Some(metrics) = &self.metrics {
-            metrics.runtime().record_block_validation(start.elapsed());
+            // Phases only for blocks that ran every phase: an invalid block stops early and
+            // would add zero samples to the phases it skipped.
+            let valid = matches!(response, ValidateBlockResponse::Valid { .. });
+            metrics
+                .runtime()
+                .record_block_validation(start.elapsed(), valid.then_some(&phases));
         }
         response
     }
@@ -487,7 +508,7 @@ impl<K: KVStore> App<K> for MirasetApp {
         &mut self,
         request: ValidateBlockRequest<'_, '_, K>,
     ) -> ValidateBlockResponse {
-        Self::validate(request, None)
+        Self::validate(request, None, &mut ValidationPhases::default())
     }
 }
 
@@ -518,8 +539,9 @@ impl MirasetApp {
         if payload.to_canonical_bytes().ok()?.as_slice() != datum.bytes() {
             return None;
         }
-        // Domain-separated commitment hash integrity.
-        (data_hash.bytes() == payload.commitment_hash().ok()?).then_some(payload)
+        // Domain-separated commitment hash integrity, over the bytes just shown canonical.
+        (data_hash.bytes() == BlockPayload::commitment_hash_of_canonical(datum.bytes()))
+            .then_some(payload)
     }
 
     /// Validate a proposed block; with `clock_ms`, also refuse a timestamp more than
@@ -527,9 +549,13 @@ impl MirasetApp {
     fn validate<K: KVStore>(
         request: ValidateBlockRequest<'_, '_, K>,
         clock_ms: Option<u64>,
+        phases: &mut ValidationPhases,
     ) -> ValidateBlockResponse {
         let block = request.proposed_block();
-        let Some(payload) = Self::decode_proposed_payload(&block.data, block.data_hash) else {
+        let start = std::time::Instant::now();
+        let decoded = Self::decode_proposed_payload(&block.data, block.data_hash);
+        phases.decode = start.elapsed();
+        let Some(payload) = decoded else {
             return ValidateBlockResponse::Invalid;
         };
 
@@ -546,7 +572,7 @@ impl MirasetApp {
             return ValidateBlockResponse::Invalid;
         }
 
-        match Self::compute_state_updates_with_commitment(request.block_tree(), &payload) {
+        match Self::execute_payload(request.block_tree(), &payload, phases) {
             Some((updates, computed_state_root)) if computed_state_root == payload.state_root => {
                 ValidateBlockResponse::Valid {
                     app_state_updates: Some(updates),

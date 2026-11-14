@@ -77,6 +77,8 @@ const BYTES_BOUNDS: &[u64] = &[
     256, 1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576, 2_097_152, 4_194_304, 6_291_456,
     8_388_608,
 ];
+/// Validation phase names, in [`ValidationPhases`] field order.
+const VALIDATE_PHASES: [&str; 4] = ["decode", "signatures", "execute", "finish"];
 /// Block production wait/build and validation times (ms).
 const STEP_MS_BOUNDS: &[u64] = &[
     1, 5, 10, 25, 50, 100, 250, 500, 750, 1_000, 1_500, 2_000, 3_000, 5_000,
@@ -121,6 +123,19 @@ pub struct StorageFiles {
     pub signing_guard: Option<PathBuf>,
 }
 
+/// Where a live proposal's validation spent its time, by phase.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ValidationPhases {
+    /// Size check, decoding, canonical re-encoding check and payload hash.
+    pub decode: Duration,
+    /// Parallel signature pass.
+    pub signatures: Duration,
+    /// Executing transactions and receipts against state.
+    pub execute: Duration,
+    /// Writing changed state and computing the state commitment.
+    pub finish: Duration,
+}
+
 /// Measurement-campaign metrics owned by [`super::NodeMetrics`].
 pub struct RuntimeMetrics {
     block_txs: Histogram,
@@ -132,6 +147,7 @@ pub struct RuntimeMetrics {
     produce_wait_ms: Histogram,
     produce_build_ms: Histogram,
     validate_ms: Histogram,
+    validate_phase_ms: [Histogram; 4],
     last_commit: Mutex<Option<Instant>>,
     view: AtomicU64,
     view_timeouts_total: AtomicU64,
@@ -164,6 +180,7 @@ impl Default for RuntimeMetrics {
             produce_wait_ms: Histogram::new(STEP_MS_BOUNDS),
             produce_build_ms: Histogram::new(STEP_MS_BOUNDS),
             validate_ms: Histogram::new(STEP_MS_BOUNDS),
+            validate_phase_ms: std::array::from_fn(|_| Histogram::new(STEP_MS_BOUNDS)),
             last_commit: Mutex::new(None),
             view: AtomicU64::new(0),
             view_timeouts_total: AtomicU64::new(0),
@@ -215,9 +232,18 @@ impl RuntimeMetrics {
         self.produce_build_ms.observe(millis(built));
     }
 
-    /// A live proposal this node validated (block sync excluded).
-    pub fn record_block_validation(&self, took: Duration) {
+    /// A live proposal this node validated (block sync excluded), and its phases when it was
+    /// valid (an invalid one stops early, so its phases are not recorded).
+    pub fn record_block_validation(&self, took: Duration, phases: Option<&ValidationPhases>) {
         self.validate_ms.observe(millis(took));
+        let Some(phases) = phases else {
+            return;
+        };
+        let [decode, signatures, execute, finish] = &self.validate_phase_ms;
+        decode.observe(millis(phases.decode));
+        signatures.observe(millis(phases.signatures));
+        execute.observe(millis(phases.execute));
+        finish.observe(millis(phases.finish));
     }
 
     /// The view this node entered.
@@ -289,6 +315,14 @@ impl RuntimeMetrics {
             "Time this node took to validate a live proposal.",
             1000.0,
         );
+        for (histogram, phase) in self.validate_phase_ms.iter().zip(VALIDATE_PHASES) {
+            histogram.render(
+                out,
+                &format!("miraset_block_validate_{phase}_seconds"),
+                &format!("Time a live proposal's validation spent in its {phase} phase."),
+                1000.0,
+            );
+        }
         counter(
             out,
             "miraset_empty_blocks_total",

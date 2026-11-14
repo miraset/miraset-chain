@@ -412,7 +412,8 @@ widened for 8 MiB blocks (dashboards keyed on the old `le` values change).
     (+40 %)** at 15k offered. View timeouts there disappear (0 instead of one view in four),
     and leader build drops to 0.15–0.35 s.
 24. **Validation is now the longest step** (0.6 → 1.5 s mean as load and host contention
-    grow), not signatures: what remains is serial execution (account reads and JSON
+    grow). *Corrected by stress test 3 (finding 27): it is still signature checks under CPU
+    contention, not execution.* Original text: not signatures: what remains is serial execution (account reads and JSON
     (de)serialisation, state commitment) plus CPU contention on a host running five
     validators and four loadgens. On a dedicated host per validator the curve above 15k is
     expected to hold better, but that is unmeasured. Next optimisation target: execution and
@@ -427,4 +428,71 @@ widened for 8 MiB blocks (dashboards keyed on the old `le` values change).
 26. **RPC file-descriptor limit:** under four loadgens, node0's HTTP listener ran out of file
     descriptors (156 accept errors; the node kept running and committing). Raise `nofile` for
     validator containers and bound concurrent RPC connections (follow-up).
+
+## Stress test 3: where validation time goes (2026-11-14)
+
+The owner asked to speed up block validation with a binary state encoding instead of JSON and
+fewer state reads, then repeat the stress test. A profile came first.
+
+**Isolated profile** (release, this host otherwise idle, one validator on redb, a 20 000-transfer
+block, phase timers):
+
+| Phase | Time |
+|---|---|
+| signatures (8 threads) | 176 ms |
+| payload hash | 30 ms |
+| canonical re-encoding check | 10 ms |
+| decode | 4 ms |
+| **execute (account reads, JSON)** | **5.4 ms** |
+| **finish (JSON writes, state commitment)** | **0.1 ms** |
+
+Account reads and JSON are ≈ 2.5 % of validation. A binary state encoding would change the
+state commitment, so every validator would have to upgrade together, for ≈ 5 ms per block.
+**Not done.** The earlier claim that validation was dominated by "account reads and JSON" (finding 24)
+was wrong.
+
+**Changes instead:**
+- validators hash the payload bytes they received (after the canonical check) and the leader
+  hashes the bytes it encoded, instead of encoding the payload once more (block format and
+  hash unchanged);
+- per-phase validation metrics (`miraset_block_validate_{decode,signatures,execute,finish}_seconds`).
+
+**Stress test 3** (`scripts/devnet/stress.sh`, same setup as test 2):
+
+| Measure (per validator) | 7.5k offered | 15k | 22.5k | 30k (host saturated) |
+|---|---|---|---|---|
+| Committed | 7 170–7 380 tx/s | **9 160–9 570 tx/s** | 8 810–9 150 | 6 425–6 970 |
+| Blocks | 0.91–0.93 /s, 2.95 MB | 0.72–0.75 /s, 4.7 MB | 0.65–0.67 /s, 5.1 MB | 0.37–0.40 /s, 6.4 MB |
+| Validate, mean | 0.26 s | 0.57 s | 0.86 s | 1.47 s |
+| — signatures | **0.22 s** | **0.51 s** | **0.77 s** | **1.31 s** |
+| — decode + hash | 0.03 s | 0.05 s | 0.07 s | 0.12 s |
+| — execute | 0.004 s | 0.008 s | 0.013 s | 0.029 s |
+| — finish | < 0.001 s | < 0.001 s | < 0.001 s | 0.003 s |
+| Leader wait / build | 0.63 / 0.14 s | 0.16–0.31 / 0.25–0.29 s | 0.02–0.26 / 0.34–0.44 s | 0–0.15 / 0.67–0.78 s |
+| View timeouts | 0 | 0.05–0.07 /s | 0.09–0.11 /s | 0.35–0.37 /s |
+| CPU / RSS | 1.06 cores / 0.62 GB | 1.8 / 1.4–1.6 GB | 2.1 / 1.4–1.8 GB | 2.2 / 1.5–1.8 GB |
+
+Agreement OK up to height 528; no OOM, restart or fork; node0 again logged ≈ 160 RPC
+`Too many open files` accept errors (finding 26). Node CPU summed to 13.3 of 16 cores, and the
+loadgens fell up to 40 s behind schedule at 30k.
+
+27. **Validation is 85–90 % signature checks at every load level**; execution and state
+    writing stay ≤ 2 % (≤ 30 ms even at 6.4 MB blocks). Throughput matches stress test 2
+    within run-to-run noise (≈ 9 200–9 600 tx/s at 15k offered).
+28. **On this host the signature phase is CPU contention, not node code.**
+    - Isolated, 8 threads verify 20 000 signatures in 103–176 ms (5–9 µs each).
+    - On the devnet the same phase costs 29 µs per signature at 7.5k offered and 80 µs at
+      30k: four validators verify the same block at the same moment, each with 8 threads,
+      on 16 shared cores, next to four loadgens signing and sending 30k tx/s.
+    - The per-validator ceiling on dedicated hardware cannot be measured on one host. It needs
+      one machine per validator, with load generated elsewhere.
+29. **Remaining levers, in order of expected effect:**
+    - dedicated validator hosts (measurement, no code);
+    - verify each transaction once per node: admission already verifies it, so a shared
+      per-node cache would let the leader's pre-pass and its own validation skip it (saves
+      about 2 of 7 verifications per transaction cluster-wide; the replicas' critical path is
+      unchanged without mempool gossip);
+    - batch ed25519 verification (≈ 2× faster) is not recommended for consensus: batch and
+      single verification can disagree on adversarial signatures, which could split
+      validators.
 

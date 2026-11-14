@@ -161,7 +161,15 @@ fn test_block_timings_are_exported_in_seconds() {
     let metrics = RuntimeMetrics::default();
     let ms = std::time::Duration::from_millis;
     metrics.record_block_production(ms(900), ms(400));
-    metrics.record_block_validation(ms(600));
+    metrics.record_block_validation(
+        ms(600),
+        Some(&ValidationPhases {
+            signatures: ms(450),
+            ..ValidationPhases::default()
+        }),
+    );
+    // An invalid block counts in the total only.
+    metrics.record_block_validation(ms(5), None);
     let mut out = String::new();
     metrics.render(&mut out);
     assert_eq!(value(&out, "miraset_block_produce_wait_seconds_sum"), "0.9");
@@ -169,13 +177,25 @@ fn test_block_timings_are_exported_in_seconds() {
         value(&out, "miraset_block_produce_build_seconds_sum"),
         "0.4"
     );
-    assert_eq!(value(&out, "miraset_block_validate_seconds_count"), "1");
+    assert_eq!(value(&out, "miraset_block_validate_seconds_count"), "2");
     assert_eq!(
-        value(&out, "miraset_block_validate_seconds_bucket{le=\"0.5\"}"),
+        value(&out, "miraset_block_validate_signatures_seconds_count"),
+        "1"
+    );
+    assert_eq!(
+        value(&out, "miraset_block_validate_signatures_seconds_sum"),
+        "0.45"
+    );
+    assert_eq!(
+        value(&out, "miraset_block_validate_execute_seconds_sum"),
         "0"
     );
     assert_eq!(
-        value(&out, "miraset_block_validate_seconds_bucket{le=\"0.75\"}"),
+        value(&out, "miraset_block_validate_seconds_bucket{le=\"0.5\"}"),
         "1"
+    );
+    assert_eq!(
+        value(&out, "miraset_block_validate_seconds_bucket{le=\"0.75\"}"),
+        "2"
     );
 }
