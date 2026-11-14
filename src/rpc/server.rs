@@ -1,3 +1,5 @@
+use super::connections;
+use axum::serve::ListenerExt as _;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, State},
@@ -633,8 +635,16 @@ where
     let access = Arc::new(access.with_metrics(Arc::clone(node.metrics())));
     let state = RpcState { node, chain_id };
     let app = create_router_with_access(state, access);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    // Client addresses key the rate limit when no API keys are configured.
+    let tcp = tokio::net::TcpListener::bind(addr).await?;
+    let limit = connections::connection_limit(crate::process_hardening::open_file_limit());
+    tracing::info!(max_connections = limit, "RPC connection limit");
+    // `tap_io` (also used to set TCP_NODELAY) gives the wrapped listener axum's
+    // `ConnectInfo<SocketAddr>`: client addresses key the rate limit when no API keys are set.
+    let listener = connections::LimitedListener::new(tcp, limit).tap_io(|stream| {
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::trace!(%error, "TCP_NODELAY not set on an RPC connection");
+        }
+    });
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),

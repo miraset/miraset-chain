@@ -550,7 +550,12 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                 self.epoch_may_close(),
             )?;
             let (sender, nonce) = (tx.sender.clone(), tx.nonce);
+            let digest = tx.canonical_digest();
             self.mempool.insert_tx(tx)?;
+            // Its signature verified above and it is now pooled: block production and
+            // validation on this node skip it (`mempool::signature_cache`). Recorded only once
+            // pooled, so refused submissions cannot churn the cache.
+            self.mempool.signature_cache().insert_verified(digest);
             // A block may have committed this nonce between the check and the insert, after the
             // commit hook pruned the pool; do not leave a stale transaction behind.
             if self.get_account(&sender).is_some_and(|a| a.nonce > nonce) {

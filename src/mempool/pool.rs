@@ -241,6 +241,9 @@ pub struct Mempool {
     limits: MempoolLimits,
     txs: Arc<Mutex<TxPool>>,
     receipts: Arc<Mutex<ReceiptPool>>,
+    /// Transactions whose signature this node verified (admission, block production and
+    /// validation share it).
+    signatures: super::SignatureCache,
 }
 
 impl Default for Mempool {
@@ -267,7 +270,13 @@ impl Mempool {
             limits,
             txs: Arc::default(),
             receipts: Arc::default(),
+            signatures: super::SignatureCache::default(),
         }
+    }
+
+    /// The node's verified-signature cache (`mempool::signature_cache`).
+    pub fn signature_cache(&self) -> &super::SignatureCache {
+        &self.signatures
     }
 
     pub fn limits(&self) -> MempoolLimits {

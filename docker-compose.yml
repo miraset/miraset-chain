@@ -11,6 +11,12 @@ x-validator: &validator
     devnet-init:
       condition: service_completed_successfully
   stop_grace_period: 30s
+  # Sockets for RPC clients and P2P peers; the runtime default soft limit (1 024) ran out under
+  # load. The node also raises its soft limit to the hard one at start.
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
   # A consensus safety halt exits with code 3 (TODO 8.3.2); restart so the node recovers.
   restart: on-failure
   networks: [devnet]

@@ -312,6 +312,15 @@ impl Transaction {
         self.signature = hex::encode(sig.to_bytes());
     }
 
+    /// SHA-256 of this transaction's canonical bytes, signature included: its identity for
+    /// the per-node verified-signature cache (`mempool::SignatureCache`). `None` when it has no
+    /// canonical encoding (an unsupported version, which also fails `verify_signature`).
+    pub fn canonical_digest(&self) -> Option<[u8; 32]> {
+        self.to_canonical_bytes()
+            .ok()
+            .map(|bytes| Sha256::digest(&bytes).into())
+    }
+
     /// Verify the sender's signature. Unlike `ComputeReceipt::verify_signature`, a
     /// missing signature is always rejected — transactions move funds and must always
     /// be authenticated.

@@ -14,7 +14,7 @@ mod heartbeat;
 mod signatures;
 use crate::observability::ValidationPhases;
 use execution::BlockExecution;
-use signatures::{SignatureCheck, VerifiedPool};
+use signatures::SignatureCheck;
 
 /// Largest block payload, in canonical bytes (owner decision 2026-11-13: 8 MiB). Leaders fill
 /// blocks up to it and validators refuse anything larger, before decoding it.
@@ -61,8 +61,6 @@ const MAX_FAILED_CANDIDATES: usize = 256;
 /// Application state machine implementing `hotstuff_rs::app::App`.
 pub struct MirasetApp {
     mempool: Mempool,
-    /// Pending transactions whose signature the leader already verified.
-    verified_pool: VerifiedPool,
     /// Block production and validation timings, when the node exports metrics.
     metrics: Option<std::sync::Arc<crate::observability::NodeMetrics>>,
     empty_block_interval: std::time::Duration,
@@ -73,7 +71,6 @@ impl MirasetApp {
     pub fn new(mempool: Mempool) -> Self {
         Self {
             mempool,
-            verified_pool: VerifiedPool::default(),
             metrics: None,
             empty_block_interval: std::time::Duration::ZERO,
             min_block_interval: std::time::Duration::ZERO,
@@ -314,7 +311,9 @@ impl MirasetApp {
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
         payload: &BlockPayload,
     ) -> Option<(AppStateUpdates, [u8; 32])> {
-        Self::execute_payload(tree, payload, &mut ValidationPhases::default())
+        // Only used where no cache is at hand (empty blocks, tests): nothing to skip.
+        let no_cache = crate::mempool::SignatureCache::with_capacity(1);
+        Self::execute_payload(tree, payload, &mut ValidationPhases::default(), &no_cache)
     }
 
     /// Execute `payload` as validators do, recording how long each phase took in `phases`.
@@ -322,10 +321,11 @@ impl MirasetApp {
         tree: &hotstuff_rs::block_tree::accessors::app::AppBlockTreeView<'_, K>,
         payload: &BlockPayload,
         phases: &mut ValidationPhases,
+        cache: &crate::mempool::SignatureCache,
     ) -> Option<(AppStateUpdates, [u8; 32])> {
         // Signatures first, across threads; execution then skips them (see signatures.rs).
         let start = std::time::Instant::now();
-        let signatures_ok = signatures::all_valid(&payload.transactions);
+        let signatures_ok = signatures::all_valid(cache, &payload.transactions);
         phases.signatures = start.elapsed();
         if !signatures_ok {
             return None;
@@ -368,7 +368,10 @@ impl<K: KVStore> App<K> for MirasetApp {
         let build_start = std::time::Instant::now();
         let tree = request.block_tree();
         // Verify pending signatures across threads (each once while it waits in the pool).
-        let verified = self.verified_pool.refresh(&self.mempool.pending_txs());
+        let verified = signatures::verified_pending(
+            self.mempool.signature_cache(),
+            &self.mempool.pending_txs(),
+        );
         // Block time: the local clock, but always after the parent block's (TODO 8.5.1).
         let timestamp_ms = now_ms().max(Self::read_chain_time_ms(tree).saturating_add(1));
         let mut execution =
@@ -490,7 +493,12 @@ impl<K: KVStore> App<K> for MirasetApp {
     ) -> ValidateBlockResponse {
         let start = std::time::Instant::now();
         let mut phases = ValidationPhases::default();
-        let response = Self::validate(request, Some(now_ms()), &mut phases);
+        let response = Self::validate(
+            request,
+            Some(now_ms()),
+            &mut phases,
+            self.mempool.signature_cache(),
+        );
         if let Some(metrics) = &self.metrics {
             // Phases only for blocks that ran every phase: an invalid block stops early and
             // would add zero samples to the phases it skipped.
@@ -508,7 +516,12 @@ impl<K: KVStore> App<K> for MirasetApp {
         &mut self,
         request: ValidateBlockRequest<'_, '_, K>,
     ) -> ValidateBlockResponse {
-        Self::validate(request, None, &mut ValidationPhases::default())
+        Self::validate(
+            request,
+            None,
+            &mut ValidationPhases::default(),
+            self.mempool.signature_cache(),
+        )
     }
 }
 
@@ -550,6 +563,7 @@ impl MirasetApp {
         request: ValidateBlockRequest<'_, '_, K>,
         clock_ms: Option<u64>,
         phases: &mut ValidationPhases,
+        cache: &crate::mempool::SignatureCache,
     ) -> ValidateBlockResponse {
         let block = request.proposed_block();
         let start = std::time::Instant::now();
@@ -572,7 +586,7 @@ impl MirasetApp {
             return ValidateBlockResponse::Invalid;
         }
 
-        match Self::execute_payload(request.block_tree(), &payload, phases) {
+        match Self::execute_payload(request.block_tree(), &payload, phases, cache) {
             Some((updates, computed_state_root)) if computed_state_root == payload.state_root => {
                 ValidateBlockResponse::Valid {
                     app_state_updates: Some(updates),

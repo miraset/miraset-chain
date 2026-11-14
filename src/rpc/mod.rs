@@ -1,4 +1,5 @@
 pub mod access;
+pub mod connections;
 pub mod server;
 
 pub use access::{ApiKeys, RateLimit, RpcAccess};

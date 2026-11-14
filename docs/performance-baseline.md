@@ -496,3 +496,59 @@ loadgens fell up to 40 s behind schedule at 30k.
       single verification can disagree on adversarial signatures, which could split
       validators.
 
+## Stress test 4: verified-signature cache and RPC descriptor fix (2026-11-14)
+
+**Changes:**
+
+- **Verified-signature cache** (`src/mempool/signature_cache.rs`): one per node, keyed by the
+  SHA-256 of a transaction's canonical bytes, signature included. RPC admission records a
+  transaction once it is pooled. The leader's pre-pass and every validation pass skip cached
+  transactions and record the ones they verify.
+  - Block validity is unchanged: only verified transactions are recorded, and the key covers
+    everything the signature check reads.
+  - Bounded at 100 000 entries (≈ 8 MB), oldest first.
+  - Release micro-benchmark, 20 000 transactions: leader pre-pass 113 → 8 ms and validator
+    pass 113 → 5 ms when cached.
+- **RPC descriptors:**
+  - the node raises its soft open-file limit to the hard limit at start (1 024 → 524 288 in
+    the devnet image);
+  - the RPC listener holds at most `clamp((soft − 256) / 2, 32, 4096)` connections, and new
+    clients wait in the kernel backlog at the bound;
+  - validators get `ulimits: nofile 65536` in compose.
+
+Same setup as stress tests 2–3:
+
+| Measure (per validator) | 7.5k offered | 15k | 22.5k | 30k (host saturated) |
+|---|---|---|---|---|
+| Committed | 7 450–7 650 tx/s | **11 390–11 810 tx/s** | 9 500–10 500 | 8 580–9 430 |
+| Blocks | 0.97–1.0 /s, 2.9 MB | 0.95–0.99 /s, 4.5 MB | 0.75–0.77 /s, 4.7–5.1 MB | 0.57–0.63 /s, 5.5–5.6 MB |
+| Leader wait / build | 0.67–0.69 / 0.06 s | 0.25–0.31 / 0.12–0.13 s | 0.02–0.22 / 0.16–0.17 s | 0–0.09 / 0.24–0.31 s |
+| Validate (signatures) | 0.19 s (0.15) | 0.45 s (0.38) | 0.62 s (0.53) | 0.94 s (0.81) |
+| View timeouts | 0 | **0** | 0–0.03 /s | 0.16–0.17 /s |
+| Commit interval p50 / p99 | 1.3–1.4 / 4.8 s | 1.0–1.1 / 4.7 s | 1.2–1.4 / 4.7–4.9 s | 1.5–1.7 / 4.9 s |
+| CPU / RSS | 0.87 cores / 0.67–0.70 GB | 1.7 / 1.34–1.38 GB | 1.9 / 1.45–1.61 GB | 2.2 / 1.44–1.78 GB |
+| RPC open descriptors (max) | 334 | 642 | 946 | **1 274** |
+
+Whole run:
+
+- **Latency:** loadgen p50 6.5–8.7 s, p99 14.7–16.6 s; stress test 3 had p99 21–40 s.
+- **RPC:** no `accept error` on any node (≈ 160 on node0 before). The 1 274 descriptors at 30k
+  would have exceeded the old 1 024 limit.
+- **Faults:** no OOM kill, restart or fork; agreement OK up to height 616.
+- **Host:** node CPU summed to 12.1 cores.
+
+30. **The verified-signature cache raises the ceiling to ≈ 11 600 tx/s (+24 % over stress test 3)**
+    at 15k offered, with the block rate back near 1 /s and no view timeouts. Above that, the
+    shared host's CPU still decides (30k: +35 % over test 3, 0.17 view timeouts/s).
+31. **The RPC descriptor limit is fixed:** zero accept errors with peaks of 1 274 open
+    descriptors per node.
+32. **Review after this run** (rust-reviewer). These fixes landed after stress test 4 and are
+    covered by unit and integration tests, not by this run; no throughput effect is expected:
+    - *HIGH:* idle connections could hold every RPC slot, including the one `/livez` needs.
+      A connection with no traffic for 60 s is now closed (SSE keep-alives count), and one
+      client address may hold at most a quarter of the slots.
+    - Admission records a transaction in the cache only once it is pooled, so refused
+      submissions cannot churn it.
+    - Validation records the verified transactions of a block that failed on another one.
+    - RPC connections set `TCP_NODELAY`.
+

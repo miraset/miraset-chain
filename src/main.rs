@@ -289,6 +289,10 @@ async fn main() -> CliResult {
     init_logging(cli.log_format);
     // Before any key is read: no core dumps, no same-user ptrace (key custody D4).
     process_hardening::disable_core_dumps()?;
+    // Validators hold many sockets (RPC clients, P2P); a container's default soft limit of
+    // 1 024 ran out under load (`docs/performance-baseline.md` finding 26).
+    let open_files = process_hardening::raise_open_file_limit();
+    tracing::debug!(open_file_limit = ?open_files, "open-file limit");
     match cli.command {
         Commands::Keygen { out } => keygen(&out),
         Commands::Pubkey { key_file } => {

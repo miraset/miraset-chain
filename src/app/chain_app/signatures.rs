@@ -5,12 +5,16 @@
 //! checks are independent of chain state, so they run here across threads before execution,
 //! and execution then skips the transactions found valid.
 //!
+//! Both passes consult the node's verified-signature cache first (`mempool::SignatureCache`,
+//! filled by RPC admission and by these passes), so a transaction is verified once per node:
+//! the leader skips what admission verified, and a validator skips what it already saw.
+//!
 //! Validity does not change: a transaction with a bad signature still fails exactly where it
 //! failed before (validators refuse the block; the leader evicts the candidate), because only
 //! transactions whose signature verified are ever exempted from the inline check.
 
 use crate::core::types::Transaction;
-use sha2::{Digest, Sha256};
+use crate::mempool::{SignatureCache, TxDigest};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -19,15 +23,6 @@ use std::sync::Arc;
 const MAX_THREADS: usize = 8;
 /// Smallest batch handed to a thread; below this, spawning costs more than it saves.
 const MIN_PER_THREAD: usize = 256;
-
-/// Identity of a transaction including its signature: SHA-256 of its canonical bytes.
-pub(crate) type TxDigest = [u8; 32];
-
-pub(super) fn digest(tx: &Transaction) -> Option<TxDigest> {
-    tx.to_canonical_bytes()
-        .ok()
-        .map(|bytes| Sha256::digest(&bytes).into())
-}
 
 /// How block execution treats transaction signatures.
 #[derive(Clone, Debug, Default)]
@@ -47,51 +42,65 @@ impl SignatureCheck {
         match self {
             Self::Inline => true,
             Self::AllVerified => false,
-            Self::Verified(set) => digest(tx).is_none_or(|d| !set.contains(&d)),
+            Self::Verified(set) => tx.canonical_digest().is_none_or(|d| !set.contains(&d)),
         }
     }
 }
 
-/// Whether every transaction's signature verifies, checked across threads.
-pub(super) fn all_valid(txs: &[Transaction]) -> bool {
-    parallel_map(txs, |tx| tx.verify_signature().is_ok())
-        .into_iter()
-        .all(|ok| ok)
-}
-
-/// Leader-side cache of pooled transactions whose signature verified, so each pending
-/// transaction is verified once, not once per block it waits through.
-#[derive(Debug, Default)]
-pub(super) struct VerifiedPool {
-    /// Shared with the block being built; updated in place once that block has dropped it.
-    verified: Arc<HashSet<TxDigest>>,
-}
-
-impl VerifiedPool {
-    /// Verify the not-yet-verified transactions of `pending` across threads, forget digests no
-    /// longer pending, and return the verified set for this block.
-    pub(super) fn refresh(&mut self, pending: &[Transaction]) -> Arc<HashSet<TxDigest>> {
-        let digests = parallel_map(pending, digest);
-        let fresh: Vec<(TxDigest, &Transaction)> = digests
+/// Whether every transaction's signature verifies. Transactions in `cache` are skipped; the
+/// rest are verified across threads and, if all pass, recorded in `cache`.
+pub(super) fn all_valid(cache: &SignatureCache, txs: &[Transaction]) -> bool {
+    let digests = parallel_map(txs, Transaction::canonical_digest);
+    let cached = cache.contains_each(&digests);
+    let unchecked: Vec<(Option<TxDigest>, &Transaction)> = digests
+        .iter()
+        .zip(&cached)
+        .zip(txs)
+        .filter(|((_, hit), _)| !**hit)
+        .map(|((digest, _), tx)| (*digest, tx))
+        .collect();
+    let results = parallel_map(&unchecked, |(_, tx)| tx.verify_signature().is_ok());
+    let all_ok = results.iter().all(|ok| *ok);
+    // Each transaction's signature stands on its own: record the ones that verified even when
+    // another fails, so a proposal re-sent with one forgery does not cost the whole pass again.
+    cache.insert_verified(
+        unchecked
             .iter()
-            .zip(pending)
-            .filter_map(|(d, tx)| d.map(|d| (d, tx)))
-            .filter(|(d, _)| !self.verified.contains(d))
-            .collect();
-        let results = parallel_map(&fresh, |(_, tx)| tx.verify_signature().is_ok());
-        let pending_set: HashSet<TxDigest> = digests.into_iter().flatten().collect();
-        // The previous block's execution has finished with its handle, so this does not copy.
-        let verified = Arc::make_mut(&mut self.verified);
-        verified.retain(|d| pending_set.contains(d));
-        verified.extend(
-            fresh
-                .iter()
-                .zip(results)
-                .filter(|(_, ok)| *ok)
-                .map(|((d, _), _)| *d),
-        );
-        Arc::clone(&self.verified)
-    }
+            .zip(&results)
+            .filter_map(|((digest, _), ok)| digest.filter(|_| *ok)),
+    );
+    all_ok
+}
+
+/// Digests of the `pending` transactions whose signature verifies: cached ones directly, the
+/// rest verified across threads (and the valid ones recorded in `cache`). The leader builds a
+/// block against this set; anything outside it is checked inline.
+pub(super) fn verified_pending(
+    cache: &SignatureCache,
+    pending: &[Transaction],
+) -> Arc<HashSet<TxDigest>> {
+    let digests = parallel_map(pending, Transaction::canonical_digest);
+    let cached = cache.contains_each(&digests);
+    let mut verified: HashSet<TxDigest> = digests
+        .iter()
+        .zip(&cached)
+        .filter_map(|(digest, hit)| digest.filter(|_| *hit))
+        .collect();
+    let unchecked: Vec<(TxDigest, &Transaction)> = digests
+        .iter()
+        .zip(&cached)
+        .zip(pending)
+        .filter_map(|((digest, hit), tx)| digest.filter(|_| !*hit).map(|d| (d, tx)))
+        .collect();
+    let results = parallel_map(&unchecked, |(_, tx)| tx.verify_signature().is_ok());
+    let newly: Vec<TxDigest> = unchecked
+        .iter()
+        .zip(results)
+        .filter_map(|((digest, _), ok)| ok.then_some(*digest))
+        .collect();
+    cache.insert_verified(newly.iter().copied());
+    verified.extend(newly);
+    Arc::new(verified)
 }
 
 /// `items.iter().map(f)` across up to [`MAX_THREADS`] scoped threads, in order.
@@ -161,52 +170,88 @@ mod tests {
         }
     }
 
-    /// Cost of the leader's per-block pre-pass on a full pool (run with `--release --ignored`).
+    /// Cost of the signature passes on a full pool, uncached and cached (run with `--release --ignored`).
     #[test]
     #[ignore = "timing; run in release"]
-    fn bench_refresh_on_a_full_pool() {
+    fn bench_signature_passes_on_a_full_pool() {
         let txs: Vec<Transaction> = (0..20_000u64).map(|n| signed((n % 200) as u8, n)).collect();
-        let mut pool = VerifiedPool::default();
         let start = std::time::Instant::now();
-        let set = pool.refresh(&txs);
-        eprintln!("first refresh (verifies 20 000): {:?}", start.elapsed());
-        drop(set);
+        assert!(all_valid(&SignatureCache::default(), &txs));
+        eprintln!(
+            "validator pass over 20 000, uncached: {:?}",
+            start.elapsed()
+        );
+        let cache = SignatureCache::default();
         let start = std::time::Instant::now();
-        let set = pool.refresh(&txs);
-        eprintln!("next refresh (all cached): {:?}", start.elapsed());
+        let set = verified_pending(&cache, &txs);
+        eprintln!("leader pre-pass, uncached: {:?}", start.elapsed());
         assert_eq!(set.len(), 20_000);
         let start = std::time::Instant::now();
-        assert!(all_valid(&txs));
-        eprintln!("validator pass over 20 000: {:?}", start.elapsed());
+        let _ = verified_pending(&cache, &txs);
+        eprintln!("leader pre-pass, all cached: {:?}", start.elapsed());
+        let start = std::time::Instant::now();
+        assert!(all_valid(&cache, &txs));
+        eprintln!(
+            "validator pass over 20 000, all cached: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
     fn test_one_bad_signature_anywhere_fails_the_batch() {
+        let cache = SignatureCache::default();
         let mut txs: Vec<Transaction> = (0..1_000).map(|n| signed(3, n)).collect();
-        assert!(all_valid(&txs));
         txs[777].amount += 1; // signature no longer covers the contents
-        assert!(!all_valid(&txs));
+        assert!(!all_valid(&cache, &txs));
+        assert_eq!(
+            cache.len(),
+            999,
+            "the ones that verified are recorded, the forgery is not"
+        );
+        assert!(
+            !all_valid(&cache, &txs),
+            "the forgery still fails when the rest is cached"
+        );
+        txs[777] = signed(3, 777);
+        assert!(all_valid(&cache, &txs));
+        assert_eq!(cache.len(), 1_000);
     }
 
     #[test]
-    fn test_verified_pool_exempts_only_transactions_that_verified() {
+    fn test_cached_transactions_are_not_verified_again_but_forgeries_still_fail() {
+        let cache = SignatureCache::default();
+        let good = signed(5, 0);
+        cache.record_verified(&good);
+        let mut forged = signed(5, 1);
+        forged.amount += 1;
+        assert!(all_valid(&cache, std::slice::from_ref(&good)));
+        assert!(!all_valid(&cache, &[good.clone(), forged.clone()]));
+        // A tampered copy of a cached transaction is not a hit.
+        let mut tampered = good.clone();
+        tampered.amount += 1;
+        assert!(!all_valid(&cache, &[tampered]));
+    }
+
+    #[test]
+    fn test_verified_pending_exempts_only_transactions_that_verified() {
+        let cache = SignatureCache::default();
         let good = signed(4, 0);
+        let admitted = signed(4, 2);
+        cache.record_verified(&admitted); // as RPC admission does
         let mut forged = signed(4, 1);
         forged.amount += 1;
-        let mut pool = VerifiedPool::default();
-        let set = pool.refresh(&[good.clone(), forged.clone()]);
+        let set = verified_pending(&cache, &[good.clone(), forged.clone(), admitted.clone()]);
         let check = SignatureCheck::Verified(set);
         assert!(!check.needs_check(&good));
+        assert!(!check.needs_check(&admitted));
         assert!(
             check.needs_check(&forged),
             "a bad signature is never exempted"
         );
-        // A tampered copy of a verified transaction has another digest.
-        let mut tampered = good.clone();
-        tampered.amount += 1;
-        assert!(check.needs_check(&tampered));
-        // Digests leave the cache once their transaction is no longer pending.
-        let set = pool.refresh(&[]);
-        assert!(set.is_empty());
+        assert_eq!(
+            cache.len(),
+            2,
+            "the newly verified one is recorded, the forgery is not"
+        );
     }
 }

@@ -276,3 +276,27 @@ fn test_self_transfer_plain_system_recipient_and_failed_system_call() {
     let erin_acc = node.get_account(&erin_addr).unwrap();
     assert_eq!((erin_acc.nonce, erin_acc.balance), (0, 1_000));
 }
+
+/// The verified-signature cache (TODO 8.5.3 stress test 3 finding 29) records a transaction at
+/// RPC admission only once it is pooled: refused submissions leave nothing behind.
+#[test]
+fn test_admission_records_signatures_only_for_pooled_transactions() {
+    let gina = key(48);
+    let gina_addr = address(&gina);
+    let node = start(&[(gina_addr.as_str(), 100)], Mempool::new());
+    let cache = node.mempool().signature_cache();
+
+    let unfunded = transfer(&gina, 0, "bob", 1_000);
+    assert!(node.submit_transaction(unfunded.clone()).is_err());
+    let mut forged = transfer(&gina, 0, "bob", 1);
+    forged.amount += 1;
+    assert!(node.submit_transaction(forged).is_err());
+    assert!(cache.is_empty(), "refused submissions are not recorded");
+
+    let ok = transfer(&gina, 0, "bob", 10);
+    node.submit_transaction(ok.clone()).expect("admitted");
+    assert_eq!(
+        cache.contains_each(&[ok.canonical_digest(), unfunded.canonical_digest()]),
+        [true, false]
+    );
+}
