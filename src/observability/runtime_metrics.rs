@@ -152,6 +152,7 @@ pub struct RuntimeMetrics {
     view: AtomicU64,
     view_timeouts_total: AtomicU64,
     timeout_certificates_total: AtomicU64,
+    block_budget_bytes: AtomicU64,
     storage: OnceLock<StorageFiles>,
     traffic: OnceLock<Arc<TransportTraffic>>,
 }
@@ -185,6 +186,7 @@ impl Default for RuntimeMetrics {
             view: AtomicU64::new(0),
             view_timeouts_total: AtomicU64::new(0),
             timeout_certificates_total: AtomicU64::new(0),
+            block_budget_bytes: AtomicU64::new(crate::app::chain_app::MAX_BLOCK_BYTES as u64),
             storage: OnceLock::new(),
             traffic: OnceLock::new(),
         }
@@ -260,6 +262,12 @@ impl RuntimeMetrics {
     pub fn record_timeout_certificate(&self) {
         self.timeout_certificates_total
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The adaptive payload budget for blocks this node proposes changed.
+    pub fn record_block_budget(&self, bytes: usize) {
+        self.block_budget_bytes
+            .store(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
     /// Export file sizes for these paths (first call wins).
@@ -340,6 +348,12 @@ impl RuntimeMetrics {
             "miraset_view",
             "Highest consensus view this node has entered.",
             self.view.load(Ordering::Relaxed),
+        );
+        gauge(
+            out,
+            "miraset_block_budget_bytes",
+            "Payload bytes the next block this node proposes may use (adaptive, at most the block limit).",
+            self.block_budget_bytes.load(Ordering::Relaxed),
         );
         counter(
             out,

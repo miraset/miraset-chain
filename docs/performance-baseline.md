@@ -552,3 +552,59 @@ Whole run:
     - Validation records the verified transactions of a block that failed on another one.
     - RPC connections set `TCP_NODELAY`.
 
+
+## WAN under load: livelock and adaptive block budget (2026-11-15)
+
+`scripts/devnet/wan_load.sh` (raw outputs kept outside the repository). Same devnet as stress
+tests 2–4 (5 validators, 8 MiB blocks, `--min-block-interval-ms 1000` unless noted, `max_view_time`
+2 s, transfers only, 256 senders). A netem profile on every validator's egress, then fixed
+offered rates, 150 s each, with metrics over the last 90 s. `wan` is 25 ms ± 5 ms and 0.1 % loss
+per egress (≈ 50 ms RTT). `wan-nojitter` is the same without jitter, and `wan-noloss` is 25 ms
+with no loss. This is the WAN re-measurement left open by 8.5.2 (F2 epoch length 1, F5 blacklist
+liveness).
+
+| Run | Offered | Committed (loadgen) | Blocks /s | View timeouts /s | Payload / block |
+|---|---|---|---|---|---|
+| `wan`, before | 1 000 | 138 tx/s (backlog 65 536) | 0.03–0.07 | 0.36–0.39 | 0.53 MB |
+| `wan`, before | 2 500+ | funding never committed (300 s) | — | — | — |
+| `wan-nojitter`, before | 1 000 | ≈ 700 tx/s (backlog 16 779) | 0.12–0.21 | 0.28–0.33 | 0.49–0.56 MB |
+| `wan-nojitter`, before | 5 000 | **0** | **0** | 0.37–0.39 | — |
+| `wan-nojitter`, sync trigger 20 s | 1 000 / 5 000 | 885 / **0** | 0.44–0.53 / 0 | 0.29–0.31 / 0.43–0.47 | 0.51 MB / — |
+| `wan-noloss`, before | idle / 5 000 | — / **5 027 tx/s** | 1.0 / 0.97–0.99 | **0** / **0** | — / 1.89 MB |
+| `wan-nojitter`, adaptive budget | 1 000 | 917 tx/s (no backlog) | 0.41–0.48 | 0.23–0.27 | 0.67–0.76 MB |
+| `wan-nojitter`, adaptive budget | 5 000 | **1 035 tx/s** | 0.31–0.35 (one node lagging) | 0.31–0.33 | 0.8–1.1 MB |
+| same, no strict block interval | 1 000 / 5 000 | 770 / **1 892 tx/s** | 0.31–0.61 / 0.43–0.48 | 0.29–0.39 / 0.24–0.31 | 0.44 / 1.6–1.7 MB |
+| adaptive, sync response timeout 10 s | 5 000 | 752 tx/s (one node at 0 blocks/s) | 0–0.31 | 0.29–0.35 | 0.74–1.2 MB |
+
+Every run: no fork, agreement OK at every height, no restart or OOM, `p2p_dropped` 0.
+
+33. **WAN livelock (fixed):** with 50 ms RTT and 0.1 % loss the chain stopped committing at
+    5 000 tx/s. Without loss, the same rate committed in full with no view timeout, so the cause
+    is loss-limited TCP, not latency. CUBIC on one stream per validator pair carries about 1 MB/s
+    at this loss (Mathis estimate, not measured per stream). A block of up to 8 MiB cannot reach a
+    quorum within a 2 s view. The view times out, the mempool grows, and the next leader proposes
+    a full block again. **Fix (owner decision 2026-11-15): adaptive block budget**
+    (`src/app/chain_app/block_budget.rs`, `docs/devnet.md`). With it the same load commits about
+    1 000 tx/s (1 900 without the strict 1 s block interval) instead of 0.
+34. **Sync trigger amplified it (fixed):** sync started after 3 s without progress, so after a
+    single 2 s view timeout. The server answered with up to 12 MiB of blocks the client mostly
+    had (24–43 sessions per node, 0–19 blocks synced). The 1.5 s response timeout then ended the
+    session and blacklisted the server, while the rest of the response still occupied the
+    connection that proposals and votes use. The trigger now waits at least 3 view times (6 s);
+    with 20 s, sessions dropped to 0–5 per node and 1 000 tx/s committed 885 tx/s instead of ≈ 700.
+35. **netem jitter reorders packets:** per-packet jitter reorders bursts, and TCP treats that
+    as loss. Node1 counted 3.9 % retransmitted segments at 0.1 % configured loss, most of them
+    spurious (DSACK). `wan` therefore overstates the damage; the `*-nojitter` profiles were added,
+    and real paths reorder much less.
+36. **Open: about one view in three still times out under 0.1 % loss**, even with 0.45 MB
+    blocks and with no strict block interval. Without loss there are none, and the transport
+    drops nothing, so some messages arrive late. Next: a delivery-time histogram per message
+    kind in the transport, and BBR plus `tcp_slow_start_after_idle=0` on a host that has BBR.
+    This bounds WAN throughput with loss to about 1–2k tx/s on this setup.
+37. **Open: a lagging validator does not catch up under loss** (8.5.2 F5 note, now measured).
+    In three loaded runs one node fell behind (0–0.013 blocks/s) with 16–128 blacklistings. A
+    10 s sync response timeout did not help (16 blacklistings, node at 0 blocks/s). A sync
+    response of up to 12 MiB over a ~1 MB/s stream, which also carries consensus traffic, is the
+    likely cause. The chain kept committing with the other four nodes.
+38. **The strict 1 s block interval halves WAN throughput under loss** (1 035 vs 1 892 tx/s at
+    5 000 offered). It does not cause the timeouts (0.3 /s either way).

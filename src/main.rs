@@ -124,6 +124,17 @@ struct StartArgs {
     #[arg(long, default_value_t = 0)]
     min_block_interval_ms: u64,
 
+    /// Start block sync after this long without consensus progress (milliseconds), but never
+    /// sooner than 3 view times. Node-local; on a slow or lossy link a short value starts sync
+    /// sessions whose responses compete with consensus messages on one connection (TODO 8.5.3)
+    #[arg(long, default_value_t = 3_000, value_parser = clap::value_parser!(u64).range(500..=600_000))]
+    block_sync_trigger_timeout_ms: u64,
+
+    /// How long a block-sync client waits for one response before ending the session
+    /// (milliseconds); a server that does not deliver what it advertised is blacklisted
+    #[arg(long, default_value_t = 1_500, value_parser = clap::value_parser!(u64).range(100..=600_000))]
+    block_sync_response_timeout_ms: u64,
+
     /// On SIGTERM/SIGINT, refuse admission and report not ready for this long before stopping,
     /// so load balancers and clients move away first
     #[arg(long, default_value_t = 2_000, value_parser = clap::value_parser!(u64).range(0..=60_000))]
@@ -582,6 +593,8 @@ async fn run_validator(cli: &StartArgs) -> CliResult {
     config.safety_halt = safety_halt.clone();
     config.ready_max_commit_age = Duration::from_secs(cli.ready_max_commit_age_secs);
     config.min_block_interval = Duration::from_millis(cli.min_block_interval_ms);
+    config.block_sync_trigger_timeout = Duration::from_millis(cli.block_sync_trigger_timeout_ms);
+    config.block_sync_response_timeout = Duration::from_millis(cli.block_sync_response_timeout_ms);
     // A consensus parameter fixed at genesis (TODO 8.5.2 F2).
     config.epoch_length = genesis.protocol.consensus_epoch_length;
     let node = Arc::new(MirasetNode::try_start(

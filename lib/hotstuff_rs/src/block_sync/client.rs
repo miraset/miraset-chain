@@ -558,6 +558,20 @@ impl BlockSyncClientState {
         sync_server: VerifyingKey,
         blacklist_expiry_time: Duration,
     ) {
+        // MIRASET PATCH #17: make every blacklisting visible (8.5.3 measures sync liveness under
+        // loss; upstream recorded it nowhere). Logging only, no behaviour change.
+        log::warn!(
+            target: "hotstuff_rs::block_sync",
+            "BlacklistSyncServer, {}, {}s",
+            base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD_NO_PAD,
+                sync_server.to_bytes()
+            )
+            .get(0..7)
+            .unwrap_or_default(),
+            blacklist_expiry_time.as_secs_f64()
+        );
+
         // Remove any entry corresponding to this server address from the available servers list.
         let _ = self.available_sync_servers.remove(&sync_server);
 

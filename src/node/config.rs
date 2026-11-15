@@ -18,6 +18,9 @@ const _: () = assert!(
             <= crate::network::tcp::MAX_FRAME_BYTES
 );
 
+/// Minimum no-progress time before block sync starts, in view times
+/// ([`NodeConfig::effective_block_sync_trigger_timeout`]).
+pub const SYNC_TRIGGER_VIEWS: u32 = 3;
 /// Bytes of early (future-view) consensus messages a replica buffers. Proposals count with
 /// their block data (vendored hotstuff_rs patch #16), so this bounds the buffer's memory; it
 /// holds a few full 8 MiB proposals, and a proposal larger than the free space is dropped.
@@ -129,6 +132,17 @@ impl NodeConfig {
         }
     }
 
+    /// The no-progress time before block sync starts: `block_sync_trigger_timeout`, but at least
+    /// [`SYNC_TRIGGER_VIEWS`] view times. A shorter trigger starts sync after a single timed-out
+    /// view; on a slow link its responses (up to `BLOCK_SYNC_RESPONSE_BYTES` of blocks the client
+    /// mostly has) then share the connection with proposals and votes and cause further
+    /// timeouts (TODO 8.5.3, WAN under load). Lagging replicas still sync on the event trigger
+    /// (`block_sync_trigger_min_view_difference`).
+    pub fn effective_block_sync_trigger_timeout(&self) -> Duration {
+        self.block_sync_trigger_timeout
+            .max(self.max_view_time * SYNC_TRIGGER_VIEWS)
+    }
+
     /// The heartbeat interval actually used: `empty_block_interval`, at most half the view time.
     pub fn effective_empty_block_interval(&self) -> Duration {
         self.empty_block_interval.min(self.max_view_time / 2)
@@ -187,7 +201,7 @@ impl NodeConfig {
             .block_sync_response_timeout(self.block_sync_response_timeout)
             .block_sync_blacklist_expiry_time(self.block_sync_blacklist_expiry_time)
             .block_sync_trigger_min_view_difference(self.block_sync_trigger_min_view_difference)
-            .block_sync_trigger_timeout(self.block_sync_trigger_timeout)
+            .block_sync_trigger_timeout(self.effective_block_sync_trigger_timeout())
             .progress_msg_buffer_capacity(BufferSize::new(self.progress_msg_buffer_capacity))
             .epoch_length(EpochLength::new(self.epoch_length))
             .max_view_time(self.max_view_time)
@@ -220,6 +234,32 @@ mod tests {
         };
         assert!(zero.validate().is_err());
         assert!(base.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sync_trigger_waits_at_least_three_view_times() {
+        let base = NodeConfig::devnet(SigningKey::from_bytes(&[1u8; 32]));
+        assert_eq!(base.max_view_time, Duration::from_secs(2));
+        assert_eq!(
+            base.effective_block_sync_trigger_timeout(),
+            Duration::from_secs(6)
+        );
+        let short_views = NodeConfig {
+            max_view_time: Duration::from_millis(500),
+            ..base.clone()
+        };
+        assert_eq!(
+            short_views.effective_block_sync_trigger_timeout(),
+            Duration::from_secs(3)
+        );
+        let long_trigger = NodeConfig {
+            block_sync_trigger_timeout: Duration::from_secs(20),
+            ..base
+        };
+        assert_eq!(
+            long_trigger.effective_block_sync_trigger_timeout(),
+            Duration::from_secs(20)
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use hotstuff_rs::block_tree::pluggables::KVStore;
 use hotstuff_rs::types::data_types::{CryptoHash, Data, Datum};
 use hotstuff_rs::types::update_sets::AppStateUpdates;
 
+pub mod block_budget;
 mod execution;
 mod heartbeat;
 mod signatures;
@@ -22,6 +23,12 @@ pub const MAX_BLOCK_BYTES: usize = 8 * 1024 * 1024;
 /// Payload room transactions may not use, so compute receipts still fit when transactions
 /// alone could fill the block. Receipts may use whatever transactions leave.
 pub const RECEIPT_RESERVED_BYTES: usize = 1024 * 1024;
+// A shrunk block budget keeps the receipt share as `budget / (MAX / RESERVED)`.
+const _: () = assert!(
+    RECEIPT_RESERVED_BYTES > 0
+        && MAX_BLOCK_BYTES.is_multiple_of(RECEIPT_RESERVED_BYTES)
+        && MAX_BLOCK_BYTES / RECEIPT_RESERVED_BYTES > 1
+);
 /// System calls (allowance, worker registry, epoch manager) a leader tries per block. Each try
 /// copies the block's state so far (see `BlockExecution::try_transaction`), so this bounds
 /// block production time; transfers and receipts are not limited by count.
@@ -65,6 +72,8 @@ pub struct MirasetApp {
     metrics: Option<std::sync::Arc<crate::observability::NodeMetrics>>,
     empty_block_interval: std::time::Duration,
     min_block_interval: std::time::Duration,
+    /// Payload bytes the next proposed block may use (adaptive, see `block_budget.rs`).
+    budget: std::sync::Arc<block_budget::BlockBudget>,
 }
 
 impl MirasetApp {
@@ -74,7 +83,16 @@ impl MirasetApp {
             metrics: None,
             empty_block_interval: std::time::Duration::ZERO,
             min_block_interval: std::time::Duration::ZERO,
+            budget: std::sync::Arc::new(block_budget::BlockBudget::new()),
         }
+    }
+
+    /// Share an adaptive block budget with the consensus event handlers, which shrink it while
+    /// views keep timing out and grow it as blocks commit. Without it the leader always fills
+    /// blocks up to `MAX_BLOCK_BYTES`.
+    pub fn with_block_budget(mut self, budget: std::sync::Arc<block_budget::BlockBudget>) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Propose an empty block at most once per `interval` of block time (zero: every view).
@@ -379,11 +397,13 @@ impl<K: KVStore> App<K> for MirasetApp {
         execution
             .set_block_time(tree, timestamp_ms)
             .expect("a timestamp after the parent's is always accepted");
-        // Byte budget (MAX_BLOCK_BYTES): a candidate that does not fit ends selection of its
-        // kind, so the block is full to within one item (transactions are at most the RPC
-        // body limit).
+        // Byte budget: the adaptive budget (at most MAX_BLOCK_BYTES, smaller while views keep
+        // timing out). A candidate that does not fit ends selection of its kind, so the block is
+        // full to within one item (transactions are at most the RPC body limit). Receipts keep
+        // the same share of a smaller budget as RECEIPT_RESERVED_BYTES of the full one.
+        let block_budget = self.budget.bytes().min(MAX_BLOCK_BYTES);
         let mut payload_bytes = EMPTY_PAYLOAD_BYTES;
-        let tx_budget = MAX_BLOCK_BYTES - RECEIPT_RESERVED_BYTES;
+        let tx_budget = block_budget - block_budget / (MAX_BLOCK_BYTES / RECEIPT_RESERVED_BYTES);
         let mut failures = 0usize;
         let mut system_calls = 0usize;
         let selected_txs: Vec<Transaction> = self.mempool.select_txs(usize::MAX, |tx| {
@@ -397,10 +417,12 @@ impl<K: KVStore> App<K> for MirasetApp {
             let Some(size) = item_bytes(tx.to_canonical_bytes()) else {
                 return TxVerdict::Evict;
             };
-            if EMPTY_PAYLOAD_BYTES + size > tx_budget {
+            if EMPTY_PAYLOAD_BYTES + size > MAX_BLOCK_BYTES - RECEIPT_RESERVED_BYTES {
                 return TxVerdict::Evict; // could never fit a block
             }
-            if payload_bytes + size > tx_budget {
+            // An empty block takes one item up to the full limit, so an item larger than a
+            // shrunk budget cannot keep every block empty.
+            if payload_bytes + size > tx_budget && payload_bytes > EMPTY_PAYLOAD_BYTES {
                 return TxVerdict::Stop;
             }
             if execution::is_system_call(tx) {
@@ -430,7 +452,7 @@ impl<K: KVStore> App<K> for MirasetApp {
                 if EMPTY_PAYLOAD_BYTES + size > MAX_BLOCK_BYTES {
                     return ReceiptVerdict::Evict; // could never fit a block
                 }
-                if payload_bytes + size > MAX_BLOCK_BYTES {
+                if payload_bytes + size > block_budget && payload_bytes > EMPTY_PAYLOAD_BYTES {
                     return ReceiptVerdict::Stop;
                 }
                 // `apply_receipt` changes nothing when it fails, so no copy is needed.

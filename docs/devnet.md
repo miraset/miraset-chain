@@ -67,6 +67,10 @@ For measurements (TODO 8.5.3, `docs/measurement-plan.md`) `/metrics` also export
 | `miraset_storage_bytes{file="chain_db"\|"signing_guard"}` | database file sizes, read at scrape (redb file length grows in allocation steps; fit growth over long windows) |
 | `miraset_process_resident_bytes`, `_cpu_seconds_total`, `_open_fds`, `_threads`, `_write_bytes_total` | process resources from `/proc/self` (Linux) |
 | `miraset_p2p_bytes_total{direction}` | P2P bytes of established-session frames (length prefix + encrypted chunks); handshakes and refused frames are not counted |
+| `miraset_block_budget_bytes` | payload bytes the next block this node proposes may use (adaptive block budget, at most 8 MiB) |
+
+Every block-sync server blacklisting is logged at `warn` as `BlacklistSyncServer, <key prefix>,
+<expiry>` (target `hotstuff_rs::block_sync`, vendored patch #17).
 
 Logs go to stderr: text by default, one JSON object per line with `--log-format json`; `RUST_LOG`
 sets the filter (default `info`). On SIGTERM a validator stops admission (`/v1/transactions` and
@@ -215,6 +219,26 @@ taken before the restore), then restart. Restoring a backup taken at the current
   2026-11-13; 7 MiB for transactions, ≈ 23 000 plain transfers), refused by validators above
   that. At one block per second the mempool (20 000 transactions) and the RPC submission
   limits bound throughput before the block size does.
+- **Adaptive block budget (TODO 8.5.3, owner decision 2026-11-15):** a leader fills its blocks
+  only up to its current budget. A view timeout that follows another timeout with no commit in
+  between halves the budget (floor 256 KiB); every commit adds 512 KiB back, up to 8 MiB. A
+  single timed-out view between commits (a crashed leader) does not shrink it. An empty block
+  still takes one item larger than the budget (up to the full limit). Validators still
+  accept any block up to 8 MiB, so budgets may differ between nodes. Without it, a link that
+  cannot carry a full block within one view (≈ 1 MB/s per TCP stream at 50 ms RTT and 0.1 %
+  loss) stalled the chain: every view timed out and the next leader proposed a full block again.
+- **Block sync timing:** sync starts after `--block-sync-trigger-timeout-ms` (default 3000)
+  without progress, but never sooner than 3 view times (6 s with the default 2 s views): a
+  shorter trigger started sync after a single timed-out view, and on a slow link its responses
+  (up to 12 MiB) competed with proposals and votes on the same connection.
+  `--block-sync-response-timeout-ms` (default 1500) is how long a client waits for one response
+  before ending the session and blacklisting the server for 10 s. A response of up to 12 MiB
+  needs far longer on a lossy WAN stream (≈ 1 MB/s), so a lagging validator may not catch up
+  there; raising this to 10 s did not fix it in the 2026-11-15 measurement (open, TODO 8.5.3).
+- **WAN hosts:** the transport is one TCP connection per validator pair, so per-stream TCP
+  throughput bounds block propagation. On lossy long-distance links prefer BBR congestion
+  control (`net.ipv4.tcp_congestion_control=bbr`) and `net.ipv4.tcp_slow_start_after_idle=0`;
+  CUBIC halves its rate on random loss. Not measured yet (the devnet host has no BBR module).
 - **Pacemaker epoch length is a genesis parameter (TODO 8.5.2 F2):** `protocol.consensus_epoch_length`,
   default 1, range 1..=10, logged at startup (`epoch_length=`). It is part of the genesis
   commitment, so validators of one chain share it, and a node refuses to start with chain data

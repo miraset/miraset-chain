@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use tokio::sync::broadcast;
 
 use crate::app::MirasetApp;
+use crate::app::chain_app::block_budget::BlockBudget;
 use crate::consensus::SafetyHalt;
 use crate::core::types::{
     AccountState, BlockPayload, CommitEvent, ComputeReceipt, EpochInfo, ProtocolParams,
@@ -40,6 +41,7 @@ pub struct MirasetNode<K: KVStore, N: Network + 'static> {
     pub commit_sender: broadcast::Sender<CommitEvent>,
     pub safety_halt: SafetyHalt,
     metrics: Arc<NodeMetrics>,
+    block_budget: Arc<BlockBudget>,
     lifecycle: Arc<Lifecycle>,
     ready_max_commit_age: Duration,
 }
@@ -210,10 +212,14 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
 
         let safety_halt = config.safety_halt.clone();
         let metrics = Arc::new(NodeMetrics::default());
+        let block_budget = Arc::new(BlockBudget::new());
         let app = MirasetApp::new(mempool.clone())
             .with_empty_block_interval(config.effective_empty_block_interval())
             .with_min_block_interval(config.effective_min_block_interval())
+            .with_block_budget(Arc::clone(&block_budget))
             .with_metrics(Arc::clone(&metrics));
+        let budget_for_timeout = Arc::clone(&block_budget);
+        let budget_for_commit = Arc::clone(&block_budget);
         let hs_config = config.to_hotstuff_config();
 
         let (commit_sender, _) = broadcast::channel(1024);
@@ -244,7 +250,9 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                 metrics_for_view.runtime().record_view(event.view.int());
             })
             .on_view_timeout(move |_: &ViewTimeoutEvent| {
-                metrics_for_timeout.runtime().record_view_timeout()
+                let runtime = metrics_for_timeout.runtime();
+                runtime.record_view_timeout();
+                runtime.record_block_budget(budget_for_timeout.record_view_timeout());
             })
             .on_collect_tc(move |_: &CollectTCEvent| {
                 metrics_for_tc.runtime().record_timeout_certificate()
@@ -254,6 +262,9 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                 metrics_for_event
                     .runtime()
                     .record_commit_time(Instant::now(), !metrics_for_event.is_syncing());
+                metrics_for_event
+                    .runtime()
+                    .record_block_budget(budget_for_commit.record_commit());
                 let block_hash_hex = hex::encode(event.block.bytes());
                 let timestamp_secs = event
                     .timestamp
@@ -336,6 +347,7 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
             commit_sender,
             safety_halt,
             metrics,
+            block_budget,
             lifecycle: Arc::new(Lifecycle::default()),
             ready_max_commit_age,
         })
@@ -355,6 +367,12 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
     /// Process metrics (TODO 8.4.4).
     pub fn metrics(&self) -> &Arc<NodeMetrics> {
         &self.metrics
+    }
+
+    /// Adaptive payload budget for the blocks this node proposes (TODO 8.5.3). Updated by the
+    /// view-timeout and commit handlers.
+    pub fn block_budget(&self) -> &Arc<BlockBudget> {
+        &self.block_budget
     }
 
     /// Drain state shared by admission, probes and shutdown (TODO 8.4.4).

@@ -66,7 +66,7 @@ record_environment() {
     echo "docker: $(docker version --format '{{.Server.Version}}')"
     echo "profile: $profile"
     echo "netem:"; "$HERE/netem.sh" show | sed 's/^/  /'
-    echo "validators: 5 (equal power, f = 1), max view time 1s (default)"
+    echo "validators: 5 (equal power, f = 1), max view time 2s (default), empty-block heartbeat 1s"
     echo "shaping: validator egress only; loadgen requests unshaped, responses and commit events shaped"
     echo "load: senders=$senders receipt_share=$share duration=${duration}s warmup=${warmup}s rates=[$rates]"
   } >"$out/environment.txt"
