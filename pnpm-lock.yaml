@@ -13,8 +13,8 @@ importers:
   .:
     devDependencies:
       '@daochild/agents-config':
-        specifier: ^2.1.0
-        version: 2.1.0
+        specifier: ^2.5.0
+        version: 2.5.0
 
 packages:
 
@@ -22,8 +22,11 @@ packages:
     resolution: {integrity: sha512-oGMAgGoQdBXbZqNG0Ze56CHjDZ1IDYOwGYxYjO5KLSlz5HiNQ9udIXsPZ61VWaHGZ5XW/jyjmr6t2xz2jGVwbQ==}
     engines: {node: '>=18'}
 
-  '@daochild/agents-config@2.1.0':
-    resolution: {integrity: sha512-hzhzZRhZH176Gc0K3fIkgLRwZCN+1JsAbIAZBGt7714PFjbauPbt5FdCNmLVc2PiXbwdq7lOqLRh49fVFKfDyA==}
+  '@daochild/agents-config@2.5.0':
+    resolution: {integrity: sha512-Srttp8lvQ9+Ozt9tZCrEROjxNEEegSCkZx9aAZRjnLgqq0tm+0FfFUoYtLCP2LBCm4jqNoYZyn6/4FM9nfn3Ew==}
+
+  '@daochild/prompt-sanity@0.1.1':
+    resolution: {integrity: sha512-pK+HeAwgzJNmmBGaSm24uNGzRb4B67GZ45b/5F5WpE9oYDt82g6PUTUIdFEA6K8FngB80SygDczDEqzR3d5DGw==}
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.6':
     resolution: {integrity: sha512-ugMD1XQPQ0usC3F1frfZzZsNs9uf9Xyxe86GO078Mg0dVY+FQA8TlPL8P5EQwavZs0dUe2LjWJnt4TyQl3pUvw==}
@@ -162,13 +165,16 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
-  '@daochild/agents-config@2.1.0':
+  '@daochild/agents-config@2.5.0':
     dependencies:
+      '@daochild/prompt-sanity': 0.1.1
       '@opencode-ai/plugin': 1.19.5
     transitivePeerDependencies:
       - '@opentui/core'
       - '@opentui/keymap'
       - '@opentui/solid'
+
+  '@daochild/prompt-sanity@0.1.1': {}
 
   '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.6':
     optional: true
