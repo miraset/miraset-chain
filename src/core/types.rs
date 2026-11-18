@@ -983,7 +983,7 @@ impl AccountState {
 }
 
 /// GPU Worker metadata in MIRASET decentralized compute network.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkerInfo {
     pub worker_id: String,
     pub stake: u64,
