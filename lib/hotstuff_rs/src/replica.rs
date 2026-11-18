@@ -309,6 +309,8 @@ impl
             blacklist_expiry_time: self.block_sync_blacklist_expiry_time,
             block_sync_trigger_min_view_difference: self.block_sync_trigger_min_view_difference,
             block_sync_trigger_timeout: self.block_sync_trigger_timeout,
+            // MIRASET PATCH #20
+            local_key: keypair.public(),
         };
         let block_sync_server_config = BlockSyncServerConfiguration {
             chain_id: self.chain_id,

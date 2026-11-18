@@ -1,5 +1,6 @@
 mod byte_budget;
 pub mod channel;
+mod host_tuning;
 mod inbound;
 pub mod noise;
 pub mod tcp;

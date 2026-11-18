@@ -17,6 +17,10 @@ x-validator: &validator
     nofile:
       soft: 65536
       hard: 65536
+  # One TCP stream per validator pair carries bursty consensus traffic; restarting slow start
+  # after each idle gap made proposals and sync late on WAN links (TODO 8.5.3 findings 36-37).
+  sysctls:
+    net.ipv4.tcp_slow_start_after_idle: 0
   # A consensus safety halt exits with code 3 (TODO 8.3.2); restart so the node recovers.
   restart: on-failure
   networks: [devnet]

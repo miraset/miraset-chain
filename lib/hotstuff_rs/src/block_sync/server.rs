@@ -132,6 +132,21 @@ impl<N: Network + 'static, K: KVStore> BlockSyncServer<N, K> {
 
                 match (blocks_res, highest_pc_res) {
                     (Ok(blocks), Ok(highest_pc)) => {
+                        // MIRASET PATCH #18: every response, to correlate with the client's
+                        // `EndSync` lines (8.5.3 finding 37). Logging only.
+                        log::info!(
+                            target: "hotstuff_rs::block_sync",
+                            "SyncResponse, {}, from height {} limit {}: blocks {}, data bytes {}",
+                            crate::block_sync::client::key_prefix(&origin),
+                            start_height,
+                            limit,
+                            blocks.len(),
+                            blocks
+                                .iter()
+                                .flat_map(|block| block.data.iter())
+                                .map(|datum| datum.bytes().len())
+                                .sum::<usize>(),
+                        );
                         // If there are blocks and a highest PC to return, send a Block Sync Response.
                         self.sender.send(
                             origin,
@@ -149,7 +164,16 @@ impl<N: Network + 'static, K: KVStore> BlockSyncServer<N, K> {
                         })
                         .publish(&self.event_publisher)
                     }
-                    _ => {
+                    (blocks_res, highest_pc_res) => {
+                        // MIRASET PATCH #18: a request left unanswered is logged (upstream: silent).
+                        log::warn!(
+                            target: "hotstuff_rs::block_sync",
+                            "SyncRequestUnanswered, {}, from height {}: blocks {:?}, highest PC {:?}",
+                            crate::block_sync::client::key_prefix(&origin),
+                            start_height,
+                            blocks_res.err(),
+                            highest_pc_res.err(),
+                        );
                         // Otherwise, do not send a response.
                     }
                 }

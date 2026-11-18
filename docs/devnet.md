@@ -232,13 +232,22 @@ taken before the restore), then restart. Restoring a backup taken at the current
   shorter trigger started sync after a single timed-out view, and on a slow link its responses
   (up to 12 MiB) competed with proposals and votes on the same connection.
   `--block-sync-response-timeout-ms` (default 1500) is how long a client waits for one response
-  before ending the session and blacklisting the server for 10 s. A response of up to 12 MiB
-  needs far longer on a lossy WAN stream (≈ 1 MB/s), so a lagging validator may not catch up
-  there; raising this to 10 s did not fix it in the 2026-11-15 measurement (open, TODO 8.5.3).
+  before ending the session (and blacklisting the server for 10 s if it sent fewer blocks than
+  it advertised). The client halves the number of blocks it asks for after each
+  timeout (down to 1) and only then lengthens the wait, up to 8× (vendored patch #19); the
+  longer wait lasts until a response brings new blocks, across sessions. A session sends no
+  further request after 8 response timeouts (12 s). Together with the WAN host setting below,
+  a lagging validator catches up over a lossy WAN stream (`docs/performance-baseline.md`
+  findings 39–40).
 - **WAN hosts:** the transport is one TCP connection per validator pair, so per-stream TCP
-  throughput bounds block propagation. On lossy long-distance links prefer BBR congestion
-  control (`net.ipv4.tcp_congestion_control=bbr`) and `net.ipv4.tcp_slow_start_after_idle=0`;
-  CUBIC halves its rate on random loss. Not measured yet (the devnet host has no BBR module).
+  throughput bounds block propagation. **Set `net.ipv4.tcp_slow_start_after_idle=0`** for the
+  validator's network namespace (`docker-compose.yml` does, per container; on a host,
+  `sysctl -w` and `/etc/sysctl.d/`; with `network_mode: host` compose cannot set it, so set it
+  on the host): otherwise every proposal after an idle gap starts from a
+  10-segment window, and in the 2026-11-18 WAN measurement a lagging validator kept falling
+  behind and 1 000 tx/s committed 10–40 % less (findings 39–41). The node logs a warning at start when
+  it is on. BBR congestion control (`net.ipv4.tcp_congestion_control=bbr`) may help further on
+  lossy links (CUBIC halves its rate on random loss); not measured yet (no BBR module here).
 - **Pacemaker epoch length is a genesis parameter (TODO 8.5.2 F2):** `protocol.consensus_epoch_length`,
   default 1, range 1..=10, logged at startup (`epoch_length=`). It is part of the genesis
   commitment, so validators of one chain share it, and a node refuses to start with chain data

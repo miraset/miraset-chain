@@ -601,10 +601,60 @@ Every run: no fork, agreement OK at every height, no restart or OOM, `p2p_droppe
     drops nothing, so some messages arrive late. Next: a delivery-time histogram per message
     kind in the transport, and BBR plus `tcp_slow_start_after_idle=0` on a host that has BBR.
     This bounds WAN throughput with loss to about 1–2k tx/s on this setup.
+    **Update 2026-11-18:** largely caused by TCP slow start after idle; with it off the share of
+    timed-out views fell from 37–40 % to 9–31 % (finding 39). Still open at that level.
 37. **Open: a lagging validator does not catch up under loss** (8.5.2 F5 note, now measured).
     In three loaded runs one node fell behind (0–0.013 blocks/s) with 16–128 blacklistings. A
     10 s sync response timeout did not help (16 blacklistings, node at 0 blocks/s). A sync
     response of up to 12 MiB over a ~1 MB/s stream, which also carries consensus traffic, is the
     likely cause. The chain kept committing with the other four nodes.
+    **Update 2026-11-18: fixed**, mainly by `tcp_slow_start_after_idle=0`; the sync client
+    fixes reduce the residual lag further (findings 39–41).
 38. **The strict 1 s block interval halves WAN throughput under loss** (1 035 vs 1 892 tx/s at
     5 000 offered). It does not cause the timeouts (0.3 /s either way).
+
+## Lagging validator under WAN load: slow start after idle (2026-11-18)
+
+`scripts/devnet/wan_catchup.sh OUT wan-nojitter 1000` (raw outputs outside the repository):
+the WAN devnet above with 1 000 tx/s offered to node0–3. node4 is frozen with `docker pause`
+for 60 s (its connections and netem shaping kept), then resumed; every 5 s the script records
+all heights for 240 s. It also samples `ss -tin` on every validator and keeps the node logs,
+which now include one `EndSync` line per sync session (vendored patch #18) and the send-delay
+histogram `miraset_p2p_send_delay_seconds{kind}` (time from queueing a message to writing its
+frame). Three runs per variant. "Lag" is the highest height of node0–3 minus node4's, after
+node4 first came within 3 blocks (it did within 5–15 s in every run).
+
+| Variant | Max lag after catch-up | Time > 5 behind | Lag at end | Committed (loadgen) | Pending at end | Timed-out views |
+|---|---|---|---|---|---|---|
+| `59e04aa` | 37 / 63 / 16 | 51 / 81 / 35 % | 1 / 55 / 12 | 814 / 745 / 573 tx/s | 4 k / 21 k / 25 k | — |
+| sync fixes | 12 / 41 / 23 | 23 / 71 / 59 % | 0 / 41 / 16 | 677 / 694 / 645 tx/s | 58 k / 16 k / 24 k | 38 / 37 / 40 % |
+| `59e04aa`, slow start after idle off | 9 / 7 / 6 | 5 / 3 / 11 % | 0 / 3 / 0 | 890 / 981 / 925 tx/s | 0 / 0 / 9 k | 24 / 16 / 28 % |
+| sync fixes, slow start after idle off | **3 / 5 / 4** | **0 / 0 / 0 %** | 2 / 1 / 4 | **1 009 / 1 005 / 910 tx/s** | **0 / 0 / 0** | 9 / 17 / 31 % |
+
+Every run: agreement OK at every height, no fork.
+
+39. **TCP slow start after idle was the main cause of late delivery under loss.** Linux resets a
+    connection's congestion window to 10 segments after one idle retransmission timeout
+    (`net.ipv4.tcp_slow_start_after_idle=1`, the default). Consensus traffic on the one stream
+    per validator pair is bursty, so `ss -tin` showed `cwnd` back at 10 between proposals and
+    every multi-MB proposal or sync response started at ≈ 290 KB/s (50 ms RTT). With the setting
+    at 0 for each validator's network namespace, proposals written more than 0.25 s after
+    queueing fell from 9–12 % to 1–3 % (more than 1 s: 1–3 % to 0–0.4 %), votes from ≈ 3 % to
+    under 1 %. The setting is now in `docker-compose.yml` (`sysctls`, per container), and the
+    node logs a warning at start when it is on (`src/network/host_tuning.rs`); hosts outside
+    compose must set it themselves (`docs/devnet.md`).
+40. **Block sync client bugs found on the way (fixed, vendored patches #18–#21):** a replica
+    synced with itself (its own broadcast advertisement, about one session in five); a response
+    holding only blocks the replica already had was dropped with the PC that would commit them,
+    and the server blacklisted; a late answer to an earlier request was dropped; requests asked
+    for 50 blocks (up to 12 MiB) that could not arrive within the 1.5 s response timeout. The
+    client now adapts the request size (halving to 1 block, then growing the timeout up to 8×),
+    starts a session after its highest certified block, applies known-block responses' PCs and
+    forwards the validator-set updates they commit. Alone these changed little (rows 1–2: within
+    run-to-run variance); with slow start after idle off they reduced the residual lag further
+    (maximum 6–9 → 3–5 blocks, three runs each; rows 3–4).
+41. **Still open:** 9–31 % of views time out at 0.1 % loss with slow start after idle off (none
+    without loss), so finding 36 remains at a lower level; BBR is still unmeasured (no module on
+    this host). The vendored `progress_and_validator_set_update_test` sometimes hangs on
+    `59e04aa` too (2 of 4 runs), unrelated to these changes.
+

@@ -35,6 +35,7 @@ use super::byte_budget::{ByteBudget, Reservation};
 use super::inbound::{Acceptor, Budgets, HANDSHAKE_TIMEOUT};
 use super::noise::{Session, TransportIdentity, TransportRejections, rejection_of};
 use crate::observability::TransportTraffic;
+use crate::observability::send_delay::MessageKind;
 
 /// Largest plaintext message (borsh `Message`).
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -70,8 +71,9 @@ struct PeerQueue {
 }
 
 /// A plaintext message body queued for a peer and the outbound bytes it holds until written or
-/// dropped. Each worker encrypts it in its own session.
-type Outbound = (Arc<Vec<u8>>, Reservation);
+/// dropped, with its kind and queueing time for the send-delay histogram (8.5.3). Each worker
+/// encrypts it in its own session.
+type Outbound = (Arc<Vec<u8>>, Reservation, MessageKind, Instant);
 
 /// A received message, its authenticated origin, and the inbound bytes it holds until the
 /// replica takes it.
@@ -129,6 +131,7 @@ impl TcpNetwork {
     ) -> io::Result<(Self, NetworkRuntime)> {
         let listener = TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
+        super::host_tuning::warn_if_slow_start_after_idle();
 
         let local_key = identity.validator();
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -235,7 +238,7 @@ impl TcpNetwork {
         }
     }
 
-    fn enqueue(&self, peer: &VerifyingKey, body: &Arc<Vec<u8>>) {
+    fn enqueue(&self, peer: &VerifyingKey, body: &Arc<Vec<u8>>, kind: MessageKind) {
         let Some(queue) = self.peer_queues.get(peer) else {
             return;
         };
@@ -246,7 +249,7 @@ impl TcpNetwork {
         // On a full queue the item (and its reservation) is dropped here.
         if queue
             .sender
-            .try_send((Arc::clone(body), reservation))
+            .try_send((Arc::clone(body), reservation, kind, Instant::now()))
             .is_err()
         {
             self.dropped_messages.fetch_add(1, Ordering::Relaxed);
@@ -271,8 +274,9 @@ impl Network for TcpNetwork {
 
     fn broadcast(&mut self, message: Message) {
         if let Some(body) = self.encode(&message) {
+            let kind = MessageKind::of(&message);
             for peer in self.peer_queues.keys() {
-                self.enqueue(peer, &body);
+                self.enqueue(peer, &body, kind);
             }
         }
         self.deliver_local(message);
@@ -282,7 +286,7 @@ impl Network for TcpNetwork {
         if peer == self.local_key {
             self.deliver_local(message);
         } else if let Some(body) = self.encode(&message) {
-            self.enqueue(&peer, &body);
+            self.enqueue(&peer, &body, MessageKind::of(&message));
         }
     }
 
@@ -319,14 +323,16 @@ impl PeerWorker {
         let mut retry_after = Instant::now();
         while !self.shutdown.load(Ordering::Acquire) {
             // The reservation is returned when this iteration ends, written or not.
-            let (body, _reservation) = match self.queue.recv_timeout(WORKER_POLL_INTERVAL) {
-                Ok(item) => item,
-                Err(RecvTimeoutError::Timeout) => continue,
-                Err(RecvTimeoutError::Disconnected) => return,
-            };
+            let (body, _reservation, kind, queued) =
+                match self.queue.recv_timeout(WORKER_POLL_INTERVAL) {
+                    Ok(item) => item,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                };
             let delivered = if connection.is_none() && Instant::now() < retry_after {
                 false
             } else if self.write_frame(&mut connection, &body) {
+                self.traffic.record_send_delay(kind, queued.elapsed());
                 true
             } else {
                 retry_after = Instant::now() + RECONNECT_BACKOFF;
@@ -347,13 +353,25 @@ impl PeerWorker {
             let Some(conn) = connection.as_mut() else {
                 return false;
             };
+            let started = Instant::now();
             let written = conn.session.seal_frame(body).and_then(|frame| {
                 conn.stream.write_all(&frame)?;
                 Ok(frame.len())
             });
-            if let Ok(bytes) = written {
-                self.traffic.record_sent(bytes);
-                return true;
+            match written {
+                Ok(bytes) => {
+                    self.traffic.record_sent(bytes);
+                    return true;
+                }
+                // A failed write drops the connection, the rest of this frame and whatever the
+                // peer had not yet read (8.5.3: visible, not only counted as dropped).
+                Err(error) => tracing::warn!(
+                    address = %self.host,
+                    error_kind = ?error.kind(),
+                    frame_bytes = body.len(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "outbound peer write failed; reconnecting"
+                ),
             }
             *connection = None;
         }

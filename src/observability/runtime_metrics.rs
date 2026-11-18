@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use super::send_delay::{MessageKind, SendDelays};
+
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
@@ -90,6 +92,8 @@ const INTERVAL_MS_BOUNDS: &[u64] = &[50, 100, 250, 500, 1_000, 2_000, 5_000, 10_
 pub struct TransportTraffic {
     sent: AtomicU64,
     received: AtomicU64,
+    /// Outbound queueing-to-written delay by message kind (8.5.3 findings 36–37).
+    send_delays: SendDelays,
 }
 
 impl TransportTraffic {
@@ -101,6 +105,11 @@ impl TransportTraffic {
     /// Bytes of an established-session frame read and decrypted from a peer.
     pub fn record_received(&self, bytes: usize) {
         self.received.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    /// An outbound message of `kind` was written `delay` after it was queued.
+    pub fn record_send_delay(&self, kind: MessageKind, delay: Duration) {
+        self.send_delays.record(kind, delay);
     }
 
     /// Total bytes sent.
@@ -380,6 +389,7 @@ impl RuntimeMetrics {
                 traffic.sent(),
                 traffic.received()
             );
+            traffic.send_delays.render(out);
         }
         render_process(out);
     }
