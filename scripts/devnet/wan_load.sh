@@ -4,7 +4,7 @@
 # one loadgen per rate). Per rate: Prometheus over the last 90 s of load. At the end, with shaping
 # cleared: agreement at every height, node logs, and counts of view timeouts and sync-server
 # blacklistings (`BlacklistSyncServer`, vendored patch #17) per node.
-# Usage: [NODE_ARGS="--flag=v ..."] scripts/devnet/wan_load.sh OUT_DIR PROFILE "RATES"   (repo root)
+# Usage: [NODE_ARGS="--flag=v ..."] [EXTRA_COMPOSE=file.yml] scripts/devnet/wan_load.sh OUT_DIR PROFILE "RATES"   (repo root)
 # NODE_ARGS are appended to every validator's command line (stress-override.yml); a rate of 0 is
 # an idle step (no loadgen, same measurement window).
 #   e.g. scripts/devnet/wan_load.sh ../runs/wan wan "1000 2500 5000 10000"
@@ -28,7 +28,8 @@ if [[ -n "${NODE_ARGS:-}" || "$MIN_BLOCK_INTERVAL_MS" != 1000 ]]; then
   [[ "$(grep -cF -- "--min-block-interval-ms=${MIN_BLOCK_INTERVAL_MS}${extra}]" "$OVERRIDE")" == 5 ]] \
     || { echo "stress-override.yml format changed: node arguments not applied" >&2; exit 1; }
 fi
-C="docker compose -p miraset-measure -f docker-compose.yml -f $OVERRIDE"
+# EXTRA_COMPOSE: one more compose file layered last (e.g. RUST_LOG for the view trace).
+C="docker compose -p miraset-measure -f docker-compose.yml -f $OVERRIDE${EXTRA_COMPOSE:+ -f $EXTRA_COMPOSE}"
 export COMPOSE="$C"
 LOAD_SECS=150 WARMUP_SECS=20 WINDOW_END_SECS=120 SENDERS=256
 RPCS="http://127.0.0.1:8545,http://127.0.0.1:8546,http://127.0.0.1:8547,http://127.0.0.1:8548,http://127.0.0.1:8549"

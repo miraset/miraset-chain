@@ -25,7 +25,7 @@ use crate::node::admission::{self, AdmissionError};
 use crate::node::config::NodeConfig;
 use crate::observability::{
     AdmissionKind, AdmissionReject, Lifecycle, NodeMetrics, NotReadyReason, ReadinessInput,
-    ScrapeState, evaluate_readiness,
+    ScrapeState, evaluate_readiness, view_trace,
 };
 use crate::storage::{
     RecoveryMetadata, STORAGE_SCHEMA_VERSION, read_recovery_metadata, validate_recovery_state,
@@ -246,17 +246,25 @@ impl<K: KVStore, N: Network + 'static> MirasetNode<K, N> {
                 metrics_for_sync_end.record_sync_end(event.blocks_synced)
             })
             .on_start_view(move |event: &StartViewEvent| {
+                view_trace::start_view(event);
                 metrics_for_view.record_view_started();
                 metrics_for_view.runtime().record_view(event.view.int());
             })
-            .on_view_timeout(move |_: &ViewTimeoutEvent| {
+            .on_view_timeout(move |event: &ViewTimeoutEvent| {
+                view_trace::view_timeout(event);
                 let runtime = metrics_for_timeout.runtime();
                 runtime.record_view_timeout();
                 runtime.record_block_budget(budget_for_timeout.record_view_timeout());
             })
-            .on_collect_tc(move |_: &CollectTCEvent| {
+            .on_collect_tc(move |event: &CollectTCEvent| {
+                view_trace::collect_tc(event);
                 metrics_for_tc.runtime().record_timeout_certificate()
             })
+            // Off unless `miraset_chain::view_trace=debug` (TODO 8.5.3 finding 36).
+            .on_propose(view_trace::propose)
+            .on_receive_proposal(view_trace::receive_proposal)
+            .on_receive_phase_vote(view_trace::receive_phase_vote)
+            .on_collect_pc(view_trace::collect_pc)
             .on_commit_block(move |event: &CommitBlockEvent| {
                 // Timed before any work in this handler (I2); sync commits do not form intervals.
                 metrics_for_event

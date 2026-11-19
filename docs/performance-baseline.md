@@ -601,8 +601,8 @@ Every run: no fork, agreement OK at every height, no restart or OOM, `p2p_droppe
     drops nothing, so some messages arrive late. Next: a delivery-time histogram per message
     kind in the transport, and BBR plus `tcp_slow_start_after_idle=0` on a host that has BBR.
     This bounds WAN throughput with loss to about 1–2k tx/s on this setup.
-    **Update 2026-11-18:** largely caused by TCP slow start after idle; with it off the share of
-    timed-out views fell from 37–40 % to 9–31 % (finding 39). Still open at that level.
+    **Update 2026-11-18: fixed.** Mostly a validator that missed one block and could not catch
+    up until a timed sync; vendored patch #22 syncs it at once (findings 42–43).
 37. **Open: a lagging validator does not catch up under loss** (8.5.2 F5 note, now measured).
     In three loaded runs one node fell behind (0–0.013 blocks/s) with 16–128 blacklistings. A
     10 s sync response timeout did not help (16 blacklistings, node at 0 blocks/s). A sync
@@ -653,8 +653,47 @@ Every run: agreement OK at every height, no fork.
     forwards the validator-set updates they commit. Alone these changed little (rows 1–2: within
     run-to-run variance); with slow start after idle off they reduced the residual lag further
     (maximum 6–9 → 3–5 blocks, three runs each; rows 3–4).
-41. **Still open:** 9–31 % of views time out at 0.1 % loss with slow start after idle off (none
-    without loss), so finding 36 remains at a lower level; BBR is still unmeasured (no module on
+41. **Still open after this run:** 9–31 % of views time out at 0.1 % loss with slow start after
+    idle off (explained and fixed in findings 42–43); BBR is still unmeasured (no module on
     this host). The vendored `progress_and_validator_set_update_test` sometimes hangs on
     `59e04aa` too (2 of 4 runs), unrelated to these changes.
+
+## View timeouts under WAN loss: missed certified blocks (2026-11-18)
+
+`scripts/devnet/wan_load.sh OUT wan-nojitter "1000 5000"` on the devnet above, now with
+`tcp_slow_start_after_idle=0` (finding 39). New: a per-view trace
+(`src/observability/view_trace.rs`, `RUST_LOG=info,miraset_chain::view_trace=debug`, passed with
+`EXTRA_COMPOSE`): view start, proposal sent and received with its payload size, votes received,
+certificates collected and timeouts, with event timestamps that merge across nodes.
+
+| Variant | Offered | Committed (loadgen) | Backlog at end | View timeouts /s | Blocks /s |
+|---|---|---|---|---|---|
+| 2026-11-15, adaptive budget | 1 000 / 5 000 | 917 / 1 035 tx/s | 0 / 14 k | 0.23–0.27 / 0.31–0.33 | 0.41–0.48 / 0.31–0.35 |
+| slow start after idle off | 1 000 / 5 000 | 872 / 2 678 tx/s | 0 / 6 k | 0.29–0.32 / 0.27–0.28 | 0.45–0.55 / 0.40–0.51 |
+| same, view trace on | 1 000 | 1 039 tx/s | 0 | 0.25–0.28 | 0.53–0.57 |
+| + patch #22, run 1 | 1 000 / 5 000 | 1 003 / **4 448 tx/s** | 0 / 26 k | **0 / 0–0.02** | 0.99–1.00 / 0.96–0.99 |
+| + patch #22, run 2 | 1 000 / 5 000 | 1 003 / **4 447 tx/s** | 0 / 0 | **0 / 0–0.01** | 0.99–1.00 / 0.96–1.00 |
+
+Every run: agreement OK at every height. One run each except patch #22 (two).
+
+42. **Most view timeouts under loss came from one validator that had missed a block** (finding
+    36, now explained). In the traced run 18 of 183 views timed out. In 13 of them node3 led: the
+    proposal reached all validators within 0.1 s, but only node3 voted, because it proposed on a
+    stale branch. Node3 had missed one proposal in eight over its slower inbound link (a proposal
+    arriving after the replica left its view is dropped). Without the parent block it could not
+    insert later proposals, so it also could not vote, and every view it led timed out. The
+    other 5 were node0's views with 1.8–3.6 MB blocks: with node3 unable to vote, quorum needed
+    all four other votes, and they arrived 1.3–1.7 s into the 2 s view. Upstream's event trigger
+    never started a sync: it compares an advertised PC's view with the highest view *entered*,
+    and node3 kept entering views through timeout certificates. Its timer waits 6 s after any
+    progress, so node3 synced a few blocks every 7–10 s and fell behind again.
+43. **Fixed by vendored patch #22:** a correct advertised PC for a block the replica does not
+    hold, at least two views above its highest PC, starts a sync at once (never twice for the same
+    block, at least 1 s after the previous such session). View timeouts fell to 0–0.02/s, blocks
+    reached the 1 s interval limit, and 5 000 tx/s offered committed 4 450 tx/s (2.6k before, 1.0k
+    on 2026-11-15). Review fixes (spacing measured from the end of a session, no repeat for a
+    block, timers reset only if a session ran) landed after these two runs and were not
+    re-measured; nor was a no-loss (LAN) check for needless syncs. Across a validator-set change
+    the patch falls back to upstream's triggers (a PC for an unknown block is checked against the
+    committed set).
 

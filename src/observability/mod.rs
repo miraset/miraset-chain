@@ -5,6 +5,7 @@ pub mod metrics;
 pub mod readiness;
 pub mod runtime_metrics;
 pub mod send_delay;
+pub mod view_trace;
 pub mod vote_refusals;
 
 pub use logging::{LogFormat, init_logging};

@@ -95,7 +95,7 @@ use crate::{
     },
     types::{
         block::Block,
-        data_types::{BlockHeight, ChainID, ViewNumber},
+        data_types::{BlockHeight, ChainID, CryptoHash, ViewNumber},
         signed_messages::{Certificate, SignedMessage},
         update_sets::ValidatorSetUpdates,
         validator_set::ValidatorSetUpdatesStatus,
@@ -238,6 +238,37 @@ impl<N: Network> BlockSyncClient<N> {
             return Ok(());
         }
 
+        // MIRASET PATCH #22: a correct PC at least two views above our highest PC, for a block
+        // we do not hold, means we missed a certified block. Without it we cannot insert later
+        // proposals (their parent is unknown) and propose on a stale branch when we lead, so every
+        // view we lead times out (8.5.3 finding 36: one validator missed ~1 proposal in 8 over
+        // its slow inbound link and fell behind for minutes). Upstream's view-based trigger never
+        // fires there, because the replica keeps entering views through timeout certificates,
+        // and its timer waits for `block_sync_trigger_timeout` (6 s) after any progress. Sync at
+        // once instead, at most once per `MIN_GAP_SYNC_INTERVAL`.
+        let highest_pc_view = block_tree.highest_pc()?.view;
+        if misses_certified_blocks(
+            advertise_pc.highest_pc.view.int(),
+            block_tree.contains(&advertise_pc.highest_pc.block),
+            highest_pc_view.int(),
+        ) && gap_sync_allowed(
+            self.block_sync_client_state.last_gap_sync.as_ref(),
+            &advertise_pc.highest_pc.block,
+            Instant::now(),
+        ) && advertise_pc.highest_pc.is_correct(block_tree)?
+        {
+            let synced = self.sync(block_tree, app);
+            // Measured from the end of the session, so the consensus thread gets at least
+            // `MIN_GAP_SYNC_INTERVAL` between sessions (8.5.3 review), also after an error.
+            if !matches!(synced, Ok(false)) {
+                self.block_sync_client_state.last_gap_sync =
+                    Some((Instant::now(), advertise_pc.highest_pc.block));
+                self.block_sync_client_state.last_progress_or_sync_time = Instant::now();
+            }
+            synced?;
+            return Ok(());
+        }
+
         // If the advertised PC has smaller view number than the highest view entered,
         // then it cannot trigger sync.
         if advertise_pc.highest_pc.view < highest_view_entered {
@@ -314,15 +345,16 @@ impl<N: Network> BlockSyncClient<N> {
         &mut self,
         block_tree: &mut BlockTreeSingleton<K>,
         app: &mut impl App<K>,
-    ) -> Result<(), BlockSyncClientError> {
+    ) -> Result<bool, BlockSyncClientError> {
         let highest_committed_block_height = block_tree.highest_committed_block_height()?;
+        // MIRASET PATCH #22: returns whether a session ran (no sync server: `false`).
         if let Some(peer) = self
             .block_sync_client_state
             .random_sync_server(&highest_committed_block_height)
         {
-            self.sync_with(&peer, block_tree, app)
+            self.sync_with(&peer, block_tree, app).map(|()| true)
         } else {
-            Ok(())
+            Ok(false)
         }
     }
 
@@ -697,6 +729,37 @@ impl<N: Network> BlockSyncClient<N> {
     }
 }
 
+/// MIRASET PATCH #22: shortest time between two syncs started by [`misses_certified_blocks`].
+pub(crate) const MIN_GAP_SYNC_INTERVAL: Duration = Duration::from_secs(1);
+
+/// MIRASET PATCH #22: whether a sync for the missed certified block `block` may start at `now`:
+/// never twice for the same block (if it stays unknown, upstream's timer still syncs), and not
+/// within `MIN_GAP_SYNC_INTERVAL` of the end of the last such sync.
+pub(crate) fn gap_sync_allowed(
+    last: Option<&(Instant, CryptoHash)>,
+    block: &CryptoHash,
+    now: Instant,
+) -> bool {
+    last.is_none_or(|(ended, last_block)| {
+        last_block != block && now.saturating_duration_since(*ended) >= MIN_GAP_SYNC_INTERVAL
+    })
+}
+
+/// MIRASET PATCH #22: whether an advertised PC shows that we missed a certified block: its block
+/// is not in our block tree and its view is at least two above our highest PC's. One view above
+/// is the normal race of a PC overtaking its block's proposal (the next leader certified the block
+/// and advertised before the proposal reached us), so it does not count.
+pub(crate) fn misses_certified_blocks(
+    advertised_pc_view: u64,
+    advertised_block_known: bool,
+    highest_pc_view: u64,
+) -> bool {
+    !advertised_block_known
+        && highest_pc_view
+            .checked_add(2)
+            .is_some_and(|min| advertised_pc_view >= min)
+}
+
 /// MIRASET PATCH #21: known-block responses in a row that commit nothing before a session ends.
 const MAX_KNOWN_BLOCK_STEPS: u32 = 4;
 
@@ -895,6 +958,9 @@ struct BlockSyncClientState {
 
     /// Cached value of `block_tree.highest_pc().view`.
     highest_pc_view: ViewNumber,
+
+    /// MIRASET PATCH #22: when the last sync for a missed certified block ended, and that block.
+    last_gap_sync: Option<(Instant, CryptoHash)>,
 }
 
 impl BlockSyncClientState {
@@ -905,6 +971,7 @@ impl BlockSyncClientState {
             blacklist: VecDeque::new(),
             last_progress_or_sync_time: Instant::now(),
             highest_pc_view: ViewNumber::new(0),
+            last_gap_sync: None,
         }
     }
 
@@ -1090,3 +1157,7 @@ mod stale_response_tests;
 #[cfg(test)]
 #[path = "blacklist_decision_tests.rs"]
 mod blacklist_decision_tests;
+
+#[cfg(test)]
+#[path = "gap_sync_tests.rs"]
+mod gap_sync_tests;
