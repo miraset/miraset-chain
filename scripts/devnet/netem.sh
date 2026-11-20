@@ -14,14 +14,15 @@
 #                                                TCP reads that as loss, 8.5.3 WAN under load)
 #   wan-noloss       25ms fixed, no loss      -> separates latency from loss-limited TCP throughput
 #
-# Usage: scripts/devnet/netem.sh <lan|wan|wan-far|wan-nojitter|wan-far-nojitter|wan-noloss|show>
+# Usage: [NETEM_NODES="node1 ..."] scripts/devnet/netem.sh <lan|wan|wan-far|wan-nojitter|wan-far-nojitter|wan-noloss|show>
 # Needs a running devnet; builds the `miraset-nettools:local` sidecar image on first use.
 set -euo pipefail
 
 COMPOSE="${COMPOSE:-docker compose}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMAGE=miraset-nettools:local
-NODES=(node0 node1 node2 node3 node4)
+# NETEM_NODES: apply to these services only (e.g. one restarted container), default all five.
+read -r -a NODES <<< "${NETEM_NODES:-node0 node1 node2 node3 node4}"
 
 profile_args() {
   case "$1" in

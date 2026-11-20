@@ -1,7 +1,7 @@
 """Query the observe-profile Prometheus for measurement runs (TODO 8.5.3). Usage: prom_query.py WINDOW (e.g. 90s)."""
-import json, sys, urllib.parse, urllib.request
+import json, os, sys, urllib.parse, urllib.request
 
-PROM = "http://127.0.0.1:9090/api/v1/query"
+PROM = f"http://127.0.0.1:{os.environ.get('MIRASET_PROMETHEUS_PORT', '9090')}/api/v1/query"
 WINDOW = sys.argv[1] if len(sys.argv) > 1 else "25m"
 
 def q(expr):

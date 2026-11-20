@@ -114,7 +114,8 @@ services:
     volumes:
       - ./scripts/devnet/observe/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
-    ports: ["127.0.0.1:9090:9090"]
+    # MIRASET_PROMETHEUS_PORT: another host service may hold 9090 (scripts/devnet/prom_query.py reads it too).
+    ports: ["127.0.0.1:${MIRASET_PROMETHEUS_PORT:-9090}:9090"]
     networks: [devnet]
 
   grafana:
@@ -129,7 +130,7 @@ services:
       - ./scripts/devnet/observe/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./scripts/devnet/observe/grafana/dashboards:/var/lib/grafana/dashboards:ro
       - grafana-data:/var/lib/grafana
-    ports: ["127.0.0.1:3000:3000"]
+    ports: ["127.0.0.1:${MIRASET_GRAFANA_PORT:-3000}:3000"]
     networks: [devnet]
 
 networks:
